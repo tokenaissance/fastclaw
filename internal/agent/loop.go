@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 )
@@ -19,6 +21,7 @@ type Agent struct {
 	sessions          *session.Manager
 	memory            *Memory
 	ctxBuilder        *ContextBuilder
+	mcpMgr            *mcp.Manager
 	model             string
 	maxTokens         int
 	temperature       float64
@@ -40,7 +43,7 @@ func NewAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBu
 		slog.Info("loaded skills", "agent", rc.ID, "count", len(skills))
 	}
 
-	return &Agent{
+	ag := &Agent{
 		name:              rc.ID,
 		provider:          prov,
 		registry:          registry,
@@ -52,6 +55,27 @@ func NewAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBu
 		temperature:       rc.Temperature,
 		maxToolIterations: rc.MaxToolIterations,
 	}
+
+	// Connect MCP servers and register their tools
+	if len(rc.MCPServers) > 0 {
+		mcpMgr := mcp.NewManager(rc.MCPServers)
+		ag.mcpMgr = mcpMgr
+
+		for _, td := range mcpMgr.ToolDefs() {
+			toolName := td.Name
+			ag.registry.Register(toolName, td.Description, td.InputSchema,
+				func(ctx context.Context, args json.RawMessage) (string, error) {
+					return mcpMgr.CallTool(ctx, toolName, args)
+				},
+			)
+		}
+
+		if mcpMgr.HasTools() {
+			slog.Info("registered MCP tools", "agent", rc.ID)
+		}
+	}
+
+	return ag
 }
 
 // Name returns the agent's name.

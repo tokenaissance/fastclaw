@@ -8,12 +8,23 @@ import (
 	"strings"
 )
 
+// MCPServerConfig holds configuration for a single MCP server.
+type MCPServerConfig struct {
+	Type    string            `json:"type"`              // "http" or "stdio"
+	URL     string            `json:"url,omitempty"`     // for http
+	Headers map[string]string `json:"headers,omitempty"` // for http
+	Command string            `json:"command,omitempty"` // for stdio
+	Args    []string          `json:"args,omitempty"`    // for stdio
+	Env     map[string]string `json:"env,omitempty"`     // for stdio
+}
+
 // Config is the top-level configuration loaded from ~/.fastclaw/config.json.
 type Config struct {
-	Providers map[string]ProviderConfig `json:"providers"`
-	Agents    AgentsConfig              `json:"agents"`
-	Channels  map[string]ChannelConfig  `json:"channels"`
-	Bindings  []Binding                 `json:"bindings,omitempty"`
+	Providers  map[string]ProviderConfig  `json:"providers"`
+	Agents     AgentsConfig               `json:"agents"`
+	Channels   map[string]ChannelConfig   `json:"channels"`
+	Bindings   []Binding                  `json:"bindings,omitempty"`
+	MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 }
 
 // ProviderConfig holds API credentials for an LLM provider.
@@ -79,11 +90,12 @@ type Peer struct {
 
 // AgentFileConfig is the schema for agent.json inside an agent workspace.
 type AgentFileConfig struct {
-	Model             string       `json:"model,omitempty"`
-	MaxTokens         int          `json:"maxTokens,omitempty"`
-	Temperature       float64      `json:"temperature,omitempty"`
-	MaxToolIterations int          `json:"maxToolIterations,omitempty"`
-	Skills            SkillsConfig `json:"skills,omitempty"`
+	Model             string                     `json:"model,omitempty"`
+	MaxTokens         int                        `json:"maxTokens,omitempty"`
+	Temperature       float64                    `json:"temperature,omitempty"`
+	MaxToolIterations int                        `json:"maxToolIterations,omitempty"`
+	Skills            SkillsConfig               `json:"skills,omitempty"`
+	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 }
 
 // SkillsConfig controls skill loading for an agent.
@@ -101,6 +113,7 @@ type ResolvedAgent struct {
 	Temperature       float64
 	MaxToolIterations int
 	Skills            SkillsConfig
+	MCPServers        map[string]MCPServerConfig
 }
 
 // TeamConfig is the schema for team.json.
@@ -197,6 +210,14 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 		resolved.MaxToolIterations = entry.MaxToolIterations
 	}
 
+	// Start with global MCP servers
+	if len(cfg.MCPServers) > 0 {
+		resolved.MCPServers = make(map[string]MCPServerConfig, len(cfg.MCPServers))
+		for k, v := range cfg.MCPServers {
+			resolved.MCPServers[k] = v
+		}
+	}
+
 	// Layer 3: agent.json in workspace (highest priority)
 	agentJSON := filepath.Join(workspace, "agent.json")
 	if data, readErr := os.ReadFile(agentJSON); readErr == nil {
@@ -215,6 +236,14 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 				resolved.MaxToolIterations = fileCfg.MaxToolIterations
 			}
 			resolved.Skills = fileCfg.Skills
+
+			// Merge per-agent MCP servers (agent-level overrides global)
+			for k, v := range fileCfg.MCPServers {
+				if resolved.MCPServers == nil {
+					resolved.MCPServers = make(map[string]MCPServerConfig)
+				}
+				resolved.MCPServers[k] = v
+			}
 		}
 	}
 
