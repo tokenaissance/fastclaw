@@ -44,3 +44,4 @@ config.json
 # Debug
 debug/
 __debug_bin*
+DESIGN.md
