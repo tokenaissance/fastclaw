@@ -1,0 +1,98 @@
+#!/bin/bash
+set -euo pipefail
+
+# FastClaw Release Script
+# Usage: ./scripts/release.sh v0.1.0
+
+VERSION="${1:-}"
+if [ -z "$VERSION" ]; then
+    echo "Usage: $0 <version>"
+    echo "Example: $0 v0.1.0"
+    exit 1
+fi
+
+# Strip 'v' prefix for directory names
+VER="${VERSION#v}"
+BINARY="fastclaw"
+DIST_DIR="dist"
+MODULE="github.com/fastclaw-ai/fastclaw"
+
+echo "⚡ Building FastClaw ${VERSION}"
+echo ""
+
+# Clean
+rm -rf "$DIST_DIR"
+mkdir -p "$DIST_DIR"
+
+# Build matrix
+PLATFORMS=(
+    "darwin/amd64"
+    "darwin/arm64"
+    "linux/amd64"
+    "linux/arm64"
+    "linux/armv7"
+    "windows/amd64"
+)
+
+for platform in "${PLATFORMS[@]}"; do
+    os="${platform%/*}"
+    arch="${platform#*/}"
+
+    # Handle armv7
+    goarch="$arch"
+    goarm=""
+    if [ "$arch" = "armv7" ]; then
+        goarch="arm"
+        goarm="7"
+    fi
+
+    output="${BINARY}"
+    [ "$os" = "windows" ] && output="${BINARY}.exe"
+
+    echo "  Building ${os}/${arch}..."
+
+    env GOOS="$os" GOARCH="$goarch" GOARM="$goarm" CGO_ENABLED=0 \
+        go build -ldflags="-s -w -X main.version=${VER}" \
+        -o "${DIST_DIR}/${output}" \
+        "./cmd/${BINARY}"
+
+    # Package
+    pkg_name="${BINARY}_${VER}_${os}_${arch}"
+    pkg_dir="${DIST_DIR}/${pkg_name}"
+    mkdir -p "$pkg_dir"
+
+    cp "${DIST_DIR}/${output}" "$pkg_dir/"
+    cp LICENSE "$pkg_dir/" 2>/dev/null || true
+    cp README.md "$pkg_dir/"
+
+    cd "$DIST_DIR"
+    if [ "$os" = "windows" ]; then
+        zip -q "${pkg_name}.zip" -r "${pkg_name}/"
+    else
+        tar czf "${pkg_name}.tar.gz" "${pkg_name}/"
+    fi
+    cd ..
+
+    # Cleanup
+    rm -rf "$pkg_dir" "${DIST_DIR}/${output}"
+done
+
+# Generate checksums
+cd "$DIST_DIR"
+shasum -a 256 *.tar.gz *.zip 2>/dev/null > checksums.txt
+cd ..
+
+echo ""
+echo "✓ Release artifacts in ${DIST_DIR}/:"
+ls -lh "$DIST_DIR"/*.tar.gz "$DIST_DIR"/*.zip 2>/dev/null
+echo ""
+echo "Checksums:"
+cat "$DIST_DIR/checksums.txt"
+echo ""
+echo "Next steps:"
+echo "  1. git tag ${VERSION}"
+echo "  2. git push origin ${VERSION}"
+echo "  3. Create GitHub release and upload ${DIST_DIR}/* files"
+echo ""
+echo "Or use gh CLI:"
+echo "  gh release create ${VERSION} ${DIST_DIR}/*.tar.gz ${DIST_DIR}/*.zip ${DIST_DIR}/checksums.txt --title \"FastClaw ${VERSION}\" --generate-notes"
