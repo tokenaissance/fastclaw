@@ -67,7 +67,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	// Serve static files with SPA fallback
-	mux.Handle("/", spaHandler{fs: http.FS(webRoot)})
+	mux.Handle("/", spaHandler{fs: webRoot})
 
 	addr := fmt.Sprintf(":%d", s.port)
 	srv := &http.Server{
@@ -98,46 +98,59 @@ func (s *Server) Run(ctx context.Context) error {
 // spaHandler serves static files, falling back to the directory's index.html
 // for paths that don't match a file (to support client-side routing).
 type spaHandler struct {
-	fs http.FileSystem
+	fs fs.FS
 }
 
 func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
-	// Try to open the file directly
-	f, err := h.fs.Open(path)
+	// Strip trailing slash (except root) to normalize
+	if path != "/" && strings.HasSuffix(path, "/") {
+		path = strings.TrimSuffix(path, "/")
+	}
+
+	// fs.FS paths don't have leading slash
+	fsPath := strings.TrimPrefix(path, "/")
+	if fsPath == "" {
+		fsPath = "."
+	}
+
+	// Try to open the file directly (static assets like .js, .css, .ico)
+	f, err := h.fs.Open(fsPath)
 	if err == nil {
 		stat, statErr := f.Stat()
 		f.Close()
 		if statErr == nil && !stat.IsDir() {
-			http.FileServer(h.fs).ServeHTTP(w, r)
+			http.ServeFileFS(w, r, h.fs, fsPath)
 			return
 		}
 	}
 
-	// Try path/index.html (for directory-style routes like /overview/)
-	indexPath := strings.TrimSuffix(path, "/") + "/index.html"
+	// For route paths (/onboard, /overview, /chat), look for index.html in that dir
+	var indexPath string
+	if fsPath == "." {
+		indexPath = "index.html"
+	} else {
+		indexPath = fsPath + "/index.html"
+	}
 	f, err = h.fs.Open(indexPath)
 	if err == nil {
 		f.Close()
-		r.URL.Path = indexPath
-		http.FileServer(h.fs).ServeHTTP(w, r)
+		http.ServeFileFS(w, r, h.fs, indexPath)
 		return
 	}
 
-	// Try path.html (for non-trailing-slash routes like /overview)
-	htmlPath := strings.TrimSuffix(path, "/") + ".html"
+	// Try path.html
+	htmlPath := fsPath + ".html"
 	f, err = h.fs.Open(htmlPath)
 	if err == nil {
 		f.Close()
-		r.URL.Path = htmlPath
-		http.FileServer(h.fs).ServeHTTP(w, r)
+		http.ServeFileFS(w, r, h.fs, htmlPath)
 		return
 	}
 
-	// Fall back to /index.html for client-side routing
-	r.URL.Path = "/index.html"
-	http.FileServer(h.fs).ServeHTTP(w, r)
+	// Fall back to index.html for client-side routing
+	http.ServeFileFS(w, r, h.fs, "index.html")
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
