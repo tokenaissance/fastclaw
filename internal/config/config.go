@@ -18,13 +18,32 @@ type MCPServerConfig struct {
 	Env     map[string]string `json:"env,omitempty"`     // for stdio
 }
 
-// Config is the top-level configuration loaded from ~/.fastclaw/config.json.
+// CronJob defines a scheduled job in the configuration.
+type CronJob struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`     // "exact", "interval", "cron"
+	Schedule string `json:"schedule"` // depends on type
+	AgentID  string `json:"agentId"`
+	Channel  string `json:"channel"`
+	ChatID   string `json:"chatId"`
+	Message  string `json:"message"`
+}
+
+// HeartbeatCfg holds heartbeat configuration.
+type HeartbeatCfg struct {
+	IntervalMinutes int `json:"intervalMinutes,omitempty"` // default 30
+}
+
+// Config is the top-level configuration loaded from ~/.fastclaw/fastclaw.json.
 type Config struct {
 	Providers  map[string]ProviderConfig  `json:"providers"`
 	Agents     AgentsConfig               `json:"agents"`
 	Channels   map[string]ChannelConfig   `json:"channels"`
 	Bindings   []Binding                  `json:"bindings,omitempty"`
+	Teams      map[string]TeamEntry       `json:"teams,omitempty"`
 	MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	CronJobs   []CronJob                  `json:"cronJobs,omitempty"`
+	Heartbeat  HeartbeatCfg               `json:"heartbeat,omitempty"`
 }
 
 // ProviderConfig holds API credentials for an LLM provider.
@@ -116,6 +135,13 @@ type ResolvedAgent struct {
 	MCPServers        map[string]MCPServerConfig
 }
 
+// TeamEntry defines a team of agents with group chat behavior settings.
+type TeamEntry struct {
+	Agents        []string `json:"agents"`
+	DefaultAgent  string   `json:"defaultAgent,omitempty"`
+	GroupBehavior string   `json:"groupBehavior,omitempty"` // "mention-only" (default) or "default-agent"
+}
+
 // TeamConfig is the schema for team.json.
 type TeamConfig struct {
 	Name    string            `json:"name"`
@@ -143,14 +169,14 @@ func expandPath(path string) string {
 	return path
 }
 
-// Load reads and parses ~/.fastclaw/config.json.
+// Load reads and parses ~/.fastclaw/fastclaw.json.
 func Load() (*Config, error) {
 	homeDir, err := HomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("get home dir: %w", err)
 	}
 
-	configPath := filepath.Join(homeDir, "config.json")
+	configPath := filepath.Join(homeDir, "fastclaw.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", configPath, err)

@@ -2,12 +2,16 @@ package bus
 
 // InboundMessage represents a message received from a channel.
 type InboundMessage struct {
-	Channel   string // channel type, e.g. "telegram"
-	AccountID string // account within the channel (e.g. which bot)
-	ChatID    string // unique chat identifier within the channel
-	UserID    string // user identifier
-	Text      string // message text
-	PeerKind  string // "group" or "dm"
+	Channel      string   // channel type, e.g. "telegram"
+	AccountID    string   // account within the channel (e.g. which bot)
+	ChatID       string   // unique chat identifier within the channel
+	UserID       string   // user identifier
+	MessageID    string   // unique message identifier within the chat
+	Text         string   // message text
+	PeerKind     string   // "group" or "dm"
+	SenderName   string   // display name of the sender
+	Mentions     []string // @usernames mentioned in the message
+	IsBotMessage bool     // true if the message was sent by a bot
 }
 
 // OutboundMessage represents a message to be sent to a channel.

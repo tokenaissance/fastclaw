@@ -80,7 +80,7 @@ go install github.com/fastclaw-ai/fastclaw/cmd/fastclaw@latest
 
 ### Configure
 
-Create `~/.fastclaw/config.json`:
+Create `~/.openclaw/config.json`:
 
 ```json
 {
@@ -92,7 +92,7 @@ Create `~/.fastclaw/config.json`:
   },
   "agents": {
     "defaults": {
-      "workspace": "~/.fastclaw/workspace",
+      "workspace": "~/.openclaw/workspace",
       "model": "gpt-4o",
       "maxTokens": 8192,
       "temperature": 0.7,
@@ -128,7 +128,7 @@ Now open Telegram and send a message to your bot. That's it.
 
 ### Workspace
 
-FastClaw uses a file-based workspace at `~/.fastclaw/workspace/`:
+FastClaw uses a file-based workspace at `~/.openclaw/workspace/`:
 
 ```
 workspace/

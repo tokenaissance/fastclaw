@@ -73,6 +73,16 @@ func (m *Manager) routeOutbound(ctx context.Context) {
 	}
 }
 
+// BotUsername returns the bot username for a given channel:accountID pair.
+func (m *Manager) BotUsername(channel, accountID string) string {
+	key := channelKey(channel, accountID)
+	ch, ok := m.channels[key]
+	if !ok {
+		return ""
+	}
+	return ch.BotUsername()
+}
+
 func channelKey(channel, accountID string) string {
 	if accountID == "" {
 		return channel + ":"

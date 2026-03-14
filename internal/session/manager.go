@@ -95,6 +95,20 @@ func (s *Session) MarkConsolidated(index int) {
 	s.LastConsolidated = index
 }
 
+// ReplaceMessages replaces all session messages with the given list.
+// This is used after context compaction to trim the session.
+func (s *Session) ReplaceMessages(msgs []provider.Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Messages = make([]provider.Message, len(msgs))
+	copy(s.Messages, msgs)
+	s.LastConsolidated = 0
+
+	// Rewrite the session file
+	s.rewriteFile()
+}
+
 // Clear resets the session messages.
 func (s *Session) Clear() {
 	s.mu.Lock()
@@ -120,6 +134,27 @@ func (s *Session) load() {
 			continue
 		}
 		s.Messages = append(s.Messages, msg)
+	}
+}
+
+func (s *Session) rewriteFile() {
+	dir := filepath.Dir(s.filePath)
+	os.MkdirAll(dir, 0o755)
+
+	f, err := os.Create(s.filePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "session rewrite error: %v\n", err)
+		return
+	}
+	defer f.Close()
+
+	for _, msg := range s.Messages {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		f.Write(data)
+		f.Write([]byte("\n"))
 	}
 }
 
