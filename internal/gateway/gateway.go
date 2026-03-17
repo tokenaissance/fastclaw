@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
+	"github.com/fastclaw-ai/fastclaw/internal/plugin"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/webhook"
 )
@@ -41,6 +43,7 @@ type Gateway struct {
 	heartbeats   []*agent.Heartbeat
 	scheduler    *cron.Scheduler
 	webhookSrv   *webhook.Server
+	pluginMgr    *plugin.Manager
 }
 
 // New creates a new Gateway with multi-agent support.
@@ -165,6 +168,34 @@ func New(cfg *config.Config) (*Gateway, error) {
 		webhookSrv = webhook.NewServer(cfg.Hooks.Token, cfg.Hooks.Path, &webhookAgentHandler{agents: agentMgr})
 	}
 
+	// Set up plugin manager
+	var pluginMgr *plugin.Manager
+	if cfg.Plugins.Enabled {
+		pluginMgr = plugin.NewManager(mb)
+
+		homeDir, _ := config.HomeDir()
+		pluginPaths := []string{filepath.Join(homeDir, "plugins")}
+		for _, p := range cfg.Plugins.Paths {
+			pluginPaths = append(pluginPaths, p)
+		}
+
+		if err := pluginMgr.Discover(pluginPaths); err != nil {
+			slog.Warn("plugin discovery error", "error", err)
+		}
+
+		// Apply per-plugin config
+		if len(cfg.Plugins.Entries) > 0 {
+			entries := make(map[string]plugin.PluginEntryCfg, len(cfg.Plugins.Entries))
+			for k, v := range cfg.Plugins.Entries {
+				entries[k] = plugin.PluginEntryCfg{
+					Enabled: v.Enabled,
+					Config:  v.Config,
+				}
+			}
+			pluginMgr.ApplyConfig(entries)
+		}
+	}
+
 	return &Gateway{
 		config:       cfg,
 		bus:          mb,
@@ -176,6 +207,7 @@ func New(cfg *config.Config) (*Gateway, error) {
 		heartbeats:   heartbeats,
 		scheduler:    scheduler,
 		webhookSrv:   webhookSrv,
+		pluginMgr:    pluginMgr,
 	}, nil
 }
 
@@ -323,9 +355,38 @@ func (g *Gateway) Run() error {
 		}()
 	}
 
+	// Start plugins if enabled
+	if g.pluginMgr != nil {
+		if err := g.pluginMgr.StartAll(ctx); err != nil {
+			slog.Error("plugin start error", "error", err)
+		}
+
+		// Register channel adapters for channel plugins
+		for _, inst := range g.pluginMgr.ChannelPlugins() {
+			adapter := plugin.NewChannelAdapter(g.pluginMgr, inst.Manifest.ID)
+			g.chanMgr.Register(adapter)
+			slog.Info("registered plugin channel", "plugin", inst.Manifest.ID)
+		}
+
+		// Register tool plugins with all agents
+		for _, inst := range g.pluginMgr.ToolPlugins() {
+			for _, ag := range g.agents.All() {
+				if err := plugin.RegisterPluginTools(ctx, g.pluginMgr, inst.Manifest.ID, ag.ToolRegistry()); err != nil {
+					slog.Error("register plugin tools failed", "plugin", inst.Manifest.ID, "agent", ag.Name(), "error", err)
+				}
+			}
+		}
+	}
+
 	slog.Info("gateway started")
 
 	wg.Wait()
+
+	// Stop plugins on shutdown
+	if g.pluginMgr != nil {
+		g.pluginMgr.StopAll()
+	}
+
 	slog.Info("gateway stopped")
 	return nil
 }

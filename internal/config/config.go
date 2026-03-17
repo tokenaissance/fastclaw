@@ -57,6 +57,19 @@ type HooksCfg struct {
 	Port    int    `json:"port,omitempty"`  // default 18954
 }
 
+// PluginsCfg configures the plugin system.
+type PluginsCfg struct {
+	Enabled bool                       `json:"enabled"`
+	Paths   []string                   `json:"paths,omitempty"`
+	Entries map[string]PluginEntryCfg  `json:"entries,omitempty"`
+}
+
+// PluginEntryCfg is per-plugin configuration.
+type PluginEntryCfg struct {
+	Enabled bool                   `json:"enabled"`
+	Config  map[string]interface{} `json:"config,omitempty"`
+}
+
 // Config is the top-level configuration loaded from ~/.fastclaw/fastclaw.json.
 type Config struct {
 	Providers  map[string]ProviderConfig  `json:"providers"`
@@ -70,6 +83,7 @@ type Config struct {
 	Storage    StorageCfg                 `json:"storage,omitempty"`
 	WebSearch  WebSearchCfg               `json:"webSearch,omitempty"`
 	Hooks      HooksCfg                   `json:"hooks,omitempty"`
+	Plugins    PluginsCfg                 `json:"plugins,omitempty"`
 }
 
 // ProviderConfig holds API credentials for an LLM provider.

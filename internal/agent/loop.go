@@ -155,6 +155,11 @@ func (a *Agent) SetSubAgentSpawner(spawner tools.SubAgentSpawner) {
 	tools.RegisterSubAgent(a.registry, spawner, a.name)
 }
 
+// ToolRegistry returns the agent's tool registry for external registration.
+func (a *Agent) ToolRegistry() *tools.Registry {
+	return a.registry
+}
+
 // RegisterWebSearchTool registers the web_search tool with the given API key.
 func (a *Agent) RegisterWebSearchTool(apiKey string) {
 	tools.RegisterWebSearch(a.registry, apiKey)

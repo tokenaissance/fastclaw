@@ -37,6 +37,7 @@ func main() {
 	rootCmd.AddCommand(doctorCmd())
 	rootCmd.AddCommand(backupCmd())
 	rootCmd.AddCommand(resetCmd())
+	rootCmd.AddCommand(pluginCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
