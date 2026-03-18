@@ -4,286 +4,344 @@
 
 A lightweight, self-hosted AI Agent framework written in Go.
 
-[Website](https://fastclaw.ai) · [Documentation](https://fastclaw.ai/docs) · [Discord](https://discord.gg/fastclaw)
-
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/fastclaw-ai/fastclaw?style=flat)](https://github.com/fastclaw-ai/fastclaw)
+[![Release](https://img.shields.io/github/v/release/fastclaw-ai/fastclaw?include_prereleases)](https://github.com/fastclaw-ai/fastclaw/releases)
+
+**Single binary · Any LLM · Multi-channel · Plugin system · Web dashboard**
+
+[Install](#-install) · [Quick Start](#-quick-start) · [Features](#-features) · [Documentation](#-documentation)
 
 </div>
 
 ---
 
-FastClaw is a minimal, self-hosted AI agent that connects to your chat platforms and gets things done. It runs on your own machine, uses any LLM provider, and learns about you over time. Built with Go for speed and simplicity — single binary, zero dependencies.
+## What is FastClaw?
 
-## ✨ Features
+FastClaw is a self-hosted AI agent runtime. It connects your LLM to chat platforms, executes tools, manages memory, and runs scheduled tasks — all from a single Go binary with zero dependencies.
 
-- **ReAct Agent Loop** — Reasoning + Acting cycle with multi-turn tool calling
-- **Multi-Channel** — Telegram with multi-bot support (more coming: Discord, Slack, WhatsApp...)
-- **Any LLM** — Works with any OpenAI-compatible provider (OpenAI, Claude, DeepSeek, Gemini, OpenRouter...)
-- **Context Engineering** — Auto-pruning & compression to handle long conversations without context overflow
-- **Dual-Layer Memory** — Long-term facts (MEMORY.md) + searchable conversation history with recency weighting
-- **Hook System** — Before/After hooks for system prompt, model calls, and tool calls
-- **CronTab + Heartbeat** — Scheduled tasks and periodic wake-ups for proactive behavior
-- **Skill System** — Progressive disclosure: 100+ skills without bloating context
-- **Built-in Tools** — Shell, file ops, web fetch, memory search, cross-channel messaging
-- **MCP Support** — Connect external tools via Model Context Protocol (HTTP + stdio)
-- **Multi-Agent** — Run multiple agents with independent personalities and workspaces
-- **Single Binary** — No Docker, no cloud services, no dependencies required
-
-## 🏗 Architecture
-
+```bash
+curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/dev/install.sh | bash
+fastclaw    # Opens setup wizard in browser
 ```
-┌──────────────────────────────────────────────────────────┐
-│                       Gateway                             │
-│                                                           │
-│  ┌───────────┐   ┌──────────┐   ┌──────────────────────┐ │
-│  │ Channels  │──▶│   Bus    │──▶│     Agent Loop       │ │
-│  │           │◀──│          │◀──│                      │ │
-│  │ Telegram  │   │ Inbound/ │   │  System Prompt Build │ │
-│  │ Discord*  │   │ Outbound │   │  ReAct Cycle         │ │
-│  │ Slack*    │   │          │   │  Tool Execution      │ │
-│  └───────────┘   └──────────┘   │  Context Compaction  │ │
-│                                  └──────────────────────┘ │
-│                                                           │
-│  ┌───────────┐   ┌──────────┐   ┌──────────────────────┐ │
-│  │  Session  │   │  Memory  │   │       Tools          │ │
-│  │  Manager  │   │          │   │                      │ │
-│  │           │   │ MEMORY.md│   │ exec, files, web     │ │
-│  │ JSONL     │   │ Logs/    │   │ memory_search        │ │
-│  │ Compaction│   │ Search   │   │ load_skill, message  │ │
-│  └───────────┘   └──────────┘   │ MCP tools            │ │
-│                                  └──────────────────────┘ │
-│                                                           │
-│  ┌───────────┐   ┌──────────┐   ┌──────────────────────┐ │
-│  │   Hooks   │   │   Cron   │   │     Heartbeat        │ │
-│  │           │   │ Scheduler│   │   (every 30 min)     │ │
-│  │ Pre/Post  │   │          │   │                      │ │
-│  │ Logging   │   │ Exact    │   │ Check task list      │ │
-│  │ Timing    │   │ Interval │   │ Update memory        │ │
-│  └───────────┘   │ Cron Expr│   │ Proactive actions    │ │
-│                   └──────────┘   └──────────────────────┘ │
-└──────────────────────────────────────────────────────────┘
-                        * planned
+
+## 📦 Install
+
+**One-liner (macOS / Linux):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/dev/install.sh | bash
+```
+
+**Windows:** Download `.zip` from [Releases](https://github.com/fastclaw-ai/fastclaw/releases), extract, double-click `fastclaw.exe`.
+
+**Already installed?**
+
+```bash
+fastclaw upgrade
+```
+
+**From source:**
+
+```bash
+git clone https://github.com/fastclaw-ai/fastclaw.git
+cd fastclaw && make build
 ```
 
 ## 🚀 Quick Start
 
-### Install (one-liner)
+1. Run `fastclaw` — browser opens the setup wizard at `http://localhost:18953`
+2. Pick your LLM provider (OpenAI, OpenRouter, DeepSeek, Groq, Ollama...)
+3. Add a Telegram bot token (optional)
+4. Click Launch ⚡
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/main/install.sh | bash
+That's it. Your agent is live.
+
+## ✨ Features
+
+### Core
+
+| Feature | Description |
+|---------|-------------|
+| **ReAct Agent Loop** | Multi-turn reasoning + tool calling |
+| **Any LLM** | OpenAI-compatible API (OpenAI, Claude, DeepSeek, Gemini, Groq, Ollama, OpenRouter) |
+| **Multi-Agent** | Multiple agents with independent personalities, memory, and skills |
+| **Context Engineering** | Auto-pruning & LLM compression for long conversations |
+| **Dual-Layer Memory** | MEMORY.md (facts) + searchable conversation logs |
+| **Hook System** | Before/After hooks on prompts, model calls, tool calls |
+| **Hot Reload** | Edit config or SOUL.md → takes effect immediately, no restart |
+
+### Channels
+
+| Channel | Status |
+|---------|--------|
+| Telegram | ✅ Multi-bot, groups, DMs |
+| Discord | ✅ Bot API + Gateway |
+| Slack | ✅ Socket Mode |
+| Web Chat | ✅ Built-in at /chat |
+| Plugin channels | ✅ Add any channel via plugin |
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `exec` | Shell commands (with optional Docker sandbox) |
+| `read_file` / `write_file` / `list_dir` | File operations |
+| `web_fetch` | Fetch web pages → markdown |
+| `web_search` | Brave Search API |
+| `memory_search` | Search conversation history |
+| `message` | Send messages to any channel |
+| `spawn_subagent` | Delegate tasks to other agents |
+| `create_cron_job` / `list_cron_jobs` / `delete_cron_job` | Manage scheduled tasks |
+| `load_skill` | Load skill instructions on demand |
+| MCP tools | Connect external tools via Model Context Protocol |
+
+### Automation
+
+| Feature | Description |
+|---------|-------------|
+| **CronTab** | Schedule tasks: cron expressions, intervals, one-time |
+| **Heartbeat** | Agent wakes every 30 min to check HEARTBEAT.md |
+| **Webhooks** | POST /hooks to trigger agent actions from external systems |
+| **Slash Commands** | `/new` `/compact` `/status` `/help` `/version` |
+
+### Security (inspired by [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell))
+
+| Feature | Description |
+|---------|-------------|
+| **Sandbox Exec** | Docker-based isolated command execution |
+| **Policy Engine** | YAML policies for filesystem, network, tools, resources |
+| **Credential Manager** | AES-256-GCM encrypted key storage, env auto-discovery |
+| **Tool Loop Detection** | Breaks after 3 identical consecutive calls |
+
+### Platform
+
+| Feature | Description |
+|---------|-------------|
+| **Web Dashboard** | Full management UI at localhost:18953 |
+| **Plugin System** | JSON-RPC subprocess plugins (any language) |
+| **Pluggable Storage** | File (default), PostgreSQL, SQLite |
+| **OpenAI-Compatible API** | `POST /v1/chat/completions` with SSE streaming |
+| **WebSocket Gateway** | OpenClaw-compatible protocol |
+| **ChatClaw Integration** | Works as ChatClaw backend runtime |
+
+## 🏗 Architecture
+
+```
+                    ┌─────────────────────────────────────────────┐
+                    │              FastClaw Gateway                │
+                    │                                             │
+  Telegram ────────▶│  ┌──────────┐    ┌──────────────────────┐  │
+  Discord ─────────▶│  │ Message  │    │    Agent Manager     │  │
+  Slack ───────────▶│  │   Bus    │───▶│                      │  │
+  Web UI ──────────▶│  │          │◀───│  Agent 1 (Mike)      │  │
+  Webhooks ────────▶│  │          │    │  Agent 2 (Mary)      │  │
+  Plugins ─────────▶│  └──────────┘    │  Agent N ...         │  │
+                    │                   └──────────────────────┘  │
+                    │                            │                │
+                    │        ┌───────────────────┼──────────┐    │
+                    │        ▼                   ▼          ▼    │
+                    │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
+                    │  │  Tools   │  │  Memory  │  │ Sessions │ │
+                    │  │          │  │          │  │          │ │
+                    │  │ exec     │  │MEMORY.md │  │ JSONL    │ │
+                    │  │ files    │  │ logs/    │  │ compress │ │
+                    │  │ web      │  │ search   │  │ per-chat │ │
+                    │  │ MCP      │  │          │  │          │ │
+                    │  └──────────┘  └──────────┘  └──────────┘ │
+                    │                                             │
+                    │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
+                    │  │  Cron    │  │ Plugins  │  │  Policy  │ │
+                    │  │ Schedule │  │ JSON-RPC │  │  Engine  │ │
+                    │  │ Heartbeat│  │ channels │  │  Sandbox │ │
+                    │  │ Webhooks │  │ tools    │  │  Creds   │ │
+                    │  └──────────┘  └──────────┘  └──────────┘ │
+                    │                                             │
+                    │  ┌──────────────────────────────────────┐  │
+                    │  │     /v1/chat/completions (SSE)       │  │
+                    │  │     /ws (WebSocket)                  │  │
+                    │  │     /api/* (REST)                    │  │
+                    │  │     Web Dashboard (:18953)           │  │
+                    │  └──────────────────────────────────────┘  │
+                    └─────────────────────────────────────────────┘
 ```
 
-Or with Go:
+## 📁 Agent Workspace
 
-```bash
-go install github.com/fastclaw-ai/fastclaw/cmd/fastclaw@latest
+Each agent has its own workspace:
+
+```
+~/.fastclaw/agents/mike/agent/
+├── SOUL.md         # Personality & communication style
+├── IDENTITY.md     # Name, role, specialty
+├── AGENTS.md       # Behavior instructions
+├── USER.md         # About the user (auto-learns)
+├── TOOLS.md        # Tool usage notes
+├── MEMORY.md       # Long-term facts (auto-updated)
+├── HEARTBEAT.md    # Periodic task checklist
+├── policy.yaml     # Security policy (optional)
+├── agent.json      # Model & config overrides
+├── memory/         # Searchable conversation logs
+├── sessions/       # JSONL conversation files
+└── skills/         # Agent-specific skills
 ```
 
-Or download a pre-built binary from [Releases](https://github.com/fastclaw-ai/fastclaw/releases).
+## 🔌 Plugin System
 
-### Configure
+Extend FastClaw with plugins in any language. Plugins communicate via JSON-RPC over stdin/stdout.
 
-Create `~/.fastclaw/fastclaw.json`:
+```
+~/.fastclaw/plugins/feishu/
+├── plugin.json     # Manifest: id, type, command
+└── plugin.py       # Implementation (Python/Node/Go/...)
+```
+
+**Plugin types:** `channel` · `tool` · `provider` · `hook`
 
 ```json
 {
-  "providers": {
-    "openai": {
-      "apiKey": "your-api-key",
-      "apiBase": "https://api.openai.com/v1"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "gpt-4o",
-      "maxTokens": 8192,
-      "temperature": 0.7,
-      "maxToolIterations": 20
-    },
-    "list": [
-      { "id": "main", "workspace": "~/.fastclaw/agents/main/agent" }
-    ]
-  },
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "accounts": {
-        "default": {
-          "botToken": "your-telegram-bot-token"
-        }
-      }
+  "plugins": {
+    "enabled": true,
+    "entries": {
+      "feishu": { "enabled": true, "config": {"appId": "...", "appSecret": "..."} }
     }
   }
 }
 ```
 
-**Supported LLM providers:**
+See [examples/plugins/echo/](examples/plugins/echo/) for a complete example.
 
-| Provider | apiBase | Example Model |
-|----------|---------|---------------|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
-| Anthropic (via OpenRouter) | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4` |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
-| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b` |
-| Local (Ollama) | `http://localhost:11434/v1` | `qwen2.5:32b` |
+## 🖥 Web Dashboard
 
-### Run
+Full management UI at `http://localhost:18953`:
+
+| Page | What you can do |
+|------|----------------|
+| Overview | Gateway status, stats, quick actions |
+| Chat | Talk to your agents in the browser |
+| Agents | Create, edit, delete agents; edit SOUL.md |
+| Skills | View and manage installed skills |
+| Plugins | Enable/disable plugins, edit config |
+| Channels | Channel status and configuration |
+| Cron Jobs | Create and manage scheduled tasks |
+| Settings | Provider, storage, webhook config |
+
+## 🔗 API
+
+FastClaw exposes an OpenAI-compatible API for programmatic access:
 
 ```bash
-fastclaw gateway
+# Chat with an agent (SSE streaming)
+curl -X POST http://localhost:18953/v1/chat/completions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "x-openclaw-agent-id: mike" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"hello"}],"stream":true}'
+
+# List agents
+curl http://localhost:18953/v1/agents -H "Authorization: Bearer $TOKEN"
 ```
 
-Open Telegram and message your bot. That's it. ⚡
+**ChatClaw integration:** FastClaw works as a drop-in backend for [ChatClaw](https://github.com/user/chatclaw). Auto-detected via `~/.openclaw/openclaw.json`.
 
-## 📁 Workspace
+## 🔒 Security
 
-Each agent has its own workspace with Markdown-based configuration:
-
-```
-workspace/
-├── AGENTS.md       # Agent behavior instructions & SOP
-├── SOUL.md         # Personality, values, communication style
-├── IDENTITY.md     # Name, role, specialty
-├── USER.md         # User profile (auto-updated as agent learns about you)
-├── TOOLS.md        # Tool usage notes & environment specifics
-├── MEMORY.md       # Long-term facts (auto-updated by heartbeat)
-├── HEARTBEAT.md    # Periodic task checklist
-├── memory/
-│   └── logs/       # Compressed conversation history (searchable)
-├── sessions/       # JSONL conversation files
-└── skills/         # Agent-specific skills
-```
-
-Edit these files to customize your agent. The agent can also update `USER.md` and `MEMORY.md` on its own as it learns.
-
-## 🔧 Built-in Tools
-
-| Tool | Description |
-|------|-------------|
-| `exec` | Execute shell commands with timeout |
-| `read_file` | Read file contents |
-| `write_file` | Write or create files |
-| `list_dir` | List directory contents |
-| `web_fetch` | Fetch web pages, strip HTML, return text |
-| `memory_search` | Search conversation history with keyword matching |
-| `load_skill` | Load full skill instructions on demand |
-| `message` | Send messages to any connected channel |
-
-Plus any tools connected via **MCP** (Model Context Protocol).
-
-## 🧠 Memory System
-
-FastClaw implements a dual-layer memory architecture:
-
-**Layer 1: MEMORY.md** — Core facts auto-extracted during heartbeat. Loaded into every system prompt. The agent knows your preferences, important dates, ongoing projects.
-
-**Layer 2: Memory Search** — Full conversation history stored as logs. Searchable via `memory_search` tool with keyword matching and time-decay weighting. The agent can recall details from hundreds of conversations ago.
-
-## ⏰ Proactive Behavior
-
-FastClaw doesn't just wait for you — it comes to you.
-
-**CronTab** — Schedule tasks in `cron.json`:
-- Exact time: `"2026-03-15T08:00:00"`
-- Interval: `"every 20m"`
-- Cron expression: `"0 8 * * 1-5"` (weekdays at 8am)
-
-**Heartbeat** — Wakes every 30 minutes to check `HEARTBEAT.md`. If something needs attention (a reminder, a birthday, a follow-up), it acts proactively.
-
-## 🎯 Skills
-
-Skills are plug-and-play capability packs. Install them in `~/.fastclaw/skills/`:
-
-```
-~/.fastclaw/skills/
-├── skill-creator/
-│   └── SKILL.md
-├── weather/
-│   └── SKILL.md
-└── translator/
-    └── SKILL.md
-```
-
-**Progressive disclosure**: Only skill names + one-line summaries go into the system prompt. Full instructions are loaded on-demand via `load_skill` — so 100+ skills won't blow up your context.
-
-## 🤖 Multi-Agent
-
-Run multiple agents with different personalities on the same gateway:
+**Sandbox execution** — Run agent commands in Docker containers:
 
 ```json
-{
-  "agents": {
-    "list": [
-      { "id": "mike", "workspace": "~/.fastclaw/agents/mike/agent" },
-      { "id": "mary", "workspace": "~/.fastclaw/agents/mary/agent" }
-    ]
-  },
-  "channels": {
-    "telegram": {
-      "accounts": {
-        "mike": { "botToken": "MIKE_BOT_TOKEN" },
-        "mary": { "botToken": "MARY_BOT_TOKEN" }
-      }
-    }
-  },
-  "bindings": [
-    { "agentId": "mike", "match": { "channel": "telegram", "accountId": "mike" } },
-    { "agentId": "mary", "match": { "channel": "telegram", "accountId": "mary" } }
-  ]
-}
+{"sandbox": {"enabled": true, "image": "fastclaw/sandbox:latest"}}
 ```
 
-Each agent has its own workspace, personality, memory, and skills.
+**Policy engine** — Declarative YAML policies:
 
-## 📋 Roadmap
+```yaml
+name: standard
+filesystem:
+  allowRead: ["/workspace/**"]
+  denyWrite: ["/etc/**"]
+network:
+  mode: allowlist
+  outbound:
+    - host: api.openai.com
+      ports: [443]
+tools:
+  deny: ["exec"]
+```
 
-- [x] Gateway with message bus
-- [x] ReAct agent loop with tool calling
-- [x] OpenAI-compatible LLM provider (streaming SSE)
-- [x] Telegram channel (multi-bot, groups, DMs)
-- [x] Session persistence (JSONL)
-- [x] Dual-layer memory system
-- [x] Context pruning & compression
-- [x] Hook system (pre/post for prompts, model, tools)
-- [x] CronTab scheduled tasks
-- [x] Heartbeat proactive service
-- [x] Skill system with progressive disclosure
-- [x] MCP protocol support (HTTP + stdio)
-- [x] Web fetch tool
-- [x] Multi-agent routing with bindings
-- [ ] Discord channel
-- [ ] Slack channel
-- [ ] WhatsApp channel
-- [ ] Vector-based memory search (SQLite + embeddings)
-- [ ] Web dashboard
-- [ ] Plugin system
+**Credential manager** — Encrypted key storage:
+
+```bash
+fastclaw provider create openai --from-env
+fastclaw provider list
+```
+
+## 🛠 CLI Reference
+
+```bash
+# Core
+fastclaw                    # Start (setup wizard or gateway)
+fastclaw gateway            # Start gateway explicitly
+fastclaw version            # Version info
+fastclaw doctor             # Check config health
+fastclaw upgrade            # Update to latest
+
+# Agents
+fastclaw agent create mike  # Create new agent
+fastclaw agent list          # List agents
+
+# Sessions
+fastclaw session list        # List sessions
+fastclaw session clear KEY   # Clear a session
+fastclaw session clear-all   # Clear all sessions
+
+# Skills
+fastclaw skill list          # List installed skills
+fastclaw skill remove NAME   # Remove a skill
+
+# Plugins
+fastclaw plugin list         # List plugins
+fastclaw plugin install PATH # Install plugin
+fastclaw plugin remove ID    # Remove plugin
+
+# Security
+fastclaw provider list       # List credential providers
+fastclaw provider create ... # Add credentials
+fastclaw sandbox create      # Create Docker sandbox
+fastclaw sandbox list        # List sandboxes
+fastclaw policy list         # List policies
+
+# Maintenance
+fastclaw backup              # Backup ~/.fastclaw/
+fastclaw reset               # Reset sessions & memory
+```
+
+## 🧩 Storage
+
+| Backend | Use Case | Config |
+|---------|----------|--------|
+| **File** (default) | Single user, zero config | — |
+| **SQLite** | Single user, structured queries | `{"storage": {"type": "sqlite", "dsn": "file:fastclaw.db"}}` |
+| **PostgreSQL** | Multi-tenant cloud | `{"storage": {"type": "postgres", "dsn": "postgres://..."}}` |
 
 ## 🛠 Development
 
 ```bash
-# Clone
 git clone https://github.com/fastclaw-ai/fastclaw.git
 cd fastclaw
 
-# Build
-go build -o fastclaw ./cmd/fastclaw
-
-# Run tests
-go test ./...
-
-# Run
-./fastclaw gateway
+make build          # Build binary
+make build-web      # Build web UI
+make release-local  # Build all platforms
+make test           # Run tests
 ```
 
 ## Contributing
 
-Contributions welcome! Keep it simple — FastClaw's strength is its minimal codebase.
+Contributions welcome. FastClaw's strength is simplicity — keep it that way.
 
-1. Fork → Clone → Branch → Code → Test → PR
-2. Follow [Conventional Commits](https://www.conventionalcommits.org/)
-3. Use Go standard library when possible
+1. Fork → Branch → Code → PR
+2. `go build ./...` must pass
+3. Follow [Conventional Commits](https://www.conventionalcommits.org/)
 
 ## License
 
@@ -292,5 +350,5 @@ Contributions welcome! Keep it simple — FastClaw's strength is its minimal cod
 ---
 
 <div align="center">
-  Built with ⚡ by the <a href="https://fastclaw.ai">FastClaw</a> community
+  <sub>Built with ⚡ by the FastClaw community</sub>
 </div>
