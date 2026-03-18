@@ -16,6 +16,9 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
+	"github.com/fastclaw-ai/fastclaw/internal/policy"
+	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 )
 
 var (
@@ -865,6 +868,258 @@ func pluginRemoveCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Plugin %q removed.\n", id)
+			return nil
+		},
+	}
+}
+
+// providerCmd handles provider/credential management subcommands.
+func providerCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "provider",
+		Short: "Manage provider credentials",
+	}
+	cmd.AddCommand(providerListCmd())
+	cmd.AddCommand(providerCreateCmd())
+	cmd.AddCommand(providerDeleteCmd())
+	return cmd
+}
+
+func providerListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List all credential providers",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cm, err := provider.NewCredentialManager("")
+			if err != nil {
+				return err
+			}
+
+			// Show stored credentials
+			stored := cm.List()
+			if len(stored) > 0 {
+				fmt.Println("Stored credentials:")
+				for _, e := range stored {
+					for k, v := range e.Keys {
+						fmt.Printf("  %-15s %-10s %s=%s\n", e.Name, e.Source, k, v)
+					}
+				}
+			}
+
+			// Show discovered from env
+			discovered := cm.Discover()
+			if len(discovered) > 0 {
+				fmt.Println("\nDiscovered from environment:")
+				for _, e := range discovered {
+					for k, v := range e.Keys {
+						masked := v
+						if len(v) > 8 {
+							masked = v[:4] + "..." + v[len(v)-4:]
+						}
+						fmt.Printf("  %-15s %-10s %s=%s\n", e.Name, e.Source, k, masked)
+					}
+				}
+			}
+
+			if len(stored) == 0 && len(discovered) == 0 {
+				fmt.Println("No credentials found.")
+			}
+
+			return nil
+		},
+	}
+}
+
+func providerCreateCmd() *cobra.Command {
+	var fromEnv bool
+	var key string
+	cmd := &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a provider credential",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			cm, err := provider.NewCredentialManager("")
+			if err != nil {
+				return err
+			}
+
+			if fromEnv {
+				discovered := cm.Discover()
+				for _, d := range discovered {
+					if d.Name == name {
+						for k, v := range d.Keys {
+							if err := cm.Set(name, k, v); err != nil {
+								return err
+							}
+						}
+						fmt.Printf("Provider %q created from environment.\n", name)
+						return nil
+					}
+				}
+				return fmt.Errorf("no environment variable found for provider %q", name)
+			}
+
+			if key == "" {
+				return fmt.Errorf("either --from-env or --key is required")
+			}
+
+			if err := cm.Set(name, "apiKey", key); err != nil {
+				return err
+			}
+			fmt.Printf("Provider %q created.\n", name)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&fromEnv, "from-env", false, "Create from environment variable")
+	cmd.Flags().StringVar(&key, "key", "", "API key value")
+	return cmd
+}
+
+func providerDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <name>",
+		Short: "Remove a provider credential",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			cm, err := provider.NewCredentialManager("")
+			if err != nil {
+				return err
+			}
+			if err := cm.Delete(name); err != nil {
+				return err
+			}
+			fmt.Printf("Provider %q deleted.\n", name)
+			return nil
+		},
+	}
+}
+
+// sandboxCmd handles sandbox management subcommands.
+func sandboxCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "sandbox",
+		Short: "Manage sandboxed execution environments",
+	}
+	cmd.AddCommand(sandboxCreateCmd())
+	cmd.AddCommand(sandboxListCmd())
+	cmd.AddCommand(sandboxConnectCmd())
+	cmd.AddCommand(sandboxDestroyCmd())
+	return cmd
+}
+
+func sandboxCreateCmd() *cobra.Command {
+	var image string
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a standalone sandbox container",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sb := sandbox.NewDockerSandbox(image, "", nil)
+			if err := sb.Create(); err != nil {
+				return fmt.Errorf("create sandbox: %w", err)
+			}
+			fmt.Printf("Sandbox created: %s (image: %s)\n", sb.ContainerID(), image)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&image, "image", "fastclaw/sandbox:latest", "Docker image to use")
+	return cmd
+}
+
+func sandboxListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List running sandbox containers",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			listCmd := exec.Command("docker", "ps", "--filter", "label=fastclaw=sandbox", "--format",
+				"table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}")
+			listCmd.Stdout = os.Stdout
+			listCmd.Stderr = os.Stderr
+			return listCmd.Run()
+		},
+	}
+}
+
+func sandboxConnectCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "connect <container-id>",
+		Short: "Exec into a sandbox container",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			execCmd := exec.Command("docker", "exec", "-it", args[0], "/bin/sh")
+			execCmd.Stdin = os.Stdin
+			execCmd.Stdout = os.Stdout
+			execCmd.Stderr = os.Stderr
+			return execCmd.Run()
+		},
+	}
+}
+
+func sandboxDestroyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "destroy <container-id>",
+		Short: "Remove a sandbox container",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rmCmd := exec.Command("docker", "rm", "-f", args[0])
+			rmCmd.Stdout = os.Stdout
+			rmCmd.Stderr = os.Stderr
+			if err := rmCmd.Run(); err != nil {
+				return err
+			}
+			fmt.Printf("Sandbox %s destroyed.\n", args[0])
+			return nil
+		},
+	}
+}
+
+// policyCmd handles policy management subcommands.
+func policyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "policy",
+		Short: "Manage agent policies",
+	}
+	cmd.AddCommand(policyListCmd())
+	cmd.AddCommand(policyShowCmd())
+	return cmd
+}
+
+func policyListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List available policy presets",
+		Run: func(cmd *cobra.Command, args []string) {
+			presets := []struct {
+				name string
+				p    *policy.Policy
+			}{
+				{"permissive", policy.DefaultPolicy()},
+				{"standard", policy.StandardPolicy()},
+				{"restricted", policy.RestrictedPolicy()},
+			}
+			fmt.Printf("%-15s %s\n", "NAME", "DESCRIPTION")
+			for _, pr := range presets {
+				fmt.Printf("%-15s %s\n", pr.p.Name, pr.p.Description)
+			}
+		},
+	}
+}
+
+func policyShowCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show <name>",
+		Short: "Show policy details",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			p := policy.LoadPreset(name)
+
+			data, err := json.MarshalIndent(p, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(data))
 			return nil
 		},
 	}

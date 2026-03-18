@@ -68,6 +68,11 @@ func (r *Registry) Execute(ctx context.Context, name string, args string) (strin
 	return result, nil
 }
 
+// SetSandboxConfig updates the exec tool to use sandbox mode.
+func (r *Registry) SetSandboxConfig(sbCfg *SandboxConfig) {
+	registerExecWithSandbox(r, sbCfg)
+}
+
 func (r *Registry) registerBuiltins(workspace string) {
 	registerExec(r)
 	registerFile(r, workspace)

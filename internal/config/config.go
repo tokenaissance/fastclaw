@@ -70,6 +70,13 @@ type PluginEntryCfg struct {
 	Config  map[string]interface{} `json:"config,omitempty"`
 }
 
+// SandboxCfg holds sandbox configuration for an agent.
+type SandboxCfg struct {
+	Enabled bool   `json:"enabled"`
+	Image   string `json:"image,omitempty"`
+	Policy  string `json:"policy,omitempty"` // policy preset name
+}
+
 // GatewayAuth holds authentication settings for the gateway API.
 type GatewayAuth struct {
 	Token string `json:"token"`
@@ -132,6 +139,8 @@ type AgentEntry struct {
 	MCPServers        map[string]MCPServerConfig `json:"mcpServers,omitempty"`
 	AlwaysLoadSkills  []string                   `json:"alwaysLoadSkills,omitempty"`
 	Thinking          string                     `json:"thinking,omitempty"` // off, low, medium, high, adaptive
+	Sandbox           SandboxCfg                 `json:"sandbox,omitempty"`
+	PolicyPreset      string                     `json:"policy,omitempty"`  // "permissive", "standard", "restricted"
 }
 
 // ChannelConfig holds per-channel configuration with optional accounts.
@@ -193,6 +202,8 @@ type ResolvedAgent struct {
 	Thinking          string
 	Skills            SkillsConfig
 	MCPServers        map[string]MCPServerConfig
+	Sandbox           SandboxCfg
+	PolicyPreset      string
 }
 
 // TeamEntry defines a team of agents with group chat behavior settings.
@@ -298,6 +309,12 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 	}
 	if entry.Thinking != "" {
 		resolved.Thinking = entry.Thinking
+	}
+	if entry.Sandbox.Enabled {
+		resolved.Sandbox = entry.Sandbox
+	}
+	if entry.PolicyPreset != "" {
+		resolved.PolicyPreset = entry.PolicyPreset
 	}
 
 	// Start with global MCP servers
