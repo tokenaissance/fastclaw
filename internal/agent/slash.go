@@ -23,8 +23,17 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 
 	parts := strings.Fields(text)
 	cmd := strings.ToLower(parts[0])
+	// Strip @botname suffix from Telegram commands: /status@mybot → /status
+	if idx := strings.Index(cmd, "@"); idx > 0 {
+		cmd = cmd[:idx]
+	}
 
 	switch cmd {
+	case "/start":
+		return slashResult{
+			handled: true,
+			reply:   fmt.Sprintf("👋 Hi! I'm %s, your AI assistant.\n\nJust send me a message to chat. Use /help to see available commands.", a.name),
+		}
 	case "/new", "/reset":
 		sess := a.sessions.Get(msg.Channel, msg.ChatID)
 		sess.Clear()

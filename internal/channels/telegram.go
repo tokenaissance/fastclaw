@@ -59,6 +59,9 @@ func (t *Telegram) BotUsername() string {
 
 // Start begins long polling for Telegram updates.
 func (t *Telegram) Start(ctx context.Context) error {
+	// Register bot commands so users see them in the / menu
+	t.registerCommands()
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
@@ -210,6 +213,24 @@ func (t *Telegram) handleCallbackQuery(cq *tgbotapi.CallbackQuery) {
 		PeerKind:     peerKind,
 		SenderName:   senderName,
 		IsBotMessage: false,
+	}
+}
+
+// registerCommands sets the bot command menu visible to users.
+func (t *Telegram) registerCommands() {
+	commands := []tgbotapi.BotCommand{
+		{Command: "start", Description: "Start the bot"},
+		{Command: "new", Description: "Start a new conversation"},
+		{Command: "status", Description: "Show agent status"},
+		{Command: "compact", Description: "Compress conversation history"},
+		{Command: "help", Description: "Show available commands"},
+		{Command: "version", Description: "Show version info"},
+	}
+	cfg := tgbotapi.NewSetMyCommands(commands...)
+	if _, err := t.bot.Request(cfg); err != nil {
+		slog.Warn("failed to set bot commands", "error", err)
+	} else {
+		slog.Info("registered bot commands", "account", t.accountID, "count", len(commands))
 	}
 }
 
