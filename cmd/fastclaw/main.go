@@ -90,17 +90,34 @@ func runGateway(port int) error {
 	}
 
 	// Start web UI server alongside gateway
+	gwCfg := &cfg.Gateway
+	if gwCfg.Port > 0 {
+		port = gwCfg.Port
+	}
+
 	webSrv := setup.NewServer(port, nil)
 	webSrv.SetAgentProvider(&agentProviderAdapter{mgr: gw.AgentManager()})
+	webSrv.SetGatewayConfig(gwCfg)
 
 	// Set up OpenAI-compatible API and WebSocket gateway
 	gatewayToken := cfg.Gateway.Auth.Token
-	apiSrv := api.NewServer(gw.AgentManager(), gatewayToken)
+	apiSrv := api.NewServer(gw.AgentManager(), gatewayToken, gwCfg)
 	webSrv.SetAPIServer(apiSrv)
 
-	if gatewayToken != "" {
-		slog.Info("gateway API enabled", "port", port, "auth", "token")
+	bindMode := gwCfg.Bind
+	if bindMode == "" {
+		bindMode = "loopback"
 	}
+	authMode := gwCfg.Auth.Mode
+	if authMode == "" {
+		authMode = "token"
+	}
+	slog.Info("gateway API enabled",
+		"port", port,
+		"bind", bindMode,
+		"auth", authMode,
+		"chatCompletions", gwCfg.HTTP.Endpoints.ChatCompletions.Enabled,
+	)
 
 	// Write openclaw.json for ChatClaw auto-detect
 	writeOpenClawConfig(port, gatewayToken)

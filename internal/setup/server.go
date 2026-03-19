@@ -29,6 +29,8 @@ type AgentProvider interface {
 // Server serves the setup wizard UI and handles config API endpoints.
 type Server struct {
 	port          int
+	bind          string // "loopback" or "all"
+	gatewayCfg    *config.GatewayCfg
 	onConfig      func(*config.Config) // called after config is saved
 	agentProvider AgentProvider
 	apiServer     *api.Server
@@ -37,7 +39,18 @@ type Server struct {
 
 // NewServer creates a setup wizard server on the given port.
 func NewServer(port int, onConfig func(*config.Config)) *Server {
-	return &Server{port: port, onConfig: onConfig, startedAt: time.Now()}
+	return &Server{port: port, bind: "loopback", onConfig: onConfig, startedAt: time.Now()}
+}
+
+// SetGatewayConfig sets the gateway configuration for bind address and HTTP endpoints.
+func (s *Server) SetGatewayConfig(cfg *config.GatewayCfg) {
+	s.gatewayCfg = cfg
+	if cfg.Bind != "" {
+		s.bind = cfg.Bind
+	}
+	if cfg.Port > 0 {
+		s.port = cfg.Port
+	}
 }
 
 // SetAgentProvider sets the agent provider for chat and status endpoints.
@@ -100,7 +113,13 @@ func (s *Server) Run(ctx context.Context) error {
 	// Serve static files with SPA fallback
 	mux.Handle("/", spaHandler{fs: webRoot})
 
-	addr := fmt.Sprintf(":%d", s.port)
+	// Determine bind address
+	var addr string
+	if s.bind == "all" {
+		addr = fmt.Sprintf("0.0.0.0:%d", s.port)
+	} else {
+		addr = fmt.Sprintf("127.0.0.1:%d", s.port)
+	}
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: mux,

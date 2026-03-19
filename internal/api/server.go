@@ -11,23 +11,46 @@ import (
 
 // Server handles the OpenAI-compatible API and WebSocket gateway.
 type Server struct {
-	agentMgr *agent.Manager
-	token    string
+	agentMgr   *agent.Manager
+	token      string
+	gatewayCfg *config.GatewayCfg
 }
 
 // NewServer creates a new API server.
-func NewServer(agentMgr *agent.Manager, token string) *Server {
+func NewServer(agentMgr *agent.Manager, token string, gatewayCfg *config.GatewayCfg) *Server {
 	return &Server{
-		agentMgr: agentMgr,
-		token:    token,
+		agentMgr:   agentMgr,
+		token:      token,
+		gatewayCfg: gatewayCfg,
 	}
 }
 
 // RegisterRoutes registers API routes on the given mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/chat/completions", s.authMiddleware(s.HandleChatCompletions))
-	mux.HandleFunc("GET /v1/agents", s.authMiddleware(s.HandleListAgents))
+	// Always register WebSocket (needed for ChatClaw)
 	mux.HandleFunc("/ws", s.HandleWebSocket)
+
+	// CORS preflight for all /v1/* routes
+	mux.HandleFunc("OPTIONS /v1/", s.handleCORS)
+
+	// Chat completions endpoint
+	if s.gatewayCfg == nil || s.gatewayCfg.HTTP.Endpoints.ChatCompletions.Enabled {
+		mux.HandleFunc("POST /v1/chat/completions", s.authMiddleware(s.HandleChatCompletions))
+	}
+
+	// Agents list endpoint
+	if s.gatewayCfg == nil || s.gatewayCfg.HTTP.Endpoints.Agents.Enabled {
+		mux.HandleFunc("GET /v1/agents", s.authMiddleware(s.HandleListAgents))
+	}
+}
+
+// handleCORS responds to CORS preflight requests.
+func (s *Server) handleCORS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-openclaw-agent-id, x-openclaw-session-key")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // HandleListAgents handles GET /v1/agents.
@@ -66,8 +89,9 @@ func (s *Server) buildAgentList() []map[string]string {
 // authMiddleware validates the Bearer token for API routes.
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" {
-			// No token configured, skip auth
+		// Skip auth if mode is "none" or no token configured
+		if s.token == "" || (s.gatewayCfg != nil && s.gatewayCfg.Auth.Mode == "none") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 			next(w, r)
 			return
 		}

@@ -79,13 +79,33 @@ type SandboxCfg struct {
 
 // GatewayAuth holds authentication settings for the gateway API.
 type GatewayAuth struct {
+	Mode  string `json:"mode,omitempty"`  // "token" (default), "none"
 	Token string `json:"token"`
+}
+
+// GatewayHTTPEndpoints controls which HTTP endpoints are enabled.
+type GatewayHTTPEndpoints struct {
+	ChatCompletions GatewayEndpoint `json:"chatCompletions,omitempty"`
+	Agents          GatewayEndpoint `json:"agents,omitempty"`
+}
+
+// GatewayEndpoint toggles a single HTTP endpoint.
+type GatewayEndpoint struct {
+	Enabled bool `json:"enabled"`
+}
+
+// GatewayHTTP holds HTTP-specific gateway settings.
+type GatewayHTTP struct {
+	Endpoints GatewayHTTPEndpoints `json:"endpoints,omitempty"`
 }
 
 // GatewayCfg holds gateway server configuration.
 type GatewayCfg struct {
-	Port int         `json:"port,omitempty"`
-	Auth GatewayAuth `json:"auth,omitempty"`
+	Port int          `json:"port,omitempty"`
+	Mode string       `json:"mode,omitempty"`  // "local" (default), "public"
+	Bind string       `json:"bind,omitempty"`  // "loopback" (default), "all"
+	Auth GatewayAuth  `json:"auth,omitempty"`
+	HTTP GatewayHTTP  `json:"http,omitempty"`
 }
 
 // Config is the top-level configuration loaded from ~/.fastclaw/fastclaw.json.
