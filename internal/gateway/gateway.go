@@ -18,6 +18,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
 	"github.com/fastclaw-ai/fastclaw/internal/webhook"
 )
 
@@ -36,6 +37,7 @@ type Gateway struct {
 	scheduler    *cron.Scheduler
 	webhookSrv   *webhook.Server
 	pluginMgr    *plugin.Manager
+	taskQueue    *taskqueue.Queue
 }
 
 // New creates a new Gateway with multi-agent support.
@@ -188,7 +190,18 @@ func New(cfg *config.Config) (*Gateway, error) {
 		}
 	}
 
-	return &Gateway{
+	// Create task queue with config values
+	maxConcurrent := cfg.TaskQueue.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 10
+	}
+	taskTimeoutSec := cfg.TaskQueue.TaskTimeoutSec
+	if taskTimeoutSec <= 0 {
+		taskTimeoutSec = 300
+	}
+	taskTimeout := time.Duration(taskTimeoutSec) * time.Second
+
+	g := &Gateway{
 		config:       cfg,
 		bus:          mb,
 		agents:       agentMgr,
@@ -200,12 +213,35 @@ func New(cfg *config.Config) (*Gateway, error) {
 		scheduler:    scheduler,
 		webhookSrv:   webhookSrv,
 		pluginMgr:    pluginMgr,
-	}, nil
+	}
+
+	tq := taskqueue.NewQueue(maxConcurrent, taskTimeout, func(ctx context.Context, task *taskqueue.Task) (string, error) {
+		ag := agentMgr.AgentByID(task.AgentID)
+		if ag == nil {
+			return "", fmt.Errorf("agent %q not found", task.AgentID)
+		}
+		reply := ag.HandleMessage(ctx, task.Message)
+		mb.Outbound <- bus.OutboundMessage{
+			Channel:   task.Message.Channel,
+			AccountID: task.AccountID,
+			ChatID:    task.Message.ChatID,
+			Text:      reply,
+		}
+		return reply, nil
+	})
+	g.taskQueue = tq
+
+	return g, nil
 }
 
 // AgentManager returns the gateway's agent manager.
 func (g *Gateway) AgentManager() *agent.Manager {
 	return g.agents
+}
+
+// TaskQueue returns the gateway's task queue.
+func (g *Gateway) TaskQueue() *taskqueue.Queue {
+	return g.taskQueue
 }
 
 // Run starts the gateway and blocks until shutdown signal.
@@ -306,6 +342,11 @@ func (g *Gateway) Run() error {
 	slog.Info("gateway started")
 
 	wg.Wait()
+
+	// Stop task queue
+	if g.taskQueue != nil {
+		g.taskQueue.Stop()
+	}
 
 	// Stop plugins on shutdown
 	if g.pluginMgr != nil {

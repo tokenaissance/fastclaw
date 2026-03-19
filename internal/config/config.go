@@ -70,6 +70,12 @@ type PluginEntryCfg struct {
 	Config  map[string]interface{} `json:"config,omitempty"`
 }
 
+// TaskQueueCfg configures the task queue.
+type TaskQueueCfg struct {
+	MaxConcurrent  int `json:"maxConcurrent,omitempty"`  // default 10
+	TaskTimeoutSec int `json:"taskTimeoutSec,omitempty"` // default 300
+}
+
 // SandboxCfg holds sandbox configuration for an agent.
 type SandboxCfg struct {
 	Enabled bool   `json:"enabled"`
@@ -123,6 +129,7 @@ type Config struct {
 	Hooks      HooksCfg                   `json:"hooks,omitempty"`
 	Plugins    PluginsCfg                 `json:"plugins,omitempty"`
 	Gateway    GatewayCfg                 `json:"gateway,omitempty"`
+	TaskQueue  TaskQueueCfg               `json:"taskQueue,omitempty"`
 }
 
 // ProviderConfig holds API credentials for an LLM provider.

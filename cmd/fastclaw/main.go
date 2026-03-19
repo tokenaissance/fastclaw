@@ -97,6 +97,7 @@ func runGateway(port int) error {
 
 	webSrv := setup.NewServer(port, nil)
 	webSrv.SetAgentProvider(&agentProviderAdapter{mgr: gw.AgentManager()})
+	webSrv.SetTaskQueue(gw.TaskQueue())
 	webSrv.SetGatewayConfig(gwCfg)
 
 	// Set up OpenAI-compatible API and WebSocket gateway

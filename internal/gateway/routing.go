@@ -11,6 +11,11 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
+// chatKey returns the serialization key for a chat.
+func chatKey(channel, chatID string) string {
+	return channel + ":" + chatID
+}
+
 func (g *Gateway) processInbound(ctx context.Context) {
 	for {
 		select {
@@ -59,15 +64,7 @@ func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
 		"agent", ag.Name(),
 	)
 
-	go func(m bus.InboundMessage, a *agent.Agent) {
-		reply := a.HandleMessage(ctx, m)
-		g.bus.Outbound <- bus.OutboundMessage{
-			Channel:   m.Channel,
-			AccountID: m.AccountID,
-			ChatID:    m.ChatID,
-			Text:      reply,
-		}
-	}(msg, ag)
+	g.taskQueue.Submit(ag.Name(), chatKey(msg.Channel, msg.ChatID), msg, msg.AccountID)
 }
 
 // routeGroup handles group message routing with mention-based and team-aware logic.
@@ -113,15 +110,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				triggerMsg.Text = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
 				triggerMsg.IsBotMessage = false // treat as actionable for HandleMessage
 
-				go func(m bus.InboundMessage, a *agent.Agent) {
-					reply := a.HandleMessage(ctx, m)
-					g.bus.Outbound <- bus.OutboundMessage{
-						Channel:   m.Channel,
-						AccountID: g.accountIDForAgent(a.Name(), m.Channel),
-						ChatID:    m.ChatID,
-						Text:      reply,
-					}
-				}(triggerMsg, target)
+				g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(target.Name(), triggerMsg.Channel))
 			}
 		}
 		return
@@ -144,15 +133,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				}
 			}
 
-			go func(m bus.InboundMessage, a *agent.Agent) {
-				reply := a.HandleMessage(ctx, m)
-				g.bus.Outbound <- bus.OutboundMessage{
-					Channel:   m.Channel,
-					AccountID: g.accountIDForAgent(a.Name(), m.Channel),
-					ChatID:    m.ChatID,
-					Text:      reply,
-				}
-			}(msg, target)
+			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(target.Name(), msg.Channel))
 			return
 		}
 		// Mentioned username doesn't match any agent — fall through to default behavior
@@ -181,15 +162,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 			}
 		}
 
-		go func(m bus.InboundMessage, a *agent.Agent) {
-			reply := a.HandleMessage(ctx, m)
-			g.bus.Outbound <- bus.OutboundMessage{
-				Channel:   m.Channel,
-				AccountID: g.accountIDForAgent(a.Name(), m.Channel),
-				ChatID:    m.ChatID,
-				Text:      reply,
-			}
-		}(msg, target)
+		g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(target.Name(), msg.Channel))
 
 	default: // "mention-only"
 		// No @mention and behavior is mention-only: inject into all agents for awareness, but no reply

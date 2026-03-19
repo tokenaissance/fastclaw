@@ -12,6 +12,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
 )
 
 // AgentHandle is a minimal interface for interacting with an agent from the web UI.
@@ -33,6 +34,7 @@ type Server struct {
 	gatewayCfg    *config.GatewayCfg
 	onConfig      func(*config.Config) // called after config is saved
 	agentProvider AgentProvider
+	taskQueue     *taskqueue.Queue
 	apiServer     *api.Server
 	startedAt     time.Time
 }
@@ -56,6 +58,11 @@ func (s *Server) SetGatewayConfig(cfg *config.GatewayCfg) {
 // SetAgentProvider sets the agent provider for chat and status endpoints.
 func (s *Server) SetAgentProvider(ap AgentProvider) {
 	s.agentProvider = ap
+}
+
+// SetTaskQueue sets the task queue for the tasks API endpoint.
+func (s *Server) SetTaskQueue(tq *taskqueue.Queue) {
+	s.taskQueue = tq
 }
 
 // SetAPIServer sets the OpenAI-compatible API server for /v1/* and /ws routes.
@@ -89,6 +96,9 @@ func (s *Server) Run(ctx context.Context) error {
 	// Plugins
 	mux.HandleFunc("GET /api/plugins", s.handleListPlugins)
 	mux.HandleFunc("PUT /api/plugins/{id}", s.handleUpdatePlugin)
+
+	// Tasks
+	mux.HandleFunc("GET /api/tasks", s.handleListTasks)
 
 	// Channels
 	mux.HandleFunc("GET /api/channels", s.handleListChannels)

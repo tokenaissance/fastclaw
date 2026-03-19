@@ -462,6 +462,33 @@ func generateRandomToken(length int) string {
 	return hex.EncodeToString(b)
 }
 
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	if s.taskQueue == nil {
+		jsonResponse(w, http.StatusOK, []any{})
+		return
+	}
+
+	tasks := s.taskQueue.RecentTasks(50)
+	result := make([]map[string]any, 0, len(tasks))
+	for _, t := range tasks {
+		entry := map[string]any{
+			"id":        t.ID,
+			"agentId":   t.AgentID,
+			"chatKey":   t.ChatKey,
+			"status":    string(t.Status),
+			"createdAt": t.CreatedAt.Format(time.RFC3339),
+		}
+		if t.StartedAt != nil && t.DoneAt != nil {
+			entry["duration"] = t.DoneAt.Sub(*t.StartedAt).Milliseconds()
+		}
+		if t.Error != nil {
+			entry["error"] = t.Error.Error()
+		}
+		result = append(result, entry)
+	}
+	jsonResponse(w, http.StatusOK, result)
+}
+
 // saveConfigFile persists the config to ~/.fastclaw/fastclaw.json.
 func saveConfigFile(cfg *config.Config) error {
 	homeDir, err := config.HomeDir()
