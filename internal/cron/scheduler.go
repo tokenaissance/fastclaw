@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
@@ -59,10 +60,14 @@ type StoreJob struct {
 
 // Scheduler manages cron job execution.
 type Scheduler struct {
+	mu         sync.Mutex
 	jobs       []Job
 	bus        *bus.MessageBus
 	store      StoreInterface
 	instanceID string
+	// hot-reload support
+	parentCtx context.Context
+	jobCancel context.CancelFunc
 }
 
 // NewScheduler creates a scheduler from config.
@@ -99,17 +104,13 @@ func LoadJobs(path string) ([]Job, error) {
 
 // Start begins the scheduler. It blocks until ctx is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
-	if len(s.jobs) == 0 && s.store == nil {
-		slog.Info("no cron jobs configured")
-		return
-	}
-
+	s.mu.Lock()
+	s.parentCtx = ctx
 	slog.Info("cron scheduler started", "jobs", len(s.jobs), "store_backed", s.store != nil)
 
-	// Start a goroutine for each in-memory job
-	for _, job := range s.jobs {
-		go s.runJob(ctx, job)
-	}
+	// Start goroutines for initial in-memory jobs
+	s.startJobGoroutines()
+	s.mu.Unlock()
 
 	// If store is set, poll for DB-backed jobs
 	if s.store != nil {
@@ -320,7 +321,34 @@ func (s *Scheduler) fireJob(job Job) {
 }
 
 // UpdateJobs replaces the scheduler's job list (hot-reload).
-// Note: this updates the list for the next scheduling cycle.
+// It cancels goroutines for old jobs and starts new ones.
 func (s *Scheduler) UpdateJobs(jobs []Job) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.jobs = jobs
+
+	// If the scheduler is running, restart job goroutines
+	if s.parentCtx != nil {
+		s.startJobGoroutines()
+	}
+
+	slog.Info("cron jobs updated (hot-reload)", "jobs", len(jobs))
+}
+
+// startJobGoroutines cancels any existing job goroutines and starts new ones.
+// Must be called with s.mu held.
+func (s *Scheduler) startJobGoroutines() {
+	// Cancel previous batch of job goroutines
+	if s.jobCancel != nil {
+		s.jobCancel()
+	}
+
+	// Create a new child context for this batch
+	jobCtx, cancel := context.WithCancel(s.parentCtx)
+	s.jobCancel = cancel
+
+	for _, job := range s.jobs {
+		go s.runJob(jobCtx, job)
+	}
 }
