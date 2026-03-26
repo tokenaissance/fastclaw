@@ -124,6 +124,18 @@ func newContextBuilderWithThinking(workspace string, memory *Memory, skillsSumma
 	return cb
 }
 
+// RegisterMem0Hook registers the mem0 before/after model call hooks for
+// long-term memory search (sync) and storage (async).
+func (a *Agent) RegisterMem0Hook(cfg config.Mem0Cfg) {
+	if !cfg.Enabled {
+		return
+	}
+	state := NewMem0HookState(cfg)
+	a.hooks.Register(BeforeModelCall, state.BeforeModelCallHook())
+	a.hooks.Register(AfterModelCall, state.AfterModelCallHook())
+	slog.Info("mem0 hook registered", "agent", a.name, "url", cfg.URL)
+}
+
 // Name returns the agent's name.
 func (a *Agent) Name() string {
 	return a.name

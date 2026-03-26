@@ -114,6 +114,14 @@ type GatewayCfg struct {
 	HTTP GatewayHTTP  `json:"http,omitempty"`
 }
 
+// Mem0Cfg configures the Mem0 memory integration.
+type Mem0Cfg struct {
+	Enabled  bool   `json:"enabled"`
+	URL      string `json:"url,omitempty"`      // default "http://127.0.0.1:8100"
+	APIKey   string `json:"apiKey,omitempty"`
+	TopK     int    `json:"topK,omitempty"`     // max memories to inject, default 5
+}
+
 // Config is the top-level configuration loaded from ~/.fastclaw/fastclaw.json.
 type Config struct {
 	Providers  map[string]ProviderConfig  `json:"providers"`
@@ -131,6 +139,7 @@ type Config struct {
 	Gateway    GatewayCfg                 `json:"gateway,omitempty"`
 	TaskQueue  TaskQueueCfg               `json:"taskQueue,omitempty"`
 	Skills     SkillsCfg                  `json:"skills,omitempty"`
+	Mem0       Mem0Cfg                    `json:"mem0,omitempty"`
 }
 
 // ProviderConfig holds API credentials for an LLM provider.

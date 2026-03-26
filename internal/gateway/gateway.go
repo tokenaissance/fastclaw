@@ -64,8 +64,8 @@ func New(cfg *config.Config) (*Gateway, error) {
 	// Resolve agent configs
 	resolved := config.ResolveAgents(cfg)
 
-	// Create agent manager
-	agentMgr, err := agent.NewManager(resolved, llm, mb)
+	// Create agent manager (with optional mem0 integration)
+	agentMgr, err := agent.NewManagerWithMem0(resolved, llm, mb, cfg.Mem0)
 	if err != nil {
 		return nil, err
 	}
