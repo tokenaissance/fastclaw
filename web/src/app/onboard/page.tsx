@@ -56,7 +56,6 @@ interface OnboardConfig {
 const STEP_LABELS = [
   "Welcome",
   "LLM Provider",
-  "Channels",
   "Gateway",
   "Launch",
 ];
@@ -181,7 +180,7 @@ export default function OnboardPage() {
       setTimeout(() => setShowConfetti(false), 4000);
       setTimeout(() => {
         const port = config.port || window.location.port;
-        window.location.href = `http://localhost:${port}/overview/`;
+        window.location.href = `http://localhost:${port}/chat/`;
       }, 3000);
     } catch {
       setLaunched(true);
@@ -197,10 +196,8 @@ export default function OnboardPage() {
       case 1:
         return config.apiBase.length > 0 && config.model.length > 0;
       case 2:
-        return true;
-      case 3:
         return config.agentName.length > 0 && config.port > 0;
-      case 4:
+      case 3:
         return true;
       default:
         return false;
@@ -465,106 +462,6 @@ export default function OnboardPage() {
         {step === 2 && (
           <Card className="backdrop-blur-sm">
             <CardHeader>
-              <CardTitle className="text-xl">Channels</CardTitle>
-              <CardDescription>
-                Connect messaging platforms to your agent.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-5">
-              <div className="rounded-lg border border-border bg-muted/30 p-4">
-                <button
-                  type="button"
-                  onClick={() => updateConfig({ telegramEnabled: !config.telegramEnabled })}
-                  className="flex w-full items-center justify-between text-left"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10">
-                      <svg
-                        className="h-5 w-5 text-blue-500"
-                        viewBox="0 0 24 24"
-                        fill="currentColor"
-                      >
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z" />
-                      </svg>
-                    </div>
-                    <div>
-                      <p className="font-medium">Telegram</p>
-                      <p className="text-xs text-muted-foreground">
-                        Connect via Bot API
-                      </p>
-                    </div>
-                  </div>
-                  <Badge
-                    variant="outline"
-                    className={
-                      config.telegramEnabled
-                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                        : ""
-                    }
-                  >
-                    {config.telegramEnabled ? "Enabled" : "Disabled"}
-                  </Badge>
-                </button>
-
-                {config.telegramEnabled && (
-                  <div className="mt-4 space-y-2">
-                    <Label>Bot Token</Label>
-                    <Input
-                      type="password"
-                      value={config.telegramToken}
-                      onChange={(e) =>
-                        updateConfig({ telegramToken: e.target.value })
-                      }
-                      placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
-                      className="font-mono text-sm"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Get a token from{" "}
-                      <span className="text-primary">@BotFather</span> on
-                      Telegram
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              <div className="rounded-lg border border-border/50 bg-muted/10 p-4 opacity-50">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
-                    <svg
-                      className="h-5 w-5 text-muted-foreground"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      strokeWidth={1.5}
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        d="M12 4.5v15m7.5-7.5h-15"
-                      />
-                    </svg>
-                  </div>
-                  <div>
-                    <p className="font-medium text-muted-foreground">More Channels</p>
-                    <p className="text-xs text-muted-foreground/60">
-                      Discord, Slack, WhatsApp -- coming soon
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <NavigationButtons
-                step={step}
-                setStep={setStep}
-                canProceed={canProceed()}
-              />
-            </CardContent>
-          </Card>
-        )}
-
-        {step === 3 && (
-          <Card className="backdrop-blur-sm">
-            <CardHeader>
               <CardTitle className="text-xl">Gateway Settings</CardTitle>
               <CardDescription>
                 Configure your agent identity and server settings.
@@ -622,7 +519,7 @@ export default function OnboardPage() {
           </Card>
         )}
 
-        {step === 4 && (
+        {step === 3 && (
           <Card className="backdrop-blur-sm animate-pulse-glow">
             <CardHeader>
               <CardTitle className="text-xl">
@@ -672,17 +569,6 @@ export default function OnboardPage() {
                     <SummaryRow
                       label="API Key"
                       value={config.apiKey ? "********" : "Not set"}
-                    />
-                    <Separator />
-                    <SummaryRow
-                      label="Telegram"
-                      value={
-                        config.telegramEnabled
-                          ? config.telegramToken
-                            ? "Configured"
-                            : "Enabled (no token)"
-                          : "Disabled"
-                      }
                     />
                     <Separator />
                     <SummaryRow label="Agent Name" value={config.agentName} />

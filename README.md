@@ -52,10 +52,9 @@ cd fastclaw && make build
 
 1. Run `fastclaw` — browser opens the setup wizard at `http://localhost:18953`
 2. Pick your LLM provider (OpenRouter, Ollama, or custom)
-3. Add a Telegram bot token (optional)
-4. Click Launch ⚡
+3. Click Launch — start chatting in the browser
 
-That's it. Your agent is live.
+That's it. Your agent is live. Connect messaging channels (Telegram, Discord, etc.) later via plugins.
 
 ## ✨ Features
 
@@ -75,11 +74,11 @@ That's it. Your agent is live.
 
 | Channel | Status |
 |---------|--------|
-| Telegram | ✅ Multi-bot, groups, DMs |
-| Discord | ✅ Bot API + Gateway |
-| Slack | ✅ Socket Mode |
 | Web Chat | ✅ Built-in at /chat |
-| Plugin channels | ✅ Add any channel via plugin |
+| Telegram | ✅ Via plugin |
+| Discord | ✅ Via plugin |
+| Slack | ✅ Via plugin |
+| Any platform | ✅ Add via plugin |
 
 ### Tools
 
@@ -123,7 +122,6 @@ That's it. Your agent is live.
 | **Pluggable Storage** | File (default), PostgreSQL, SQLite |
 | **OpenAI-Compatible API** | `POST /v1/chat/completions` with SSE streaming |
 | **WebSocket Gateway** | OpenClaw-compatible protocol |
-| **ChatClaw Integration** | Works as ChatClaw backend runtime |
 
 ## 🏗 Architecture
 
@@ -131,12 +129,12 @@ That's it. Your agent is live.
                     ┌─────────────────────────────────────────────┐
                     │              FastClaw Gateway                │
                     │                                             │
-  Telegram ────────▶│  ┌──────────┐    ┌──────────────────────┐  │
-  Discord ─────────▶│  │ Message  │    │    Agent Manager     │  │
-  Slack ───────────▶│  │   Bus    │───▶│                      │  │
-  Web UI ──────────▶│  │          │◀───│  Agent 1 (Mike)      │  │
-  Webhooks ────────▶│  │          │    │  Agent 2 (Mary)      │  │
-  Plugins ─────────▶│  └──────────┘    │  Agent N ...         │  │
+  Web UI ────────▶ │  ┌──────────┐    ┌──────────────────────┐  │
+  Plugins ───────▶ │  │ Message  │    │    Agent Manager     │  │
+  Webhooks ──────▶ │  │   Bus    │───▶│                      │  │
+  API ───────────▶ │  │          │◀───│  Agent 1 (Mike)      │  │
+                    │  │          │    │  Agent 2 (Mary)      │  │
+                    │  └──────────┘    │  Agent N ...         │  │
                     │                   └──────────────────────┘  │
                     │                            │                │
                     │        ┌───────────────────┼──────────┐    │
@@ -166,50 +164,24 @@ That's it. Your agent is live.
                     └─────────────────────────────────────────────┘
 ```
 
-## 📁 Agent Workspace
-
-Each agent has its own workspace:
-
-```
-~/.fastclaw/agents/mike/agent/
-├── SOUL.md         # Personality & communication style
-├── IDENTITY.md     # Name, role, specialty
-├── AGENTS.md       # Behavior instructions
-├── USER.md         # About the user (auto-learns)
-├── TOOLS.md        # Tool usage notes
-├── MEMORY.md       # Long-term facts (auto-updated)
-├── HEARTBEAT.md    # Periodic task checklist
-├── policy.yaml     # Security policy (optional)
-├── agent.json      # Model & config overrides
-├── memory/         # Searchable conversation logs
-├── sessions/       # JSONL conversation files
-└── skills/         # Agent-specific skills
-```
-
 ## 🔌 Plugin System
 
-Extend FastClaw with plugins in any language. Plugins communicate via JSON-RPC over stdin/stdout.
-
-```
-~/.fastclaw/plugins/feishu/
-├── plugin.json     # Manifest: id, type, command
-└── plugin.py       # Implementation (Python/Node/Go/...)
-```
+Extend FastClaw with plugins in any language. Plugins communicate via JSON-RPC 2.0 over stdin/stdout, running as isolated subprocesses.
 
 **Plugin types:** `channel` · `tool` · `provider` · `hook`
 
-```json
-{
-  "plugins": {
-    "enabled": true,
-    "entries": {
-      "feishu": { "enabled": true, "config": {"appId": "...", "appSecret": "..."} }
-    }
-  }
-}
+```bash
+# Install from FastClaw Hub
+fastclaw plugins install telegram
+
+# Install from GitHub
+fastclaw plugins install github.com/user/fastclaw-plugin
+
+# Bridge an OpenClaw tool plugin
+fastclaw plugins install @ollama/openclaw-web-search
 ```
 
-See [examples/plugins/echo/](examples/plugins/echo/) for a complete example.
+Browse available plugins at [FastClaw Hub](https://github.com/fastclaw-ai/fastclaw-hub).
 
 ## 🖥 Web Dashboard
 
@@ -220,7 +192,7 @@ Full management UI at `http://localhost:18953`:
 | Overview | Gateway status, stats, quick actions |
 | Chat | Talk to your agents in the browser |
 | Agents | Create, edit, delete agents; edit SOUL.md |
-| Models | Manage LLM providers, models, and default model |
+| Models | Manage LLM providers and default model |
 | Skills | View and manage installed skills |
 | Plugins | Enable/disable plugins, edit config |
 | Channels | Channel status and configuration |
@@ -235,45 +207,11 @@ FastClaw exposes an OpenAI-compatible API for programmatic access:
 # Chat with an agent (SSE streaming)
 curl -X POST http://localhost:18953/v1/chat/completions \
   -H "Authorization: Bearer $TOKEN" \
-  -H "x-openclaw-agent-id: mike" \
   -H "Content-Type: application/json" \
   -d '{"model":"auto","messages":[{"role":"user","content":"hello"}],"stream":true}'
 
 # List agents
 curl http://localhost:18953/v1/agents -H "Authorization: Bearer $TOKEN"
-```
-
-**ChatClaw integration:** FastClaw works as a drop-in backend for [ChatClaw](https://github.com/user/chatclaw). Auto-detected via `~/.openclaw/openclaw.json`.
-
-## 🔒 Security
-
-**Sandbox execution** — Run agent commands in Docker containers:
-
-```json
-{"sandbox": {"enabled": true, "image": "fastclaw/sandbox:latest"}}
-```
-
-**Policy engine** — Declarative YAML policies:
-
-```yaml
-name: standard
-filesystem:
-  allowRead: ["/workspace/**"]
-  denyWrite: ["/etc/**"]
-network:
-  mode: allowlist
-  outbound:
-    - host: api.openai.com
-      ports: [443]
-tools:
-  deny: ["exec"]
-```
-
-**Credential manager** — Encrypted key storage:
-
-```bash
-fastclaw provider create openai --from-env
-fastclaw provider list
 ```
 
 ## 🛠 CLI Reference
@@ -286,43 +224,19 @@ fastclaw version            # Version info
 fastclaw doctor             # Check config health
 fastclaw upgrade            # Update to latest
 
+# Plugins
+fastclaw plugins install NAME   # Install from Hub / GitHub / npm
+fastclaw plugins list           # List installed plugins
+fastclaw plugins remove ID      # Remove a plugin
+
 # Agents
 fastclaw agent create mike  # Create new agent
 fastclaw agent list          # List agents
 
-# Sessions
-fastclaw session list        # List sessions
-fastclaw session clear KEY   # Clear a session
-fastclaw session clear-all   # Clear all sessions
-
 # Skills
 fastclaw skill list          # List installed skills
 fastclaw skill remove NAME   # Remove a skill
-
-# Plugins
-fastclaw plugin list         # List plugins
-fastclaw plugin install PATH # Install plugin
-fastclaw plugin remove ID    # Remove plugin
-
-# Security
-fastclaw provider list       # List credential providers
-fastclaw provider create ... # Add credentials
-fastclaw sandbox create      # Create Docker sandbox
-fastclaw sandbox list        # List sandboxes
-fastclaw policy list         # List policies
-
-# Maintenance
-fastclaw backup              # Backup ~/.fastclaw/
-fastclaw reset               # Reset sessions & memory
 ```
-
-## 🧩 Storage
-
-| Backend | Use Case | Config |
-|---------|----------|--------|
-| **File** (default) | Single user, zero config | — |
-| **SQLite** | Single user, structured queries | `{"storage": {"type": "sqlite", "dsn": "file:fastclaw.db"}}` |
-| **PostgreSQL** | Multi-tenant cloud | `{"storage": {"type": "postgres", "dsn": "postgres://..."}}` |
 
 ## 🛠 Development
 
@@ -341,9 +255,8 @@ make test           # Run tests
 
 Contributions welcome. FastClaw's strength is simplicity — keep it that way.
 
-1. Fork → Branch → Code → PR
-2. `go build ./...` must pass
-3. Follow [Conventional Commits](https://www.conventionalcommits.org/)
+- **Core framework** — contribute to this repo
+- **Plugins & skills** — contribute to [fastclaw-hub](https://github.com/fastclaw-ai/fastclaw-hub)
 
 ## License
 
