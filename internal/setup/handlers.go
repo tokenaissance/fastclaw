@@ -1,7 +1,6 @@
 package setup
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -149,22 +148,12 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Make a simple chat completion call to test the provider
-	payload := map[string]any{
-		"model": req.Model,
-		"messages": []map[string]string{
-			{"role": "user", "content": "Say hi in one word."},
-		},
-		"max_tokens": 10,
-	}
-	body, _ := json.Marshal(payload)
-
-	httpReq, err := http.NewRequestWithContext(r.Context(), "POST", req.APIBase+"/chat/completions", bytes.NewReader(body))
+	// Test connectivity by listing models (GET /models)
+	httpReq, err := http.NewRequestWithContext(r.Context(), "GET", strings.TrimRight(req.APIBase, "/")+"/models", nil)
 	if err != nil {
 		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
 	if req.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+req.APIKey)
 	}
@@ -376,22 +365,24 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Merge providers
+	// Replace providers (supports add, update, and delete)
 	if raw, ok := incoming["providers"]; ok {
 		var providers map[string]config.ProviderConfig
 		if json.Unmarshal(raw, &providers) == nil {
+			oldProviders := cfg.Providers
+			cfg.Providers = make(map[string]config.ProviderConfig)
 			for k, v := range providers {
-				if cfg.Providers == nil {
-					cfg.Providers = make(map[string]config.ProviderConfig)
-				}
-				existing := cfg.Providers[k]
-				if v.APIBase != "" {
-					existing.APIBase = v.APIBase
+				p := config.ProviderConfig{
+					APIBase: v.APIBase,
+					API:     v.API,
+					Models:  v.Models,
 				}
 				if v.APIKey != "" && !strings.Contains(v.APIKey, "****") {
-					existing.APIKey = v.APIKey
+					p.APIKey = v.APIKey
+				} else if old, exists := oldProviders[k]; exists {
+					p.APIKey = old.APIKey
 				}
-				cfg.Providers[k] = existing
+				cfg.Providers[k] = p
 			}
 		}
 	}

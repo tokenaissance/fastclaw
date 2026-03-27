@@ -220,11 +220,12 @@ Full management UI at `http://localhost:18953`:
 | Overview | Gateway status, stats, quick actions |
 | Chat | Talk to your agents in the browser |
 | Agents | Create, edit, delete agents; edit SOUL.md |
+| Models | Manage LLM providers, models, and default model |
 | Skills | View and manage installed skills |
 | Plugins | Enable/disable plugins, edit config |
 | Channels | Channel status and configuration |
 | Cron Jobs | Create and manage scheduled tasks |
-| Settings | Provider, storage, webhook config |
+| Settings | Storage, webhook config |
 
 ## 🔗 API
 

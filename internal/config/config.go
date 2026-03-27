@@ -133,10 +133,31 @@ type Config struct {
 	Skills     SkillsCfg                  `json:"skills,omitempty"`
 }
 
+// ModelCost holds pricing info for a model.
+type ModelCost struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+}
+
+// ModelEntry describes a single model within a provider.
+type ModelEntry struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Reasoning     bool     `json:"reasoning"`
+	Input         []string `json:"input"`
+	Cost          ModelCost `json:"cost"`
+	ContextWindow int      `json:"contextWindow"`
+	MaxTokens     int      `json:"maxTokens"`
+}
+
 // ProviderConfig holds API credentials for an LLM provider.
 type ProviderConfig struct {
-	APIKey  string `json:"apiKey"`
-	APIBase string `json:"apiBase"`
+	APIKey  string       `json:"apiKey"`
+	APIBase string       `json:"apiBase"`
+	API     string       `json:"api,omitempty"`
+	Models  []ModelEntry `json:"models,omitempty"`
 }
 
 // AgentsConfig holds agent defaults and the list of agent entries.

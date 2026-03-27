@@ -118,6 +118,7 @@ export default function PluginsPage() {
             </p>
           </div>
         ) : (
+          <div className="overflow-x-auto -mx-6 px-6">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -178,12 +179,13 @@ export default function PluginsPage() {
               ))}
             </TableBody>
           </Table>
+          </div>
         )}
       </div>
 
       {/* Config Editor Dialog */}
       <Dialog open={!!editPlugin} onOpenChange={() => setEditPlugin(null)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Puzzle className="h-5 w-5 text-primary" />

@@ -73,8 +73,32 @@ export interface CronJobInfo {
   nextRun?: string;
 }
 
+export interface ModelCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+export interface ModelEntry {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  input: string[];
+  cost: ModelCost;
+  contextWindow: number;
+  maxTokens: number;
+}
+
+export interface ProviderData {
+  apiKey: string;
+  apiBase: string;
+  api?: string;
+  models?: ModelEntry[];
+}
+
 export interface ConfigResponse {
-  providers: Record<string, { apiKey: string; apiBase: string }>;
+  providers: Record<string, ProviderData>;
   agents: {
     defaults: {
       model: string;

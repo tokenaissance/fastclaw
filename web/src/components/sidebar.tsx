@@ -11,7 +11,7 @@ import {
   Radio,
   Clock,
   Settings,
-
+  Brain,
   Menu,
   X,
   Sun,
@@ -26,6 +26,7 @@ const navItems = [
   { href: "/agents/", label: "Agents", icon: Bot },
   { href: "/skills/", label: "Skills", icon: Sparkles },
   { href: "/plugins/", label: "Plugins", icon: Puzzle },
+  { href: "/models/", label: "Models", icon: Brain },
   { href: "/channels/", label: "Channels", icon: Radio },
   { href: "/cron/", label: "Cron Jobs", icon: Clock },
   { href: "/settings/", label: "Settings", icon: Settings },

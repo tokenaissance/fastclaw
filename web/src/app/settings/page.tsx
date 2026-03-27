@@ -14,7 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Brain, Database, Webhook, Save, Check } from "lucide-react";
+import { Database, Webhook, Save, Check } from "lucide-react";
 import { getConfig, updateConfig, type ConfigResponse } from "@/lib/api";
 
 export default function SettingsPage() {
@@ -23,10 +23,6 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const [providerName, setProviderName] = useState("default");
-  const [apiBase, setApiBase] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("");
   const [storageType, setStorageType] = useState("file");
   const [dsn, setDsn] = useState("");
   const [webhookEnabled, setWebhookEnabled] = useState(false);
@@ -38,12 +34,6 @@ export default function SettingsPage() {
     getConfig()
       .then((cfg) => {
         setConfig(cfg);
-        const providers = cfg.providers || {};
-        const firstKey = Object.keys(providers)[0] || "default";
-        setProviderName(firstKey);
-        setApiBase(providers[firstKey]?.apiBase || "");
-        setApiKey(providers[firstKey]?.apiKey || "");
-        setModel(cfg.agents?.defaults?.model || "gpt-4o");
         setStorageType(cfg.storage?.type || "file");
         setDsn(cfg.storage?.dsn || "");
         setWebhookEnabled(cfg.hooks?.enabled || false);
@@ -57,12 +47,6 @@ export default function SettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     await updateConfig({
-      providers: {
-        [providerName]: { apiBase, apiKey },
-      },
-      agents: {
-        defaults: { model },
-      },
       storage: { type: storageType, dsn },
       hooks: {
         enabled: webhookEnabled,
@@ -112,56 +96,6 @@ export default function SettingsPage() {
             </>
           )}
         </Button>
-      </div>
-
-      {/* Provider Config */}
-      <div className="rounded-lg border border-border bg-card">
-        <div className="p-5 pb-3">
-          <div className="flex items-center gap-2 mb-1">
-            <Brain className="h-4 w-4 text-amber-500" />
-            <h3 className="font-medium">LLM Provider</h3>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            Configure your language model provider
-          </p>
-        </div>
-        <div className="px-5 pb-5 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>API Base URL</Label>
-              <Input
-                value={apiBase}
-                onChange={(e) => setApiBase(e.target.value)}
-                placeholder="https://api.openai.com/v1"
-                className="font-mono text-sm"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Model</Label>
-              <Input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="gpt-4o"
-                className="font-mono text-sm"
-              />
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label>API Key</Label>
-            <Input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-..."
-              className="font-mono text-sm"
-            />
-            <p className="text-[11px] text-muted-foreground/60">
-              {config?.providers?.[providerName]?.apiKey
-                ? `Current: ${config.providers[providerName].apiKey}`
-                : "Not set"}
-            </p>
-          </div>
-        </div>
       </div>
 
       {/* Storage Config */}
@@ -225,7 +159,7 @@ export default function SettingsPage() {
         {webhookEnabled && (
           <div className="px-5 pb-5 space-y-4">
             <Separator />
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Webhook Path</Label>
                 <Input

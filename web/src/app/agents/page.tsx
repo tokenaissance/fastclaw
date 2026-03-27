@@ -155,6 +155,7 @@ export default function AgentsPage() {
             </Button>
           </div>
         ) : (
+          <div className="overflow-x-auto -mx-6 px-6">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -233,6 +234,7 @@ export default function AgentsPage() {
               ))}
             </TableBody>
           </Table>
+          </div>
         )}
       </div>
 
@@ -299,7 +301,7 @@ export default function AgentsPage() {
 
       {/* Edit Dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Bot className="h-5 w-5 text-primary" />
@@ -310,7 +312,7 @@ export default function AgentsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Model</Label>
                 <Select value={editModel} onValueChange={(v) => v && setEditModel(v)}>

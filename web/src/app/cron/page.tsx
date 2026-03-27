@@ -163,6 +163,7 @@ export default function CronPage() {
             </Button>
           </div>
         ) : (
+          <div className="overflow-x-auto -mx-6 px-6">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -219,6 +220,7 @@ export default function CronPage() {
               ))}
             </TableBody>
           </Table>
+          </div>
         )}
       </div>
 
@@ -240,7 +242,7 @@ export default function CronPage() {
                 placeholder="daily-report"
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Type</Label>
                 <Select value={newType} onValueChange={(v) => v && setNewType(v)}>

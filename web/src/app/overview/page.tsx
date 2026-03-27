@@ -75,7 +75,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
         {/* Status */}
         <div className="rounded-lg border border-border bg-card p-5">
           <div className="flex items-center justify-between mb-3">
@@ -212,7 +212,7 @@ export default function OverviewPage() {
               Configured AI agents
             </p>
           </div>
-          <div className="px-2 pb-2">
+          <div className="px-2 pb-2 overflow-x-auto">
             {status?.agents && status.agents.length > 0 ? (
               <Table>
                 <TableHeader>
