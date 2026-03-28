@@ -183,6 +183,13 @@ fastclaw plugins install @ollama/openclaw-web-search
 
 Browse available plugins at [FastClaw Hub](https://github.com/fastclaw-ai/fastclaw-hub).
 
+### Community Plugins
+
+| Plugin | Type | Description |
+|--------|------|-------------|
+| [fastclaw-plugin-weixin](https://github.com/videGavin/fastclaw-plugin-weixin) | Channel | WeChat messaging via ilink bot API (Node.js) |
+| [fastclaw-mattermost-plugin](https://github.com/cornking2020/fastclaw-mattermost-plugin) | Channel | Mattermost messaging via WebSocket API (Go) |
+
 ## 🖥 Web Dashboard
 
 Full management UI at `http://localhost:18953`:
