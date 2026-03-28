@@ -23,6 +23,7 @@ go.work.sum
 
 # Dependency directories
 vendor/
+node_modules/
 
 # IDE
 .idea/
@@ -53,7 +54,6 @@ tmp/
 # Web build artifacts (embedded at build time)
 internal/setup/web/
 web/out/
-web/node_modules/
 web/.next/
 
-*.json
+openclaw.json

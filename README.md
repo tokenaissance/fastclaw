@@ -181,7 +181,7 @@ fastclaw plugins install github.com/user/fastclaw-plugin
 fastclaw plugins install @ollama/openclaw-web-search
 ```
 
-Browse available plugins at [FastClaw Hub](https://github.com/fastclaw-ai/fastclaw-hub).
+Official plugins are in the [`plugins/`](plugins/) directory. Community plugins are indexed at [FastClaw Hub](https://github.com/fastclaw-ai/fastclaw-hub).
 
 ## 🖥 Web Dashboard
 
@@ -255,8 +255,8 @@ make test           # Run tests
 
 Contributions welcome. FastClaw's strength is simplicity — keep it that way.
 
-- **Core framework** — contribute to this repo
-- **Plugins & skills** — contribute to [fastclaw-hub](https://github.com/fastclaw-ai/fastclaw-hub)
+- **Core framework & official plugins** — contribute to this repo
+- **Community plugins** — create your own repo, submit to [FastClaw Hub](https://github.com/fastclaw-ai/fastclaw-hub) index
 
 ## License
 

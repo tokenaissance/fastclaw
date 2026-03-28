@@ -14,7 +14,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
 )
 
-const hubRepo = "fastclaw-ai/fastclaw-hub"
+const hubRepo = "fastclaw-ai/fastclaw"
 
 // pluginCmd handles plugin management subcommands.
 func pluginCmd() *cobra.Command {
@@ -185,7 +185,6 @@ func installFromGitHub(source, pluginsDir string) error {
 }
 
 func installFromHub(name, pluginsDir string) error {
-	// Download plugin directory from fastclaw-hub repo using GitHub API
 	tmpDir, err := os.MkdirTemp("", "fastclaw-plugin-*")
 	if err != nil {
 		return err
@@ -194,41 +193,82 @@ func installFromHub(name, pluginsDir string) error {
 
 	fmt.Printf("Installing %q from FastClaw Hub...\n", name)
 
-	// Download tarball and extract the specific plugin directory
-	tarballURL := fmt.Sprintf("https://github.com/%s/archive/refs/heads/main.tar.gz", hubRepo)
-	tarball := filepath.Join(tmpDir, "hub.tar.gz")
+	// Try latest release tag first, fall back to main branch
+	// Use gh to get latest tag, or default to main
+	branch := "main"
+	tagCmd := exec.Command("gh", "release", "view", "--repo", hubRepo, "--json", "tagName", "-q", ".tagName")
+	if tagOut, err := tagCmd.Output(); err == nil {
+		tag := strings.TrimSpace(string(tagOut))
+		if tag != "" {
+			branch = tag
+		}
+	}
 
+	tarballURL := fmt.Sprintf("https://github.com/%s/archive/refs/heads/%s.tar.gz", hubRepo, branch)
+	if branch != "main" && branch != "dev" {
+		tarballURL = fmt.Sprintf("https://github.com/%s/archive/refs/tags/%s.tar.gz", hubRepo, branch)
+	}
+
+	// Download and extract only the plugins/<name> directory
+	pluginDir := filepath.Join(tmpDir, "plugin")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		return err
+	}
+
+	// Download tarball
+	tarball := filepath.Join(tmpDir, "repo.tar.gz")
 	dlCmd := exec.Command("curl", "-fsSL", "-o", tarball, tarballURL)
 	if out, err := dlCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("download failed: %s: %w", string(out), err)
 	}
 
-	extractDir, err := os.MkdirTemp("", "fastclaw-hub-extract-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(extractDir)
-
-	tarCmd := exec.Command("tar", "-xzf", tarball, "-C", extractDir)
+	// Extract: list top-level dir name first, then extract plugins/<name>
+	// Use --strip-components to remove the top-level directory
+	tarCmd := exec.Command("tar", "-xzf", tarball, "-C", pluginDir,
+		"--strip-components=2",
+		"--include=*/plugins/"+name+"/*",
+	)
 	if out, err := tarCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("extract failed: %s: %w", string(out), err)
+		// --include may not be supported on all platforms, try alternative
+		extractDir := filepath.Join(tmpDir, "extract")
+		os.MkdirAll(extractDir, 0o755)
+		tarCmd2 := exec.Command("tar", "-xzf", tarball, "-C", extractDir)
+		if out2, err2 := tarCmd2.CombinedOutput(); err2 != nil {
+			return fmt.Errorf("extract failed: %s: %w", string(out2), err2)
+		}
+		// Find the extracted directory (name varies by branch/tag)
+		entries, _ := os.ReadDir(extractDir)
+		if len(entries) == 0 {
+			return fmt.Errorf("extract failed: empty archive")
+		}
+		repoDir := filepath.Join(extractDir, entries[0].Name(), "plugins", name)
+		if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+			return fmt.Errorf("plugin %q not found in FastClaw Hub", name)
+		}
+		// Copy to pluginDir
+		cpCmd := exec.Command("cp", "-r", repoDir+"/.", pluginDir)
+		if out3, err3 := cpCmd.CombinedOutput(); err3 != nil {
+			return fmt.Errorf("copy failed: %s: %w", string(out3), err3)
+		}
+	} else {
+		_ = out
 	}
 
-	// Find the plugin in the extracted hub
-	srcDir := filepath.Join(extractDir, "fastclaw-hub-main", "plugins", name)
-	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
+	// Verify we got something
+	dirEntries, _ := os.ReadDir(pluginDir)
+	if len(dirEntries) == 0 {
 		return fmt.Errorf("plugin %q not found in FastClaw Hub", name)
 	}
 
-	// Check if it has plugin.json (standard plugin) or is a utility (e.g. openclaw-proxy)
-	if _, err := os.Stat(filepath.Join(srcDir, "plugin.json")); err == nil {
-		return installFromLocal(srcDir, pluginsDir)
+	// Check if it has plugin.json (standard plugin) or is a utility
+	if _, err := os.Stat(filepath.Join(pluginDir, "plugin.json")); err == nil {
+		return installFromLocal(pluginDir, pluginsDir)
 	}
 
-	// No plugin.json — copy as utility
+	// No plugin.json — copy as utility (e.g. openclaw-proxy)
 	destDir := filepath.Join(pluginsDir, name)
 	os.RemoveAll(destDir)
-	cpCmd := exec.Command("cp", "-r", srcDir, destDir)
+	cpCmd := exec.Command("cp", "-r", pluginDir, destDir)
 	if out, err := cpCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("copy failed: %s: %w", string(out), err)
 	}
