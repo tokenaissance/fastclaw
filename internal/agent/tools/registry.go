@@ -68,6 +68,15 @@ func (r *Registry) HasBuiltin(name string) bool {
 	return ok && t.source == SourceBuiltin
 }
 
+// GetFunc returns the ToolFunc for a tool by name, or nil if not found.
+func (r *Registry) GetFunc(name string) ToolFunc {
+	t, ok := r.tools[name]
+	if !ok {
+		return nil
+	}
+	return t.fn
+}
+
 // Definitions returns all tool definitions for the LLM.
 func (r *Registry) Definitions() []provider.Tool {
 	defs := make([]provider.Tool, 0, len(r.tools))

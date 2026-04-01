@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
+
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -46,6 +48,8 @@ type Agent struct {
 	memoryCfg         config.MemoryCfg
 	skillsLearner     *SkillsLearner
 	turnCount         int
+	engine            *sdkEngine
+	costTracker       *costtracker.Tracker
 }
 
 // NewAgent creates a new Agent from a resolved config.
@@ -127,6 +131,8 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	hooks.Register(BeforeToolCall, LoggingHook())
 	hooks.Register(AfterToolCall, LoggingHook())
 
+	eng := newSDKEngine(rc.ID)
+
 	ag := &Agent{
 		name:              rc.ID,
 		provider:          prov,
@@ -145,6 +151,8 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		skillsCfg:         rc.Skills,
 		globalSkillsCfg:   globalSkillsCfg,
 		messageBus:        mb,
+		engine:            eng,
+		costTracker:       eng.costTracker,
 	}
 
 	// Connect MCP servers and register their tools
@@ -322,6 +330,11 @@ func (a *Agent) Model() string {
 	return a.model
 }
 
+// CostTracker returns the agent's cost tracker for usage/billing queries.
+func (a *Agent) CostTracker() *costtracker.Tracker {
+	return a.costTracker
+}
+
 // HandleMessage processes an inbound message through the ReAct loop.
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
 	// Check for slash commands first
@@ -440,11 +453,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		sess.Append(assistantMsg)
 		messages = append(messages, assistantMsg)
 
+		// Loop detection: check before executing
 		loopDetected := false
 		for _, tc := range resp.ToolCalls {
-			totalToolCalls++
-
-			// Loop detection
 			sig := toolCallSig{
 				name: tc.Function.Name,
 				hash: sha256.Sum256([]byte(tc.Function.Arguments)),
@@ -466,70 +477,74 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				loopDetected = true
 				break
 			}
+		}
+		if loopDetected {
+			break
+		}
 
-			// Hook: BeforeToolCall
-			hcToolBefore := &HookContext{
+		// Fire BeforeToolCall hooks
+		for _, tc := range resp.ToolCalls {
+			a.hooks.Run(ctx, &HookContext{
 				AgentName: a.name,
 				Point:     BeforeToolCall,
 				ToolName:  tc.Function.Name,
 				ToolArgs:  tc.Function.Arguments,
-			}
-			a.hooks.Run(ctx, hcToolBefore)
+			})
+		}
 
-			slog.Info("executing tool",
-				"agent", a.name,
-				"name", tc.Function.Name,
-				"id", tc.ID,
-			)
+		// Execute tools concurrently via SDK engine
+		slog.Info("executing tools concurrently",
+			"agent", a.name,
+			"count", len(resp.ToolCalls),
+		)
+		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
 
-			result, err := a.registry.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
+		// Process results
+		for idx, r := range results {
+			totalToolCalls++
+			tc := resp.ToolCalls[idx]
 
 			// Hook: AfterToolCall
-			hcToolAfter := &HookContext{
+			a.hooks.Run(ctx, &HookContext{
 				AgentName:  a.name,
 				Point:      AfterToolCall,
-				ToolName:   tc.Function.Name,
-				ToolResult: result,
-				Error:      err,
-				StartTime:  hcToolBefore.StartTime,
-			}
-			a.hooks.Run(ctx, hcToolAfter)
+				ToolName:   r.toolName,
+				ToolResult: r.result,
+				Error:      r.err,
+			})
 
-			if err != nil {
+			if r.err != nil {
 				slog.Warn("tool execution error",
 					"agent", a.name,
-					"name", tc.Function.Name,
-					"error", err,
+					"name", r.toolName,
+					"error", r.err,
 				)
 			}
 
 			// Index in FTS if available
 			if a.ftsStore != nil {
-				_ = a.ftsStore.Index(a.name, msg.ChatID, "tool:"+tc.Function.Name, result, time.Now())
+				_ = a.ftsStore.Index(a.name, msg.ChatID, "tool:"+r.toolName, r.result, time.Now())
 			}
 
 			// Check for MEDIA: protocol in tool output
-			if mediaPaths := extractMediaPaths(result); len(mediaPaths) > 0 {
+			if mediaPaths := extractMediaPaths(r.result); len(mediaPaths) > 0 {
 				a.sendMediaFiles(msg, mediaPaths)
 			}
 
 			toolMsg := provider.Message{
 				Role:       "tool",
-				Content:    result,
+				Content:    r.result,
 				ToolCallID: tc.ID,
-				Name:       tc.Function.Name,
+				Name:       r.toolName,
 			}
 			sess.Append(toolMsg)
 			messages = append(messages, toolMsg)
 
 			emitEvent(ctx, ChatEvent{Type: "tool_result", Data: map[string]any{
 				"id":     tc.ID,
-				"name":   tc.Function.Name,
-				"result": result,
+				"name":   r.toolName,
+				"result": r.result,
 			}})
-		}
-		if loopDetected {
-			break
 		}
 	}
 
@@ -682,7 +697,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			return outReader
 		}
 
-		// Tool calls - process synchronously
+		// Tool calls - process concurrently via SDK engine
 		assistantMsg := provider.Message{
 			Role:      "assistant",
 			Content:   resp.Content,
@@ -691,6 +706,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		sess.Append(assistantMsg)
 		messages = append(messages, assistantMsg)
 
+		// Loop detection
 		loopDetected := false
 		for _, tc := range resp.ToolCalls {
 			sig := toolCallSig{
@@ -714,30 +730,34 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				loopDetected = true
 				break
 			}
-
-			hcToolBefore := &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments}
-			a.hooks.Run(ctx, hcToolBefore)
-
-			result, execErr := a.registry.Execute(ctx, tc.Function.Name, tc.Function.Arguments)
-
-			hcToolAfter := &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: tc.Function.Name, ToolResult: result, Error: execErr, StartTime: hcToolBefore.StartTime}
-			a.hooks.Run(ctx, hcToolAfter)
-
-			if execErr != nil {
-				slog.Warn("tool execution error", "agent", a.name, "name", tc.Function.Name, "error", execErr)
-			}
-
-			// Check for MEDIA: protocol in tool output
-			if mediaPaths := extractMediaPaths(result); len(mediaPaths) > 0 {
-				a.sendMediaFiles(msg, mediaPaths)
-			}
-
-			toolMsg := provider.Message{Role: "tool", Content: result, ToolCallID: tc.ID, Name: tc.Function.Name}
-			sess.Append(toolMsg)
-			messages = append(messages, toolMsg)
 		}
 		if loopDetected {
 			break
+		}
+
+		// Fire BeforeToolCall hooks
+		for _, tc := range resp.ToolCalls {
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
+		}
+
+		// Execute tools concurrently via SDK engine
+		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
+
+		for idx, r := range results {
+			tc := resp.ToolCalls[idx]
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: r.result, Error: r.err})
+
+			if r.err != nil {
+				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)
+			}
+
+			if mediaPaths := extractMediaPaths(r.result); len(mediaPaths) > 0 {
+				a.sendMediaFiles(msg, mediaPaths)
+			}
+
+			toolMsg := provider.Message{Role: "tool", Content: r.result, ToolCallID: tc.ID, Name: r.toolName}
+			sess.Append(toolMsg)
+			messages = append(messages, toolMsg)
 		}
 	}
 

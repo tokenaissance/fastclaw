@@ -228,6 +228,24 @@ func (a *Agent) slashUsage(msg bus.InboundMessage) slashResult {
 		"Total messages:  %d",
 		userTurns, asstTurns, toolTurns, len(msgs),
 	)
+
+	// Append cost tracking info from SDK engine
+	if a.costTracker != nil {
+		stats := a.costTracker.Stats()
+		reply += fmt.Sprintf("\n─────────────────\n"+
+			"Cost:            %s\n"+
+			"Input tokens:    %v\n"+
+			"Output tokens:   %v\n"+
+			"API duration:    %vms\n"+
+			"Tool duration:   %vms",
+			a.costTracker.FormatCost(),
+			stats["totalInputTokens"],
+			stats["totalOutputTokens"],
+			stats["totalAPIDurationMs"],
+			stats["totalToolDurationMs"],
+		)
+	}
+
 	return slashResult{handled: true, reply: reply}
 }
 
