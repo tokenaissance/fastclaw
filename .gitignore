@@ -54,6 +54,7 @@ tmp/
 # Deploy instance data (tokens, passwords, local state)
 deploy/docker/instances/
 deploy/docker/.env
+deploy/docker/.state/
 
 # Web build artifacts (embedded at build time)
 internal/setup/web/
