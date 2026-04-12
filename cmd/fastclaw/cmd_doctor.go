@@ -34,14 +34,15 @@ func runDoctor() error {
 	fmt.Printf("\n📌 Version: %s (%s)\n", version, commit)
 
 	// 2. Config file
-	homeDir, err := config.HomeDir()
+	_ = config.MigrateLegacyLayout()
+	userDir, err := config.UserDir(config.DefaultUserID)
 	if err != nil {
 		fmt.Printf("❌ Config dir: cannot determine (%v)\n", err)
 		issues++
 	} else {
-		fmt.Printf("📂 Config dir: %s\n", homeDir)
+		fmt.Printf("📂 Config dir: %s\n", userDir)
 
-		configPath := filepath.Join(homeDir, "fastclaw.json")
+		configPath := filepath.Join(userDir, "fastclaw.json")
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			fmt.Printf("❌ Config file: not found (%s)\n", configPath)
 			fmt.Println("   → Run 'fastclaw' to start the setup wizard")

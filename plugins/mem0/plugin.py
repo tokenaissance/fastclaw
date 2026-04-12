@@ -75,6 +75,7 @@ def handle_before_model_call(params, req_id):
     """Search mem0 for memories and inject them before the model call."""
     messages = params.get("messages", [])
     chat_id = params.get("chatId", "")
+    owner_user_id = params.get("userId", "")
 
     if not messages or len(messages) < 2:
         send_response({"jsonrpc": "2.0", "result": {}, "id": req_id})
@@ -93,7 +94,9 @@ def handle_before_model_call(params, req_id):
         return
 
     user_text = last_msg.get("content", "")
-    user_id = chat_id
+    # Namespace memories by owning user ID (multi-user isolation), then
+    # by chat_id within that user for finer granularity.
+    user_id = f"{owner_user_id}:{chat_id}" if owner_user_id else chat_id
     if not user_id or user_id == "web-ui":
         send_response({"jsonrpc": "2.0", "result": {}, "id": req_id})
         return
@@ -131,11 +134,12 @@ def handle_after_model_call(params):
     messages = params.get("messages", [])
     response = params.get("response", {})
     chat_id = params.get("chatId", "")
+    owner_user_id = params.get("userId", "")
 
     if not response or response.get("hasTools", False):
         return  # Only store on final text response
 
-    user_id = chat_id
+    user_id = f"{owner_user_id}:{chat_id}" if owner_user_id else chat_id
     if not user_id or user_id == "web-ui":
         return
 

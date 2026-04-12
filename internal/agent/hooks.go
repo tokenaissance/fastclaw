@@ -36,6 +36,7 @@ type HookContext struct {
 	ToolCallCount int       // total tool calls in this turn (for PostTurn)
 	Workspace     string    // agent workspace path (for PostTurn)
 	ChatID        string    // chat/session identifier (for mem0 user isolation)
+	UserID        string    // owning user ID for multi-user namespace isolation
 }
 
 // HookFunc is a function that runs at a hook point.

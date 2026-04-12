@@ -1,12 +1,37 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// DefaultUserID is the user ID used in single-user/local mode.
+// In cloud mode, real user IDs come from authenticated requests; in local mode
+// everything is scoped under this single default user.
+const DefaultUserID = "local"
+
+type userIDKey struct{}
+
+// WithUserID returns a new context carrying the given user ID.
+func WithUserID(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, userIDKey{}, userID)
+}
+
+// UserIDFromContext extracts the user ID from context, falling back to
+// DefaultUserID if none is set (local mode).
+func UserIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return DefaultUserID
+	}
+	if v, ok := ctx.Value(userIDKey{}).(string); ok && v != "" {
+		return v
+	}
+	return DefaultUserID
+}
 
 // MCPServerConfig holds configuration for a single MCP server.
 type MCPServerConfig struct {
@@ -81,6 +106,7 @@ type SandboxCfg struct {
 	Enabled bool   `json:"enabled"`
 	Image   string `json:"image,omitempty"`
 	Policy  string `json:"policy,omitempty"` // policy preset name
+	Backend string `json:"backend,omitempty"` // "docker" (default), "e2b"
 }
 
 // GatewayAuth holds authentication settings for the gateway API.
@@ -107,11 +133,17 @@ type GatewayHTTP struct {
 
 // GatewayCfg holds gateway server configuration.
 type GatewayCfg struct {
-	Port int          `json:"port,omitempty"`
-	Mode string       `json:"mode,omitempty"`  // "local" (default), "public"
-	Bind string       `json:"bind,omitempty"`  // "loopback" (default), "all"
-	Auth GatewayAuth  `json:"auth,omitempty"`
-	HTTP GatewayHTTP  `json:"http,omitempty"`
+	Port      int          `json:"port,omitempty"`
+	Mode      string       `json:"mode,omitempty"`  // "local" (default), "cloud"
+	Bind      string       `json:"bind,omitempty"`  // "loopback" (default), "all"
+	Auth      GatewayAuth  `json:"auth,omitempty"`
+	HTTP      GatewayHTTP  `json:"http,omitempty"`
+	RateLimit RateLimitCfg `json:"rateLimit,omitempty"`
+}
+
+// RateLimitCfg controls per-user rate limiting on the HTTP API.
+type RateLimitCfg struct {
+	RPM int `json:"rpm,omitempty"` // requests per minute per user (0 = unlimited)
 }
 
 // MemoryCfg holds memory system configuration.
@@ -350,13 +382,43 @@ type TeamConfig struct {
 	Routing map[string]string `json:"routing"`
 }
 
-// HomeDir returns the FastClaw home directory (~/.fastclaw).
+// HomeDir returns the FastClaw global root directory (~/.fastclaw).
+// This directory holds host-wide resources that are not scoped per-user:
+// installed plugins, installed skills, the daemon pid file, and the
+// users/ subtree. For per-user resources (config, credentials, agents,
+// sessions, cron jobs), callers MUST use UserDir instead.
 func HomeDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, ".fastclaw"), nil
+}
+
+// UserDir returns the per-user directory (~/.fastclaw/users/{userID}).
+// All user-scoped state (config, credentials, agents, cron jobs, sessions)
+// lives under this directory. In local mode, userID is DefaultUserID.
+func UserDir(userID string) (string, error) {
+	if userID == "" {
+		userID = DefaultUserID
+	}
+	home, err := HomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "users", userID), nil
+}
+
+// EnsureUserDir creates the per-user directory tree if it does not exist.
+func EnsureUserDir(userID string) (string, error) {
+	dir, err := UserDir(userID)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create user dir %s: %w", dir, err)
+	}
+	return dir, nil
 }
 
 func expandPath(path string) string {
@@ -370,14 +432,31 @@ func expandPath(path string) string {
 	return path
 }
 
-// Load reads and parses ~/.fastclaw/fastclaw.json.
-func Load() (*Config, error) {
-	homeDir, err := HomeDir()
+// UserConfigPath returns the full path to the config file for the given user.
+func UserConfigPath(userID string) (string, error) {
+	dir, err := UserDir(userID)
 	if err != nil {
-		return nil, fmt.Errorf("get home dir: %w", err)
+		return "", err
+	}
+	return filepath.Join(dir, "fastclaw.json"), nil
+}
+
+// Load reads and parses the config for the default (local) user.
+func Load() (*Config, error) {
+	return LoadForUser(DefaultUserID)
+}
+
+// LoadForUser reads and parses ~/.fastclaw/users/{userID}/fastclaw.json.
+func LoadForUser(userID string) (*Config, error) {
+	if err := MigrateLegacyLayout(); err != nil {
+		return nil, fmt.Errorf("migrate legacy layout: %w", err)
 	}
 
-	configPath := filepath.Join(homeDir, "fastclaw.json")
+	configPath, err := UserConfigPath(userID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config path: %w", err)
+	}
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", configPath, err)
@@ -407,11 +486,19 @@ func Load() (*Config, error) {
 
 // MergedAgentConfig merges defaults with an agent entry and its workspace agent.json
 // to produce a fully resolved agent config. Priority: agent.json > entry > defaults.
+// Uses DefaultUserID for workspace path resolution; for cloud users call
+// MergedAgentConfigForUser instead.
 func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
+	return cfg.MergedAgentConfigForUser(entry, DefaultUserID)
+}
+
+// MergedAgentConfigForUser is like MergedAgentConfig but resolves the
+// workspace path under the given user's directory.
+func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) ResolvedAgent {
 	workspace := expandPath(entry.Workspace)
 	if workspace == "" {
-		homeDir, _ := HomeDir()
-		workspace = filepath.Join(homeDir, "agents", entry.ID, "agent")
+		userDir, _ := UserDir(userID)
+		workspace = filepath.Join(userDir, "agents", entry.ID, "agent")
 	}
 
 	resolved := ResolvedAgent{
@@ -489,15 +576,21 @@ func (cfg *Config) MergedAgentConfig(entry AgentEntry) ResolvedAgent {
 
 // ResolveAgents produces resolved agent configs from config.agents.list.
 // If no agents are listed, creates a single "default" agent.
+// Uses DefaultUserID; for cloud users call ResolveAgentsForUser.
 func ResolveAgents(cfg *Config) []ResolvedAgent {
+	return ResolveAgentsForUser(cfg, DefaultUserID)
+}
+
+// ResolveAgentsForUser is like ResolveAgents but scoped to a specific user.
+func ResolveAgentsForUser(cfg *Config, userID string) []ResolvedAgent {
 	if len(cfg.Agents.List) == 0 {
 		entry := AgentEntry{ID: "default"}
-		return []ResolvedAgent{cfg.MergedAgentConfig(entry)}
+		return []ResolvedAgent{cfg.MergedAgentConfigForUser(entry, userID)}
 	}
 
 	agents := make([]ResolvedAgent, 0, len(cfg.Agents.List))
 	for _, entry := range cfg.Agents.List {
-		agents = append(agents, cfg.MergedAgentConfig(entry))
+		agents = append(agents, cfg.MergedAgentConfigForUser(entry, userID))
 	}
 	return agents
 }

@@ -10,7 +10,7 @@ import (
 )
 
 // DBStore implements Store using a SQL database (PostgreSQL or SQLite).
-// All tables are tenant-partitioned for multi-tenant cloud deployments.
+// All tables are partitioned by user_id for multi-user cloud deployments.
 type DBStore struct {
 	db      *sql.DB
 	dialect string // "postgres" or "sqlite"
@@ -67,42 +67,42 @@ func (d *DBStore) migrationSQL() []string {
 	// Postgres users can alter to JSONB later for indexing.
 	return []string{
 		`CREATE TABLE IF NOT EXISTS configs (
-			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
 			data TEXT NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (tenant_id)
+			PRIMARY KEY (user_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS agents (
-			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL DEFAULT '',
 			config TEXT NOT NULL DEFAULT '{}',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (tenant_id, agent_id)
+			PRIMARY KEY (user_id, agent_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS workspace_files (
-			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
 			filename TEXT NOT NULL,
 			content TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (tenant_id, agent_id, filename)
+			PRIMARY KEY (user_id, agent_id, filename)
 		)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
-			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
 			session_key TEXT NOT NULL,
 			messages TEXT NOT NULL DEFAULT '[]',
 			message_count INTEGER NOT NULL DEFAULT 0,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (tenant_id, agent_id, session_key)
+			PRIMARY KEY (user_id, agent_id, session_key)
 		)`,
 		`CREATE TABLE IF NOT EXISTS memory_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
 			session_id TEXT NOT NULL DEFAULT '',
 			role TEXT NOT NULL DEFAULT '',
@@ -112,7 +112,7 @@ func (d *DBStore) migrationSQL() []string {
 		d.memoryLogsIndex(),
 		`CREATE TABLE IF NOT EXISTS cron_jobs (
 			id TEXT PRIMARY KEY,
-			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			type TEXT NOT NULL DEFAULT 'cron',
@@ -129,13 +129,13 @@ func (d *DBStore) migrationSQL() []string {
 			locked_at TIMESTAMP,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_cron_jobs_schedule ON cron_jobs (tenant_id, enabled, next_run)`,
+		`CREATE INDEX IF NOT EXISTS idx_cron_jobs_schedule ON cron_jobs (user_id, enabled, next_run)`,
 	}
 }
 
 func (d *DBStore) memoryLogsIndex() string {
 	return `CREATE INDEX IF NOT EXISTS idx_memory_logs_search 
-		ON memory_logs (tenant_id, agent_id, created_at DESC)`
+		ON memory_logs (user_id, agent_id, created_at DESC)`
 }
 
 func (d *DBStore) Close() error {
@@ -152,14 +152,14 @@ func (d *DBStore) ph(n int) string {
 
 // --- Config ---
 
-func (d *DBStore) GetConfig(ctx context.Context, tenantID string) (*TenantConfig, error) {
+func (d *DBStore) GetConfig(ctx context.Context, userID string) (*UserConfig, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT data, created_at, updated_at FROM configs WHERE tenant_id = %s", d.ph(1)),
-		tenantID)
+		fmt.Sprintf("SELECT data, created_at, updated_at FROM configs WHERE user_id = %s", d.ph(1)),
+		userID)
 
 	var dataStr string
-	var cfg TenantConfig
-	cfg.TenantID = tenantID
+	var cfg UserConfig
+	cfg.UserID = userID
 	if err := row.Scan(&dataStr, &cfg.CreatedAt, &cfg.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -167,39 +167,39 @@ func (d *DBStore) GetConfig(ctx context.Context, tenantID string) (*TenantConfig
 	return &cfg, nil
 }
 
-func (d *DBStore) SaveConfig(ctx context.Context, tenantID string, cfg *TenantConfig) error {
+func (d *DBStore) SaveConfig(ctx context.Context, userID string, cfg *UserConfig) error {
 	data, _ := json.Marshal(cfg.Data)
 	now := time.Now()
 
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO configs (tenant_id, data, created_at, updated_at)
+			`INSERT INTO configs (user_id, data, created_at, updated_at)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (tenant_id) DO UPDATE SET data = $2, updated_at = $4`,
-			tenantID, string(data), now, now)
+			 ON CONFLICT (user_id) DO UPDATE SET data = $2, updated_at = $4`,
+			userID, string(data), now, now)
 		return err
 	}
 	// SQLite
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO configs (tenant_id, data, created_at, updated_at)
+		`INSERT INTO configs (user_id, data, created_at, updated_at)
 		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT (tenant_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
-		tenantID, string(data), now, now)
+		 ON CONFLICT (user_id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`,
+		userID, string(data), now, now)
 	return err
 }
 
-func (d *DBStore) DeleteConfig(ctx context.Context, tenantID string) error {
+func (d *DBStore) DeleteConfig(ctx context.Context, userID string) error {
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM configs WHERE tenant_id = %s", d.ph(1)), tenantID)
+		fmt.Sprintf("DELETE FROM configs WHERE user_id = %s", d.ph(1)), userID)
 	return err
 }
 
 // --- Agents ---
 
-func (d *DBStore) ListAgents(ctx context.Context, tenantID string) ([]AgentRecord, error) {
+func (d *DBStore) ListAgents(ctx context.Context, userID string) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf("SELECT agent_id, name, model, config, created_at, updated_at FROM agents WHERE tenant_id = %s ORDER BY created_at", d.ph(1)),
-		tenantID)
+		fmt.Sprintf("SELECT agent_id, name, model, config, created_at, updated_at FROM agents WHERE user_id = %s ORDER BY created_at", d.ph(1)),
+		userID)
 	if err != nil {
 		return nil, err
 	}
@@ -218,10 +218,10 @@ func (d *DBStore) ListAgents(ctx context.Context, tenantID string) ([]AgentRecor
 	return agents, nil
 }
 
-func (d *DBStore) GetAgent(ctx context.Context, tenantID, agentID string) (*AgentRecord, error) {
+func (d *DBStore) GetAgent(ctx context.Context, userID, agentID string) (*AgentRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT agent_id, name, model, config, created_at, updated_at FROM agents WHERE tenant_id = %s AND agent_id = %s", d.ph(1), d.ph(2)),
-		tenantID, agentID)
+		fmt.Sprintf("SELECT agent_id, name, model, config, created_at, updated_at FROM agents WHERE user_id = %s AND agent_id = %s", d.ph(1), d.ph(2)),
+		userID, agentID)
 
 	var ag AgentRecord
 	var cfgStr string
@@ -232,9 +232,9 @@ func (d *DBStore) GetAgent(ctx context.Context, tenantID, agentID string) (*Agen
 
 	// Load workspace files
 	ag.Workspace = make(map[string]string)
-	files, _ := d.ListWorkspaceFiles(ctx, tenantID, agentID)
+	files, _ := d.ListWorkspaceFiles(ctx, userID, agentID)
 	for _, fname := range files {
-		data, err := d.GetWorkspaceFile(ctx, tenantID, agentID, fname)
+		data, err := d.GetWorkspaceFile(ctx, userID, agentID, fname)
 		if err == nil {
 			ag.Workspace[fname] = string(data)
 		}
@@ -243,26 +243,26 @@ func (d *DBStore) GetAgent(ctx context.Context, tenantID, agentID string) (*Agen
 	return &ag, nil
 }
 
-func (d *DBStore) SaveAgent(ctx context.Context, tenantID string, agent *AgentRecord) error {
+func (d *DBStore) SaveAgent(ctx context.Context, userID string, agent *AgentRecord) error {
 	cfgData, _ := json.Marshal(agent.Config)
 	now := time.Now()
 
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO agents (tenant_id, agent_id, name, model, config, created_at, updated_at)
+			`INSERT INTO agents (user_id, agent_id, name, model, config, created_at, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)
-			 ON CONFLICT (tenant_id, agent_id) DO UPDATE SET name=$3, model=$4, config=$5, updated_at=$7`,
-			tenantID, agent.ID, agent.Name, agent.Model, string(cfgData), now, now)
+			 ON CONFLICT (user_id, agent_id) DO UPDATE SET name=$3, model=$4, config=$5, updated_at=$7`,
+			userID, agent.ID, agent.Name, agent.Model, string(cfgData), now, now)
 		if err != nil {
 			return err
 		}
 	} else {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO agents (tenant_id, agent_id, name, model, config, created_at, updated_at)
+			`INSERT INTO agents (user_id, agent_id, name, model, config, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT (tenant_id, agent_id) DO UPDATE SET
+			 ON CONFLICT (user_id, agent_id) DO UPDATE SET
 			   name=excluded.name, model=excluded.model, config=excluded.config, updated_at=excluded.updated_at`,
-			tenantID, agent.ID, agent.Name, agent.Model, string(cfgData), now, now)
+			userID, agent.ID, agent.Name, agent.Model, string(cfgData), now, now)
 		if err != nil {
 			return err
 		}
@@ -270,7 +270,7 @@ func (d *DBStore) SaveAgent(ctx context.Context, tenantID string, agent *AgentRe
 
 	// Save workspace files
 	for fname, content := range agent.Workspace {
-		if err := d.SaveWorkspaceFile(ctx, tenantID, agent.ID, fname, []byte(content)); err != nil {
+		if err := d.SaveWorkspaceFile(ctx, userID, agent.ID, fname, []byte(content)); err != nil {
 			return err
 		}
 	}
@@ -278,7 +278,7 @@ func (d *DBStore) SaveAgent(ctx context.Context, tenantID string, agent *AgentRe
 	return nil
 }
 
-func (d *DBStore) DeleteAgent(ctx context.Context, tenantID, agentID string) error {
+func (d *DBStore) DeleteAgent(ctx context.Context, userID, agentID string) error {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -287,9 +287,9 @@ func (d *DBStore) DeleteAgent(ctx context.Context, tenantID, agentID string) err
 
 	for _, table := range []string{"workspace_files", "sessions", "memory_logs", "agents"} {
 		if d.dialect == "postgres" {
-			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = $1 AND agent_id = $2", table), tenantID, agentID)
+			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE user_id = $1 AND agent_id = $2", table), userID, agentID)
 		} else {
-			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND agent_id = ?", table), tenantID, agentID)
+			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE user_id = ? AND agent_id = ?", table), userID, agentID)
 		}
 	}
 
@@ -298,10 +298,10 @@ func (d *DBStore) DeleteAgent(ctx context.Context, tenantID, agentID string) err
 
 // --- Sessions ---
 
-func (d *DBStore) GetSession(ctx context.Context, tenantID, agentID, sessionKey string) (*SessionRecord, error) {
+func (d *DBStore) GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT messages, updated_at FROM sessions WHERE tenant_id = %s AND agent_id = %s AND session_key = %s", d.ph(1), d.ph(2), d.ph(3)),
-		tenantID, agentID, sessionKey)
+		fmt.Sprintf("SELECT messages, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s", d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, sessionKey)
 
 	var msgsStr string
 	var rec SessionRecord
@@ -312,32 +312,32 @@ func (d *DBStore) GetSession(ctx context.Context, tenantID, agentID, sessionKey 
 	return &rec, nil
 }
 
-func (d *DBStore) SaveSession(ctx context.Context, tenantID, agentID, sessionKey string, session *SessionRecord) error {
+func (d *DBStore) SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error {
 	msgsData, _ := json.Marshal(session.Messages)
 	now := time.Now()
 	count := len(session.Messages)
 
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO sessions (tenant_id, agent_id, session_key, messages, message_count, updated_at)
+			`INSERT INTO sessions (user_id, agent_id, session_key, messages, message_count, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6)
-			 ON CONFLICT (tenant_id, agent_id, session_key) DO UPDATE SET messages=$4, message_count=$5, updated_at=$6`,
-			tenantID, agentID, sessionKey, string(msgsData), count, now)
+			 ON CONFLICT (user_id, agent_id, session_key) DO UPDATE SET messages=$4, message_count=$5, updated_at=$6`,
+			userID, agentID, sessionKey, string(msgsData), count, now)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO sessions (tenant_id, agent_id, session_key, messages, message_count, updated_at)
+		`INSERT INTO sessions (user_id, agent_id, session_key, messages, message_count, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (tenant_id, agent_id, session_key) DO UPDATE SET
+		 ON CONFLICT (user_id, agent_id, session_key) DO UPDATE SET
 		   messages=excluded.messages, message_count=excluded.message_count, updated_at=excluded.updated_at`,
-		tenantID, agentID, sessionKey, string(msgsData), count, now)
+		userID, agentID, sessionKey, string(msgsData), count, now)
 	return err
 }
 
-func (d *DBStore) ListSessions(ctx context.Context, tenantID, agentID string) ([]SessionMeta, error) {
+func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf("SELECT session_key, message_count, updated_at FROM sessions WHERE tenant_id = %s AND agent_id = %s ORDER BY updated_at DESC", d.ph(1), d.ph(2)),
-		tenantID, agentID)
+		fmt.Sprintf("SELECT session_key, message_count, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC", d.ph(1), d.ph(2)),
+		userID, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -352,28 +352,28 @@ func (d *DBStore) ListSessions(ctx context.Context, tenantID, agentID string) ([
 	return metas, nil
 }
 
-func (d *DBStore) DeleteSession(ctx context.Context, tenantID, agentID, sessionKey string) error {
+func (d *DBStore) DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error {
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM sessions WHERE tenant_id = %s AND agent_id = %s AND session_key = %s", d.ph(1), d.ph(2), d.ph(3)),
-		tenantID, agentID, sessionKey)
+		fmt.Sprintf("DELETE FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s", d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, sessionKey)
 	return err
 }
 
 // --- Memory ---
 
-func (d *DBStore) GetMemory(ctx context.Context, tenantID, agentID string) (string, error) {
-	data, err := d.GetWorkspaceFile(ctx, tenantID, agentID, "MEMORY.md")
+func (d *DBStore) GetMemory(ctx context.Context, userID, agentID string) (string, error) {
+	data, err := d.GetWorkspaceFile(ctx, userID, agentID, "MEMORY.md")
 	if err != nil {
 		return "", nil
 	}
 	return string(data), nil
 }
 
-func (d *DBStore) SaveMemory(ctx context.Context, tenantID, agentID, content string) error {
-	return d.SaveWorkspaceFile(ctx, tenantID, agentID, "MEMORY.md", []byte(content))
+func (d *DBStore) SaveMemory(ctx context.Context, userID, agentID, content string) error {
+	return d.SaveWorkspaceFile(ctx, userID, agentID, "MEMORY.md", []byte(content))
 }
 
-func (d *DBStore) SearchMemory(ctx context.Context, tenantID, agentID, query string, limit int) ([]MemoryEntry, error) {
+func (d *DBStore) SearchMemory(ctx context.Context, userID, agentID, query string, limit int) ([]MemoryEntry, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -385,16 +385,16 @@ func (d *DBStore) SearchMemory(ctx context.Context, tenantID, agentID, query str
 		// Postgres: use ILIKE for case-insensitive search
 		rows, err = d.db.QueryContext(ctx,
 			`SELECT content, role, session_id, created_at FROM memory_logs
-			 WHERE tenant_id = $1 AND agent_id = $2 AND content ILIKE '%' || $3 || '%'
+			 WHERE user_id = $1 AND agent_id = $2 AND content ILIKE '%' || $3 || '%'
 			 ORDER BY created_at DESC LIMIT $4`,
-			tenantID, agentID, query, limit)
+			userID, agentID, query, limit)
 	} else {
 		// SQLite: LIKE is case-insensitive by default for ASCII
 		rows, err = d.db.QueryContext(ctx,
 			`SELECT content, role, session_id, created_at FROM memory_logs
-			 WHERE tenant_id = ? AND agent_id = ? AND content LIKE '%' || ? || '%'
+			 WHERE user_id = ? AND agent_id = ? AND content LIKE '%' || ? || '%'
 			 ORDER BY created_at DESC LIMIT ?`,
-			tenantID, agentID, query, limit)
+			userID, agentID, query, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -410,27 +410,27 @@ func (d *DBStore) SearchMemory(ctx context.Context, tenantID, agentID, query str
 	return entries, nil
 }
 
-func (d *DBStore) AppendMemoryLog(ctx context.Context, tenantID, agentID string, entry MemoryEntry) error {
+func (d *DBStore) AppendMemoryLog(ctx context.Context, userID, agentID string, entry MemoryEntry) error {
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO memory_logs (tenant_id, agent_id, session_id, role, content, created_at)
+			`INSERT INTO memory_logs (user_id, agent_id, session_id, role, content, created_at)
 			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			tenantID, agentID, entry.SessionID, entry.Role, entry.Content, entry.Timestamp)
+			userID, agentID, entry.SessionID, entry.Role, entry.Content, entry.Timestamp)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO memory_logs (tenant_id, agent_id, session_id, role, content, created_at)
+		`INSERT INTO memory_logs (user_id, agent_id, session_id, role, content, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		tenantID, agentID, entry.SessionID, entry.Role, entry.Content, entry.Timestamp)
+		userID, agentID, entry.SessionID, entry.Role, entry.Content, entry.Timestamp)
 	return err
 }
 
 // --- Workspace Files ---
 
-func (d *DBStore) GetWorkspaceFile(ctx context.Context, tenantID, agentID, filename string) ([]byte, error) {
+func (d *DBStore) GetWorkspaceFile(ctx context.Context, userID, agentID, filename string) ([]byte, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT content FROM workspace_files WHERE tenant_id = %s AND agent_id = %s AND filename = %s", d.ph(1), d.ph(2), d.ph(3)),
-		tenantID, agentID, filename)
+		fmt.Sprintf("SELECT content FROM workspace_files WHERE user_id = %s AND agent_id = %s AND filename = %s", d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, filename)
 
 	var content string
 	if err := row.Scan(&content); err != nil {
@@ -439,28 +439,28 @@ func (d *DBStore) GetWorkspaceFile(ctx context.Context, tenantID, agentID, filen
 	return []byte(content), nil
 }
 
-func (d *DBStore) SaveWorkspaceFile(ctx context.Context, tenantID, agentID, filename string, data []byte) error {
+func (d *DBStore) SaveWorkspaceFile(ctx context.Context, userID, agentID, filename string, data []byte) error {
 	now := time.Now()
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO workspace_files (tenant_id, agent_id, filename, content, updated_at)
+			`INSERT INTO workspace_files (user_id, agent_id, filename, content, updated_at)
 			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT (tenant_id, agent_id, filename) DO UPDATE SET content=$4, updated_at=$5`,
-			tenantID, agentID, filename, string(data), now)
+			 ON CONFLICT (user_id, agent_id, filename) DO UPDATE SET content=$4, updated_at=$5`,
+			userID, agentID, filename, string(data), now)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO workspace_files (tenant_id, agent_id, filename, content, updated_at)
+		`INSERT INTO workspace_files (user_id, agent_id, filename, content, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT (tenant_id, agent_id, filename) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
-		tenantID, agentID, filename, string(data), now)
+		 ON CONFLICT (user_id, agent_id, filename) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
+		userID, agentID, filename, string(data), now)
 	return err
 }
 
-func (d *DBStore) ListWorkspaceFiles(ctx context.Context, tenantID, agentID string) ([]string, error) {
+func (d *DBStore) ListWorkspaceFiles(ctx context.Context, userID, agentID string) ([]string, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf("SELECT filename FROM workspace_files WHERE tenant_id = %s AND agent_id = %s ORDER BY filename", d.ph(1), d.ph(2)),
-		tenantID, agentID)
+		fmt.Sprintf("SELECT filename FROM workspace_files WHERE user_id = %s AND agent_id = %s ORDER BY filename", d.ph(1), d.ph(2)),
+		userID, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -477,10 +477,10 @@ func (d *DBStore) ListWorkspaceFiles(ctx context.Context, tenantID, agentID stri
 
 // --- Cron Jobs ---
 
-func (d *DBStore) ListCronJobs(ctx context.Context, tenantID string) ([]CronJobRecord, error) {
+func (d *DBStore) ListCronJobs(ctx context.Context, userID string) ([]CronJobRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf("SELECT id, tenant_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at FROM cron_jobs WHERE tenant_id = %s ORDER BY created_at", d.ph(1)),
-		tenantID)
+		fmt.Sprintf("SELECT id, user_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at FROM cron_jobs WHERE user_id = %s ORDER BY created_at", d.ph(1)),
+		userID)
 	if err != nil {
 		return nil, err
 	}
@@ -488,13 +488,13 @@ func (d *DBStore) ListCronJobs(ctx context.Context, tenantID string) ([]CronJobR
 	return d.scanCronJobs(rows)
 }
 
-func (d *DBStore) GetCronJob(ctx context.Context, tenantID, jobID string) (*CronJobRecord, error) {
+func (d *DBStore) GetCronJob(ctx context.Context, userID, jobID string) (*CronJobRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT id, tenant_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at FROM cron_jobs WHERE tenant_id = %s AND id = %s", d.ph(1), d.ph(2)),
-		tenantID, jobID)
+		fmt.Sprintf("SELECT id, user_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at FROM cron_jobs WHERE user_id = %s AND id = %s", d.ph(1), d.ph(2)),
+		userID, jobID)
 	var j CronJobRecord
 	var lastRun, nextRun sql.NullTime
-	if err := row.Scan(&j.ID, &j.TenantID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.CreatedAt); err != nil {
+	if err := row.Scan(&j.ID, &j.UserID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.CreatedAt); err != nil {
 		return nil, err
 	}
 	if lastRun.Valid {
@@ -506,31 +506,31 @@ func (d *DBStore) GetCronJob(ctx context.Context, tenantID, jobID string) (*Cron
 	return &j, nil
 }
 
-func (d *DBStore) SaveCronJob(ctx context.Context, tenantID string, job *CronJobRecord) error {
+func (d *DBStore) SaveCronJob(ctx context.Context, userID string, job *CronJobRecord) error {
 	now := time.Now()
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO cron_jobs (id, tenant_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at)
+			`INSERT INTO cron_jobs (id, user_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			 ON CONFLICT (id) DO UPDATE SET name=$4, type=$5, schedule=$6, message=$7, channel=$8, chat_id=$9, account_id=$10, timezone=$11, enabled=$12, last_run=$13, next_run=$14`,
-			job.ID, tenantID, job.AgentID, job.Name, job.Type, job.Schedule, job.Message, job.Channel, job.ChatID, job.AccountID, job.Timezone, job.Enabled, job.LastRun, job.NextRun, now)
+			job.ID, userID, job.AgentID, job.Name, job.Type, job.Schedule, job.Message, job.Channel, job.ChatID, job.AccountID, job.Timezone, job.Enabled, job.LastRun, job.NextRun, now)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO cron_jobs (id, tenant_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at)
+		`INSERT INTO cron_jobs (id, user_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (id) DO UPDATE SET
 		   name=excluded.name, type=excluded.type, schedule=excluded.schedule, message=excluded.message,
 		   channel=excluded.channel, chat_id=excluded.chat_id, account_id=excluded.account_id,
 		   timezone=excluded.timezone, enabled=excluded.enabled, last_run=excluded.last_run, next_run=excluded.next_run`,
-		job.ID, tenantID, job.AgentID, job.Name, job.Type, job.Schedule, job.Message, job.Channel, job.ChatID, job.AccountID, job.Timezone, job.Enabled, job.LastRun, job.NextRun, now)
+		job.ID, userID, job.AgentID, job.Name, job.Type, job.Schedule, job.Message, job.Channel, job.ChatID, job.AccountID, job.Timezone, job.Enabled, job.LastRun, job.NextRun, now)
 	return err
 }
 
-func (d *DBStore) DeleteCronJob(ctx context.Context, tenantID, jobID string) error {
+func (d *DBStore) DeleteCronJob(ctx context.Context, userID, jobID string) error {
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM cron_jobs WHERE tenant_id = %s AND id = %s", d.ph(1), d.ph(2)),
-		tenantID, jobID)
+		fmt.Sprintf("DELETE FROM cron_jobs WHERE user_id = %s AND id = %s", d.ph(1), d.ph(2)),
+		userID, jobID)
 	return err
 }
 
@@ -539,11 +539,11 @@ func (d *DBStore) GetDueCronJobs(ctx context.Context, now time.Time) ([]CronJobR
 	var err error
 	if d.dialect == "postgres" {
 		rows, err = d.db.QueryContext(ctx,
-			`SELECT id, tenant_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at
+			`SELECT id, user_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at
 			 FROM cron_jobs WHERE enabled = true AND next_run <= $1 ORDER BY next_run`, now)
 	} else {
 		rows, err = d.db.QueryContext(ctx,
-			`SELECT id, tenant_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at
+			`SELECT id, user_id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at
 			 FROM cron_jobs WHERE enabled = 1 AND next_run <= ? ORDER BY next_run`, now)
 	}
 	if err != nil {
@@ -592,7 +592,7 @@ func (d *DBStore) scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 	for rows.Next() {
 		var j CronJobRecord
 		var lastRun, nextRun sql.NullTime
-		if err := rows.Scan(&j.ID, &j.TenantID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.CreatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.UserID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.CreatedAt); err != nil {
 			continue
 		}
 		if lastRun.Valid {

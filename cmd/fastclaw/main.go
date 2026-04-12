@@ -18,7 +18,29 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/daemon"
 	"github.com/fastclaw-ai/fastclaw/internal/gateway"
 	"github.com/fastclaw-ai/fastclaw/internal/setup"
+	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
+
+// apiResolver adapts *gateway.Gateway to api.UserResolver. The bridge lives
+// here (in main) so the api package doesn't need to import gateway.
+type apiResolver struct {
+	gw *gateway.Gateway
+}
+
+func (a *apiResolver) UserSpaceFor(userID string) (*api.UserSpaceView, error) {
+	sp, err := a.gw.UserSpaceFor(userID)
+	if err != nil {
+		return nil, err
+	}
+	return &api.UserSpaceView{
+		UserID: sp.UserID,
+		Agents: sp.Agents,
+		Config: sp.Config,
+	}, nil
+}
+
+func (a *apiResolver) LocalAgentManager() *agent.Manager { return a.gw.AgentManager() }
+func (a *apiResolver) IsCloudMode() bool                 { return a.gw.IsCloudMode() }
 
 func main() {
 	rootCmd := &cobra.Command{
@@ -44,6 +66,7 @@ func main() {
 	rootCmd.AddCommand(sandboxCmd())
 	rootCmd.AddCommand(policyCmd())
 	rootCmd.AddCommand(daemonCmd())
+	rootCmd.AddCommand(userCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -99,11 +122,26 @@ func runGateway(port int) error {
 	webSrv.SetAgentProvider(&agentProviderAdapter{mgr: gw.AgentManager()})
 	webSrv.SetTaskQueue(gw.TaskQueue())
 	webSrv.SetGatewayConfig(gwCfg)
+	webSrv.SetUserResolver(&apiResolver{gw: gw})
+	webSrv.SetStore(gw.Store())
 
-	// Set up OpenAI-compatible API and WebSocket gateway
+	// Set up OpenAI-compatible API and WebSocket gateway.
+	// In cloud mode the user registry maps bearer tokens to user IDs; in
+	// local mode it's absent and everything resolves to DefaultUserID.
 	gatewayToken := cfg.Gateway.Auth.Token
-	apiSrv := api.NewServer(gw.AgentManager(), gatewayToken, gwCfg)
+	var userReg *users.Registry
+	if cfg.Gateway.Mode == "cloud" {
+		var regErr error
+		userReg, regErr = users.Load()
+		if regErr != nil {
+			slog.Warn("failed to load user registry", "error", regErr)
+		} else {
+			slog.Info("cloud mode enabled", "users", userReg.Count())
+		}
+	}
+	apiSrv := api.NewServer(&apiResolver{gw: gw}, gatewayToken, userReg, gwCfg)
 	webSrv.SetAPIServer(apiSrv)
+	webSrv.SetAuth(gatewayToken, userReg)
 
 	bindMode := gwCfg.Bind
 	if bindMode == "" {

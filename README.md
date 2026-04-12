@@ -8,9 +8,9 @@ A lightweight, self-hosted AI Agent framework written in Go.
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/fastclaw-ai/fastclaw?include_prereleases)](https://github.com/fastclaw-ai/fastclaw/releases)
 
-**Single binary · Any LLM · Multi-channel · Plugin system · Web dashboard**
+**Single binary · Any LLM · Multi-user · Multi-agent · Cloud-ready**
 
-[Install](#-install) · [Quick Start](#-quick-start) · [Features](#-features) · [Documentation](#-documentation)
+[Install](#-install) · [Quick Start](#-quick-start) · [Cloud Deploy](#-cloud-deployment) · [Features](#-features) · [Documentation](#-documentation)
 
 </div>
 
@@ -18,11 +18,15 @@ A lightweight, self-hosted AI Agent framework written in Go.
 
 ## What is FastClaw?
 
-FastClaw is a self-hosted AI agent runtime. It connects your LLM to chat platforms, executes tools, manages memory, and runs scheduled tasks — all from a single Go binary with zero dependencies.
+FastClaw is an AI agent runtime — the "Agent OS" that runs your agents. It connects LLMs to tools, manages memory, and handles multiple users. Run it locally as a single-user agent like OpenClaw, or deploy to the cloud as a multi-tenant platform.
 
 ```bash
+# Local (single user)
 curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/main/install.sh | bash
 fastclaw    # Opens setup wizard in browser
+
+# Cloud (multi-user, one-click)
+cd deploy/docker && ./start.sh
 ```
 
 ## 📦 Install
@@ -56,6 +60,61 @@ cd fastclaw && make build
 
 That's it. Your agent is live. Connect messaging channels (Telegram, Discord, etc.) later via plugins.
 
+## ☁️ Cloud Deployment
+
+FastClaw supports multi-user cloud deployment where each user gets isolated agents, sessions, memory, and credentials.
+
+### Docker Compose (single machine)
+
+```bash
+cd deploy/docker
+./start.sh                        # Interactive — prompts for port + API key
+./start.sh --port 19000           # Specify port
+LLM_API_KEY=sk-xxx ./start.sh     # Non-interactive
+```
+
+The script builds the image, starts FastClaw + Postgres, creates a demo user, and prints access tokens.
+
+### Kubernetes (Helm)
+
+```bash
+helm install fastclaw deploy/helm/fastclaw \
+  --namespace fastclaw --create-namespace \
+  --set gateway.adminToken=$(openssl rand -hex 32) \
+  --set postgres.password=$(openssl rand -hex 16) \
+  --set ingress.enabled=true \
+  --set ingress.host=fastclaw.yourdomain.com
+```
+
+### User Management
+
+```bash
+# CLI
+fastclaw user add alice --name Alice    # → prints access token
+fastclaw user list
+fastclaw user token alice               # issue additional token
+
+# Admin API
+curl -X POST http://localhost:18953/v1/admin/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"id":"alice","name":"Alice"}'
+
+# Web UI
+# Admin login → sidebar "Users" page → Add User
+```
+
+Each user logs into the same web UI with their token and sees only their own data.
+
+### Local vs Cloud
+
+| | Local Mode | Cloud Mode |
+|---|---|---|
+| Config | `gateway.mode: "local"` (default) | `gateway.mode: "cloud"` |
+| Users | Single implicit "local" user | Multiple users, token auth |
+| Data | `~/.fastclaw/users/local/` | `~/.fastclaw/users/{id}/` per user |
+| Web UI | No login required | Token login screen |
+| Upgrade path | Zero config change | Same binary, just set mode |
+
 ## ✨ Features
 
 ### Core
@@ -65,6 +124,7 @@ That's it. Your agent is live. Connect messaging channels (Telegram, Discord, et
 | **ReAct Agent Loop** | Multi-turn reasoning + tool calling |
 | **Any LLM** | OpenAI-compatible API (OpenAI, Claude, DeepSeek, Gemini, Groq, Ollama, OpenRouter) |
 | **Multi-Agent** | Multiple agents with independent personalities, memory, and skills |
+| **Multi-User** | Per-user isolated agents, sessions, memory, and credentials |
 | **Context Engineering** | Auto-pruning & LLM compression for long conversations |
 | **Dual-Layer Memory** | MEMORY.md (facts) + searchable conversation logs |
 | **Hook System** | Before/After hooks on prompts, model calls, tool calls |
@@ -84,8 +144,8 @@ That's it. Your agent is live. Connect messaging channels (Telegram, Discord, et
 
 | Tool | Description |
 |------|-------------|
-| `exec` | Shell commands (with optional Docker sandbox) |
-| `read_file` / `write_file` / `list_dir` | File operations |
+| `exec` | Shell commands (with optional Docker/E2B sandbox) |
+| `read_file` / `write_file` / `list_dir` | File operations (sandboxed in cloud mode) |
 | `web_fetch` | Fetch web pages → markdown |
 | `web_search` | Brave Search API |
 | `memory_search` | Search conversation history |
@@ -95,73 +155,59 @@ That's it. Your agent is live. Connect messaging channels (Telegram, Discord, et
 | `load_skill` | Load skill instructions on demand |
 | MCP tools | Connect external tools via Model Context Protocol |
 
-### Automation
+### Security
 
 | Feature | Description |
 |---------|-------------|
-| **CronTab** | Schedule tasks: cron expressions, intervals, one-time |
-| **Heartbeat** | Agent wakes every 30 min to check HEARTBEAT.md |
-| **Webhooks** | POST /hooks to trigger agent actions from external systems |
-| **Slash Commands** | `/new` `/compact` `/status` `/help` `/version` |
-
-### Security (inspired by [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell))
-
-| Feature | Description |
-|---------|-------------|
-| **Sandbox Exec** | Docker-based isolated command execution |
+| **Sandbox Exec** | Docker or E2B sandboxed execution |
+| **Path Sandbox** | Cloud mode restricts file access to user workspace |
+| **Per-User KEK** | Each user's credentials encrypted with independent key |
 | **Policy Engine** | YAML policies for filesystem, network, tools, resources |
 | **Credential Manager** | AES-256-GCM encrypted key storage, env auto-discovery |
-| **Tool Loop Detection** | Breaks after 3 identical consecutive calls |
+| **Rate Limiting** | Per-user RPM limiting on API endpoints |
 
 ### Platform
 
 | Feature | Description |
 |---------|-------------|
-| **Web Dashboard** | Full management UI at localhost:18953 |
+| **Web Dashboard** | Full management UI with token-based login |
+| **Admin Panel** | User management page for admins |
 | **Plugin System** | JSON-RPC subprocess plugins (any language) |
 | **Pluggable Storage** | File (default), PostgreSQL, SQLite |
 | **OpenAI-Compatible API** | `POST /v1/chat/completions` with SSE streaming |
-| **WebSocket Gateway** | OpenClaw-compatible protocol |
+| **Admin API** | `POST/GET/DELETE /v1/admin/users` |
+| **WebSocket Gateway** | Real-time chat protocol |
+| **Docker / Helm** | One-click cloud deployment |
 
 ## 🏗 Architecture
 
 ```
-                    ┌─────────────────────────────────────────────┐
-                    │              FastClaw Gateway                │
-                    │                                             │
-  Web UI ────────▶ │  ┌──────────┐    ┌──────────────────────┐  │
-  Plugins ───────▶ │  │ Message  │    │    Agent Manager     │  │
-  Webhooks ──────▶ │  │   Bus    │───▶│                      │  │
-  API ───────────▶ │  │          │◀───│  Agent 1 (Mike)      │  │
-                    │  │          │    │  Agent 2 (Mary)      │  │
-                    │  └──────────┘    │  Agent N ...         │  │
-                    │                   └──────────────────────┘  │
-                    │                            │                │
-                    │        ┌───────────────────┼──────────┐    │
-                    │        ▼                   ▼          ▼    │
-                    │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
-                    │  │  Tools   │  │  Memory  │  │ Sessions │ │
-                    │  │          │  │          │  │          │ │
-                    │  │ exec     │  │MEMORY.md │  │ JSONL    │ │
-                    │  │ files    │  │ logs/    │  │ compress │ │
-                    │  │ web      │  │ search   │  │ per-chat │ │
-                    │  │ MCP      │  │          │  │          │ │
-                    │  └──────────┘  └──────────┘  └──────────┘ │
-                    │                                             │
-                    │  ┌──────────┐  ┌──────────┐  ┌──────────┐ │
-                    │  │  Cron    │  │ Plugins  │  │  Policy  │ │
-                    │  │ Schedule │  │ JSON-RPC │  │  Engine  │ │
-                    │  │ Heartbeat│  │ channels │  │  Sandbox │ │
-                    │  │ Webhooks │  │ tools    │  │  Creds   │ │
-                    │  └──────────┘  └──────────┘  └──────────┘ │
-                    │                                             │
-                    │  ┌──────────────────────────────────────┐  │
-                    │  │     /v1/chat/completions (SSE)       │  │
-                    │  │     /ws (WebSocket)                  │  │
-                    │  │     /api/* (REST)                    │  │
-                    │  │     Web Dashboard (:18953)           │  │
-                    │  └──────────────────────────────────────┘  │
-                    └─────────────────────────────────────────────┘
+                ┌────────────────────────────────────────────────────┐
+                │                 FastClaw Gateway                    │
+                │                                                    │
+  Web UI ─────▶│  ┌──────────────────────────────────────────────┐  │
+  API ────────▶│  │          Auth Middleware                      │  │
+  WebSocket ──▶│  │   token → userID → UserSpace (lazy loaded)   │  │
+  Webhook ────▶│  └──────────────────┬───────────────────────────┘  │
+                │                     │                              │
+                │  ┌──────────────────▼───────────────────────────┐ │
+                │  │          UserSpace Registry                   │ │
+                │  │                                               │ │
+                │  │  user:local  → Config + AgentManager + Creds  │ │
+                │  │  user:alice  → Config + AgentManager + Creds  │ │
+                │  │  user:bob    → Config + AgentManager + Creds  │ │
+                │  │  (idle users evicted after 30 min)            │ │
+                │  └──────────────────┬───────────────────────────┘ │
+                │                     │                              │
+                │        ┌────────────┼────────────┐                │
+                │        ▼            ▼            ▼                │
+                │  ┌──────────┐ ┌──────────┐ ┌──────────┐          │
+                │  │  Tools   │ │  Memory  │ │ Sessions │          │
+                │  │ exec     │ │MEMORY.md │ │ per-chat │          │
+                │  │ files    │ │ search   │ │ history  │          │
+                │  │ sandbox  │ │ per-user │ │ per-user │          │
+                │  └──────────┘ └──────────┘ └──────────┘          │
+                └────────────────────────────────────────────────────┘
 ```
 
 ## 🔌 Plugin System
@@ -176,19 +222,9 @@ fastclaw plugins install telegram
 
 # Install from GitHub
 fastclaw plugins install github.com/user/fastclaw-plugin
-
-# Bridge an OpenClaw tool plugin
-fastclaw plugins install @ollama/openclaw-web-search
 ```
 
 Official plugins are in the [`plugins/`](plugins/) directory. Community plugins are indexed at [FastClaw Hub](https://github.com/fastclaw-ai/fastclaw-hub).
-
-### Community Plugins
-
-| Plugin | Type | Description |
-|--------|------|-------------|
-| [fastclaw-plugin-weixin](https://github.com/videGavin/fastclaw-plugin-weixin) | Channel | WeChat messaging via ilink bot API (Node.js) |
-| [fastclaw-mattermost-plugin](https://github.com/cornking2020/fastclaw-mattermost-plugin) | Channel | Mattermost messaging via WebSocket API (Go) |
 
 ## 🖥 Web Dashboard
 
@@ -205,6 +241,9 @@ Full management UI at `http://localhost:18953`:
 | Channels | Channel status and configuration |
 | Cron Jobs | Create and manage scheduled tasks |
 | Settings | Storage, webhook config |
+| Users | (Admin only) Create and manage cloud users |
+
+In cloud mode, users log in with a bearer token. Each user sees only their own agents, conversations, and settings.
 
 ## 🔗 API
 
@@ -219,6 +258,9 @@ curl -X POST http://localhost:18953/v1/chat/completions \
 
 # List agents
 curl http://localhost:18953/v1/agents -H "Authorization: Bearer $TOKEN"
+
+# Admin: list users (admin token only)
+curl http://localhost:18953/v1/admin/users -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
 ## 🛠 CLI Reference
@@ -231,18 +273,29 @@ fastclaw version            # Version info
 fastclaw doctor             # Check config health
 fastclaw upgrade            # Update to latest
 
-# Plugins
-fastclaw plugins install NAME   # Install from Hub / GitHub / npm
-fastclaw plugins list           # List installed plugins
-fastclaw plugins remove ID      # Remove a plugin
+# Users (cloud mode)
+fastclaw user add alice --name Alice   # Create user, get token
+fastclaw user list                     # List all users
+fastclaw user token alice              # Issue new token
+fastclaw user remove alice             # Remove user
 
 # Agents
 fastclaw agent create mike  # Create new agent
 fastclaw agent list          # List agents
 
+# Plugins
+fastclaw plugins install NAME   # Install from Hub / GitHub
+fastclaw plugins list           # List installed plugins
+fastclaw plugins remove ID      # Remove a plugin
+
 # Skills
 fastclaw skill list          # List installed skills
 fastclaw skill remove NAME   # Remove a skill
+
+# Sessions
+fastclaw session list        # List all sessions
+fastclaw session clear KEY   # Clear specific session
+fastclaw session clear-all   # Clear all sessions
 ```
 
 ## 🛠 Development

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 )
 
 // ToolFunc is a function that executes a tool with JSON arguments and returns a result string.
@@ -22,7 +23,9 @@ const (
 
 // Registry holds all registered tools.
 type Registry struct {
-	tools map[string]registeredTool
+	tools       map[string]registeredTool
+	sandboxRoot string // if non-empty, file tools reject paths outside this dir
+	executor    sandbox.Executor // if non-nil, all file+exec tools route through this
 }
 
 type registeredTool struct {
@@ -103,6 +106,27 @@ func (r *Registry) Execute(ctx context.Context, name string, args string) (strin
 // SetSandboxConfig updates the exec tool to use sandbox mode.
 func (r *Registry) SetSandboxConfig(sbCfg *SandboxConfig) {
 	registerExecWithSandbox(r, sbCfg)
+}
+
+// SetSandboxRoot restricts the file tools (read_file, write_file, list_dir)
+// to paths under root. Absolute paths outside the root and relative paths
+// that traverse above it are rejected. When root is empty (default), no
+// restriction is applied — this is the local single-user mode. In cloud
+// mode the root is typically set to the user's directory
+// (~/.fastclaw/users/{userID}).
+func (r *Registry) SetSandboxRoot(root string) {
+	r.sandboxRoot = root
+}
+
+// SetExecutor attaches a sandbox Executor. When set, read_file, write_file,
+// list_dir, and exec are ALL forwarded to the executor instead of operating
+// on the host filesystem. This is the mode used for cloud deployments where
+// each user gets an isolated container/VM with their own runtime + files.
+func (r *Registry) SetExecutor(ex sandbox.Executor) {
+	r.executor = ex
+	// Re-register built-in tools to use the executor.
+	registerSandboxedFile(r, ex)
+	registerSandboxedExec(r, ex)
 }
 
 func (r *Registry) registerBuiltins(workspace string) {

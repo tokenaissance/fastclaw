@@ -98,14 +98,15 @@ type HookRegisterResult struct {
 
 // HookFireParams is sent with hook.fire.
 type HookFireParams struct {
-	Point     string             `json:"point"`
-	AgentName string             `json:"agentName"`
-	ChatID    string             `json:"chatId"`
-	Messages  []HookMessage      `json:"messages,omitempty"`
-	Response  *HookResponseData  `json:"response,omitempty"`
-	ToolName  string             `json:"toolName,omitempty"`
-	ToolArgs  string             `json:"toolArgs,omitempty"`
-	ToolResult string            `json:"toolResult,omitempty"`
+	Point      string             `json:"point"`
+	AgentName  string             `json:"agentName"`
+	ChatID     string             `json:"chatId"`
+	UserID     string             `json:"userId,omitempty"`
+	Messages   []HookMessage      `json:"messages,omitempty"`
+	Response   *HookResponseData  `json:"response,omitempty"`
+	ToolName   string             `json:"toolName,omitempty"`
+	ToolArgs   string             `json:"toolArgs,omitempty"`
+	ToolResult string             `json:"toolResult,omitempty"`
 }
 
 // HookMessage is a simplified message for hook communication.

@@ -16,11 +16,15 @@ import {
   X,
   Sun,
   Moon,
+  LogOut,
+  Users,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useTheme } from "@/components/theme-provider";
+import { isLoggedIn, logout } from "@/lib/auth";
+import { getStatus } from "@/lib/api";
 
-const navItems = [
+const baseNavItems = [
   { href: "/overview/", label: "Overview", icon: LayoutDashboard },
   { href: "/chat/", label: "Chat", icon: MessageSquare },
   { href: "/agents/", label: "Agents", icon: Bot },
@@ -32,25 +36,37 @@ const navItems = [
   { href: "/settings/", label: "Settings", icon: Settings },
 ];
 
+const adminNavItem = { href: "/users/", label: "Users", icon: Users };
+
 export function SidebarLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
   const { theme, toggleTheme } = useTheme();
   const [gatewayRunning, setGatewayRunning] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [userId, setUserId] = useState("");
 
   useEffect(() => {
-    fetch("/api/status")
-      .then((r) => r.json())
-      .then((s) => setGatewayRunning(s.running))
+    getStatus()
+      .then((s) => {
+        setGatewayRunning(s.running);
+        setIsAdmin(s.isAdmin || false);
+        setUserId(s.userId || "");
+      })
       .catch(() => {});
     const interval = setInterval(() => {
-      fetch("/api/status")
-        .then((r) => r.json())
-        .then((s) => setGatewayRunning(s.running))
+      getStatus()
+        .then((s) => {
+          setGatewayRunning(s.running);
+          setIsAdmin(s.isAdmin || false);
+          setUserId(s.userId || "");
+        })
         .catch(() => {});
     }, 15000);
     return () => clearInterval(interval);
   }, []);
+
+  const navItems = isAdmin ? [...baseNavItems, adminNavItem] : baseNavItems;
 
   const NavLinks = ({ onClick }: { onClick?: () => void }) => (
     <>
@@ -108,21 +124,45 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
         </nav>
 
         {/* Footer */}
-        <div className="border-t border-border p-3">
+        <div className="border-t border-border p-3 space-y-2">
+          {userId && (
+            <div className="flex items-center gap-2 px-1">
+              <div className="h-6 w-6 rounded-full bg-violet-600/20 flex items-center justify-center">
+                <span className="text-[10px] font-bold text-violet-400">
+                  {userId.charAt(0).toUpperCase()}
+                </span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium text-foreground truncate">{userId}</p>
+                <p className="text-[10px] text-muted-foreground/60">{isAdmin ? "Admin" : "User"}</p>
+              </div>
+            </div>
+          )}
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-muted-foreground/60 font-mono">
               v0.1.0
             </span>
-            <button
-              onClick={toggleTheme}
-              className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-            >
-              {theme === "dark" ? (
-                <Sun className="h-3.5 w-3.5" />
-              ) : (
-                <Moon className="h-3.5 w-3.5" />
+            <div className="flex items-center gap-1">
+              {isLoggedIn() && (
+                <button
+                  onClick={() => { logout(); window.location.reload(); }}
+                  className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                  title="Logout"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                </button>
               )}
-            </button>
+              <button
+                onClick={toggleTheme}
+                className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              >
+                {theme === "dark" ? (
+                  <Sun className="h-3.5 w-3.5" />
+                ) : (
+                  <Moon className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
           </div>
         </div>
       </aside>

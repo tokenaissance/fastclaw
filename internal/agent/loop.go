@@ -39,6 +39,7 @@ type Agent struct {
 	thinking          string
 	workspacePath     string
 	homeDir           string
+	ownerUserID       string // the user that owns this agent (for hook namespacing)
 	skillsCfg         config.SkillsConfig
 	globalSkillsCfg   config.SkillsCfg
 	messageBus        *bus.MessageBus
@@ -255,6 +256,13 @@ func (a *Agent) ToolRegistry() *tools.Registry {
 	return a.registry
 }
 
+// SetOwnerUserID tags this agent with the owning user ID. The value is
+// propagated into every HookContext so plugins like mem0 can namespace
+// data per user.
+func (a *Agent) SetOwnerUserID(uid string) {
+	a.ownerUserID = uid
+}
+
 // HookRegistry returns the agent's hook registry for external hook registration.
 func (a *Agent) HookRegistry() *HookRegistry {
 	return a.hooks
@@ -347,12 +355,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
 
 	// Hook: BeforeSystemPrompt
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt})
+	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 
 	// Hook: AfterSystemPrompt
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt})
+	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store the raw user message
 	userMsg := provider.Message{Role: "user", Content: msg.Text}
@@ -403,7 +411,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		)
 
 		// Hook: BeforeModelCall
-		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, ChatID: msg.ChatID}
+		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 
 		// PII scrubbing: redact sensitive data before sending to LLM
@@ -415,7 +423,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		resp, err := a.provider.Chat(ctx, llmMessages, toolDefs, a.model, a.maxTokens, a.temperature)
 
 		// Hook: AfterModelCall
-		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID}
+		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcAfter)
 
 		if err != nil {
@@ -489,6 +497,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				Point:     BeforeToolCall,
 				ToolName:  tc.Function.Name,
 				ToolArgs:  tc.Function.Arguments,
+				UserID:    a.ownerUserID,
 			})
 		}
 
@@ -511,6 +520,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				ToolName:   r.toolName,
 				ToolResult: r.result,
 				Error:      r.err,
+				UserID:     a.ownerUserID,
 			})
 
 			if r.err != nil {
@@ -574,6 +584,7 @@ func (a *Agent) runPostTurn(ctx context.Context, messages []provider.Message, to
 		TurnCount:     a.turnCount,
 		ToolCallCount: toolCallCount,
 		Workspace:     a.workspacePath,
+		UserID:        a.ownerUserID,
 	})
 
 	// Auto-persist memory every N turns
@@ -610,9 +621,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt})
+	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
-	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt})
+	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
 	// Store raw user message
 	userMsg := provider.Message{Role: "user", Content: msg.Text}
@@ -650,12 +661,12 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	// ReAct loop - use Chat for tool iterations
 	for i := 0; i < a.maxToolIterations; i++ {
-		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, ChatID: msg.ChatID}
+		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 
 		resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
 
-		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID}
+		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcAfter)
 
 		if err != nil {
@@ -737,7 +748,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		// Fire BeforeToolCall hooks
 		for _, tc := range resp.ToolCalls {
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeToolCall, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments, UserID: a.ownerUserID})
 		}
 
 		// Execute tools concurrently via SDK engine
@@ -745,7 +756,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 		for idx, r := range results {
 			tc := resp.ToolCalls[idx]
-			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: r.result, Error: r.err})
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterToolCall, ToolName: r.toolName, ToolResult: r.result, Error: r.err, UserID: a.ownerUserID})
 
 			if r.err != nil {
 				slog.Warn("tool execution error", "agent", a.name, "name", r.toolName, "error", r.err)

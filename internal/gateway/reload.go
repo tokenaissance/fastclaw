@@ -29,13 +29,12 @@ func (g *Gateway) startConfigWatcher(ctx context.Context, wg *sync.WaitGroup) {
 	}
 	defer watcher.Close()
 
-	// Watch config directory
-	homeDir, err := config.HomeDir()
+	// Watch the default user's config directory for fastclaw.json changes.
+	configPath, err := config.UserConfigPath(config.DefaultUserID)
 	if err != nil {
 		slog.Error("cannot determine config dir for watcher", "error", err)
 		return
 	}
-	configPath := filepath.Join(homeDir, "fastclaw.json")
 	configDir := filepath.Dir(configPath)
 
 	if err := watcher.Add(configDir); err != nil {

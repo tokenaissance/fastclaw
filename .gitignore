@@ -51,6 +51,10 @@ DESIGN.md
 tmp/
 .air.toml
 
+# Deploy instance data (tokens, passwords, local state)
+deploy/docker/instances/
+deploy/docker/.env
+
 # Web build artifacts (embedded at build time)
 internal/setup/web/
 web/out/

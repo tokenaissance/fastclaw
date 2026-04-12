@@ -12,12 +12,12 @@ import (
 // --- Agent Management ---
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load()
+	cfg, err := s.loadUserConfig(r)
 	if err != nil {
 		jsonResponse(w, http.StatusOK, []any{})
 		return
 	}
-	resolved := config.ResolveAgents(cfg)
+	resolved := config.ResolveAgentsForUser(cfg, config.UserIDFromContext(r.Context()))
 	var agents []map[string]any
 	for _, ra := range resolved {
 		soul := ""
@@ -57,7 +57,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.Load()
+	cfg, err := s.loadUserConfig(r)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -69,14 +69,14 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		Model: req.Model,
 	})
 
-	if err := saveConfigFile(cfg); err != nil {
+	if err := s.saveUserConfig(r, cfg); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
-	// Create workspace
-	homeDir, _ := config.HomeDir()
-	agentDir := filepath.Join(homeDir, "agents", req.ID, "agent")
+	// Create workspace under the default user's directory.
+	userDir, _ := userDirForRequest(r)
+	agentDir := filepath.Join(userDir, "agents", req.ID, "agent")
 	for _, dir := range []string{agentDir, filepath.Join(agentDir, "memory"), filepath.Join(agentDir, "sessions"), filepath.Join(agentDir, "skills")} {
 		os.MkdirAll(dir, 0o755)
 	}
@@ -101,7 +101,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.Load()
+	cfg, err := s.loadUserConfig(r)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -122,14 +122,14 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := saveConfigFile(cfg); err != nil {
+	if err := s.saveUserConfig(r, cfg); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
-	// Update workspace files
-	homeDir, _ := config.HomeDir()
-	agentDir := filepath.Join(homeDir, "agents", id, "agent")
+	// Update workspace files under the default user's directory.
+	userDir, _ := userDirForRequest(r)
+	agentDir := filepath.Join(userDir, "agents", id, "agent")
 	if req.Soul != "" {
 		os.WriteFile(filepath.Join(agentDir, "SOUL.md"), []byte(req.Soul), 0o644)
 	}
@@ -144,7 +144,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	cfg, err := config.Load()
+	cfg, err := s.loadUserConfig(r)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -158,7 +158,7 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.Agents.List = newList
 
-	if err := saveConfigFile(cfg); err != nil {
+	if err := s.saveUserConfig(r, cfg); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}

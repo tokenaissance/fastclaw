@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,10 +16,115 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
+// loadUserConfig reads the config for the user identified by the request
+// context. For the local user it always reads from filesystem (bootstrap).
+// For cloud users it tries the Store first (DB-backed), falling back to
+// filesystem, and auto-provisions if nothing exists.
+func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
+	userID := config.UserIDFromContext(r.Context())
+
+	// Try loading from filesystem first (works for both local and file-backed cloud).
+	cfg, err := config.LoadForUser(userID)
+	if err == nil {
+		return cfg, nil
+	}
+
+	// Auto-provision if missing.
+	if os.IsNotExist(unwrapPathError(err)) {
+		if provErr := users.ProvisionWorkspace(userID); provErr != nil {
+			return nil, fmt.Errorf("auto-provision user %s: %w", userID, provErr)
+		}
+		return config.LoadForUser(userID)
+	}
+	return nil, err
+}
+
+func unwrapPathError(err error) error {
+	for err != nil {
+		if pe, ok := err.(*os.PathError); ok {
+			return pe.Err
+		}
+		err = errors.Unwrap(err)
+	}
+	return nil
+}
+
+// saveUserConfig persists the config for the request's user.
+func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
+	userID := config.UserIDFromContext(r.Context())
+	if _, err := config.EnsureUserDir(userID); err != nil {
+		return err
+	}
+	configPath, err := config.UserConfigPath(userID)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(configPath, data, 0o644)
+}
+
+// userDir returns the workspace directory for the request's user.
+func userDirForRequest(r *http.Request) (string, error) {
+	return config.UserDir(config.UserIDFromContext(r.Context()))
+}
+
+// resolveAgent finds an agent for the current request's user. For the local
+// user it uses the preloaded agentProvider; for cloud users it lazily loads
+// their UserSpace via the resolver.
+func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
+	userID := config.UserIDFromContext(r.Context())
+
+	// Cloud user → resolve from userResolver.
+	if userID != config.DefaultUserID && s.userResolver != nil {
+		space, err := s.userResolver.UserSpaceFor(userID)
+		if err != nil {
+			return nil
+		}
+		ag := space.Agents.AgentByID(agentID)
+		if ag == nil {
+			return nil
+		}
+		return ag
+	}
+
+	// Local user → use preloaded provider.
+	if s.agentProvider != nil {
+		return s.agentProvider.AgentByID(agentID)
+	}
+	return nil
+}
+
+// resolveAllAgents returns all agents for the current request's user.
+func (s *Server) resolveAllAgents(r *http.Request) []AgentHandle {
+	userID := config.UserIDFromContext(r.Context())
+
+	if userID != config.DefaultUserID && s.userResolver != nil {
+		space, err := s.userResolver.UserSpaceFor(userID)
+		if err != nil {
+			return nil
+		}
+		all := space.Agents.All()
+		result := make([]AgentHandle, len(all))
+		for i, ag := range all {
+			result[i] = ag
+		}
+		return result
+	}
+
+	if s.agentProvider != nil {
+		return s.agentProvider.AllAgents()
+	}
+	return nil
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	homeDir, err := config.HomeDir()
+	configPath, err := config.UserConfigPath(config.UserIDFromContext(r.Context()))
 	if err != nil {
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"configured": false,
@@ -26,9 +132,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	configPath := filepath.Join(homeDir, "fastclaw.json")
 	_, statErr := os.Stat(configPath)
 	configured := statErr == nil
+
+	userID := config.UserIDFromContext(r.Context())
+	isAdmin := userID == config.DefaultUserID && s.authToken != ""
 
 	resp := map[string]any{
 		"configured": configured,
@@ -38,12 +146,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"channels":   []any{},
 		"provider":   nil,
 		"uptime":     "",
+		"userId":     userID,
+		"isAdmin":    isAdmin,
 	}
 
-	if s.agentProvider != nil {
-		resp["uptime"] = formatDuration(time.Since(s.startedAt))
+	resp["uptime"] = formatDuration(time.Since(s.startedAt))
+	allAgents := s.resolveAllAgents(r)
+	if len(allAgents) > 0 {
 		var agentList []map[string]string
-		for _, ag := range s.agentProvider.AllAgents() {
+		for _, ag := range allAgents {
 			agentList = append(agentList, map[string]string{
 				"id": ag.Name(),
 			})
@@ -53,7 +164,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Load config for provider/channel/agent details
 	if configured {
-		cfg, loadErr := config.Load()
+		cfg, loadErr := s.loadUserConfig(r)
 		if loadErr == nil {
 			// Provider info
 			for name, prov := range cfg.Providers {
@@ -83,7 +194,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			// Agent info with model details
 			if s.agentProvider == nil {
 				// Not running - get agent list from config
-				resolved := config.ResolveAgents(cfg)
+				resolved := config.ResolveAgentsForUser(cfg, userID)
 				var agentList []map[string]string
 				for _, ra := range resolved {
 					agentList = append(agentList, map[string]string{
@@ -95,7 +206,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				resp["agents"] = agentList
 			} else {
 				// Running - enrich with model info from config
-				resolved := config.ResolveAgents(cfg)
+				resolved := config.ResolveAgentsForUser(cfg, userID)
 				modelMap := make(map[string]string)
 				wsMap := make(map[string]string)
 				for _, ra := range resolved {
@@ -119,7 +230,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load()
+	cfg, err := s.loadUserConfig(r)
 	if err != nil {
 		jsonResponse(w, http.StatusOK, map[string]any{"error": "no config found"})
 		return
@@ -231,20 +342,13 @@ type chatRequest struct {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	if s.agentProvider == nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{
-			"error": "gateway is not running",
-		})
-		return
-	}
-
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid request"})
 		return
 	}
 
-	ag := s.agentProvider.AgentByID(req.AgentID)
+	ag := s.resolveAgent(r, req.AgentID)
 	if ag == nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
@@ -255,18 +359,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
-	if s.agentProvider == nil {
-		http.Error(w, "gateway is not running", http.StatusServiceUnavailable)
-		return
-	}
-
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	ag := s.agentProvider.AgentByID(req.AgentID)
+	ag := s.resolveAgent(r, req.AgentID)
 	if ag == nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
 		return
@@ -302,11 +401,6 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
-	if s.agentProvider == nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
-	}
-
 	agentID := r.URL.Query().Get("agentId")
 	sessionID := r.URL.Query().Get("sessionId")
 	if agentID == "" {
@@ -314,7 +408,7 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ag := s.agentProvider.AgentByID(agentID)
+	ag := s.resolveAgent(r, agentID)
 	if ag == nil {
 		jsonResponse(w, http.StatusOK, []any{})
 		return
@@ -328,18 +422,13 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
-	if s.agentProvider == nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
-	}
-
 	agentID := r.URL.Query().Get("agentId")
 	if agentID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agentId required"})
 		return
 	}
 
-	ag := s.agentProvider.AgentByID(agentID)
+	ag := s.resolveAgent(r, agentID)
 	if ag == nil {
 		jsonResponse(w, http.StatusOK, []any{})
 		return
@@ -430,19 +519,15 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Ensure home dir exists
-	homeDir, err := config.HomeDir()
+	// Ensure the default user's directory exists.
+	userDir, err := config.EnsureUserDir(config.DefaultUserID)
 	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	if err := os.MkdirAll(homeDir, 0o755); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
 	// Write config
-	configPath := filepath.Join(homeDir, "fastclaw.json")
+	configPath := filepath.Join(userDir, "fastclaw.json")
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(configPath, data, 0o644); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -450,7 +535,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create agent workspace
-	agentDir := filepath.Join(homeDir, "agents", agentID, "agent")
+	agentDir := filepath.Join(userDir, "agents", agentID, "agent")
 	dirs := []string{
 		agentDir,
 		filepath.Join(agentDir, "memory"),
@@ -511,7 +596,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.Load()
+	cfg, err := s.loadUserConfig(r)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -570,7 +655,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := saveConfigFile(cfg); err != nil {
+	if err := s.saveUserConfig(r, cfg); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
@@ -645,13 +730,15 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, result)
 }
 
-// saveConfigFile persists the config to ~/.fastclaw/fastclaw.json.
+// saveConfigFile persists the config to ~/.fastclaw/users/local/fastclaw.json.
 func saveConfigFile(cfg *config.Config) error {
-	homeDir, err := config.HomeDir()
+	if _, err := config.EnsureUserDir(config.DefaultUserID); err != nil {
+		return err
+	}
+	configPath, err := config.UserConfigPath(config.DefaultUserID)
 	if err != nil {
 		return err
 	}
-	configPath := filepath.Join(homeDir, "fastclaw.json")
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
