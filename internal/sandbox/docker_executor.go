@@ -2,7 +2,11 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +62,52 @@ func (d *DockerExecutor) ListDir(ctx context.Context, path string) (string, erro
 func (d *DockerExecutor) Close() error {
 	return d.sb.Close()
 }
+
+// SnapshotWorkspace walks the host-side mounted workspace dir (which is
+// bind-mounted into the container at /workspace) and returns every
+// regular file's bytes keyed by its container-relative path. Used by
+// LifecyclePool for flush-on-evict so files the agent created via
+// `exec` (not via write_file) still make it to the durable store.
+//
+// Walking the host dir directly is faster and more reliable than doing
+// tar-over-exec: the mount already gives us a POSIX view of the same
+// bytes the sandbox sees.
+func (d *DockerExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte, error) {
+	root := d.sb.workspace
+	if root == "" {
+		return nil, nil
+	}
+	out := make(map[string][]byte)
+	err := filepath.WalkDir(root, func(p string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return filepath.SkipAll
+			}
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out[filepath.ToSlash(rel)] = data
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Ensure DockerExecutor satisfies the optional snapshot contract. A compile
+// error here would flag any accidental interface drift.
+var _ WorkspaceSnapshotter = (*DockerExecutor)(nil)
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"

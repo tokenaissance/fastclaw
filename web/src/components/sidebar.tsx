@@ -34,6 +34,7 @@ const globalNavItems = [
   { href: "/overview/", label: "Overview", icon: LayoutDashboard },
   { href: "/agents/", label: "Agents", icon: Bot },
   { href: "/skills/", label: "Skills", icon: Sparkles },
+  { href: "/tools/", label: "Tools", icon: Wrench },
   { href: "/models/", label: "Models", icon: Brain },
   { href: "/channels/", label: "Channels", icon: Radio },
   { href: "/settings/", label: "Settings", icon: Settings },

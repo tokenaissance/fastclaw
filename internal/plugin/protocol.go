@@ -42,6 +42,15 @@ const (
 	MethodChannelSend    = "channel.send"
 	MethodToolList       = "tool.list"
 	MethodToolExecute    = "tool.execute"
+	// MethodProviderList asks a plugin which tool-provider slots it fills
+	// (e.g. `{"category":"web_search","name":"kagi"}`). Plugins that don't
+	// implement it return an empty list or "method not found".
+	MethodProviderList = "provider.list"
+	// MethodProviderExecute invokes a specific provider inside the plugin.
+	// The call is orchestrated by the same Chain logic that routes built-in
+	// providers, so plugins compete with in-process providers on an equal
+	// footing (priority, fallback).
+	MethodProviderExecute = "provider.execute"
 	MethodHookRegister   = "hook.register"
 	MethodHookFire       = "hook.fire"
 	MethodMessageInbound = "message.inbound"
@@ -79,6 +88,49 @@ type ToolExecuteParams struct {
 // ToolExecuteResult is returned from tool.execute.
 type ToolExecuteResult struct {
 	Result string `json:"result"`
+}
+
+// ProviderDef describes one tool-provider slot a plugin can fill. Plugins
+// can advertise multiple of these (e.g. one plugin exposing both a
+// web_search and an image_gen provider).
+type ProviderDef struct {
+	Category string `json:"category"` // "web_search" / "image_gen" / ...
+	Name     string `json:"name"`     // e.g. "kagi"
+}
+
+// ProviderListResult is returned from provider.list.
+type ProviderListResult struct {
+	Providers []ProviderDef `json:"providers"`
+}
+
+// ProviderExecuteParams carries the per-call args and the resolved tenant
+// config (API key, endpoint, extra options, model id). The plugin process
+// must not cache credentials — FastClaw re-sends them every call so any
+// tenant can use the same plugin process safely.
+type ProviderExecuteParams struct {
+	Category string                 `json:"category"`
+	Name     string                 `json:"name"`
+	Args     map[string]interface{} `json:"args"`
+	Config   ProviderConfigWire     `json:"config"`
+}
+
+// ProviderConfigWire mirrors toolproviders.ProviderConfig over the JSON-RPC
+// boundary. Structurally distinct to keep the plugin package free of a
+// dependency on internal/toolproviders.
+type ProviderConfigWire struct {
+	APIKey   string            `json:"apiKey,omitempty"`
+	Endpoint string            `json:"endpoint,omitempty"`
+	Options  map[string]string `json:"options,omitempty"`
+	Model    string            `json:"model,omitempty"`
+}
+
+// ProviderExecuteResult carries the provider's response. Text is the
+// LLM-visible output; Retriable signals whether a non-empty error should
+// trigger fallback to the next provider.
+type ProviderExecuteResult struct {
+	Text      string `json:"text"`
+	Error     string `json:"error,omitempty"`
+	Retriable bool   `json:"retriable,omitempty"`
 }
 
 // InboundMessageParams is sent by channel plugins via message.inbound notifications.

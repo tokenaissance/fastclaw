@@ -181,7 +181,10 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<skills>\n")
+	// Rules go OUTSIDE <skills> so weaker models don't mistake them for
+	// skill summaries and skip the enforcement.
+	sb.WriteString(skillsUsageDirective)
+	sb.WriteString("\n\n<skills>\n")
 
 	for _, skill := range skills {
 		if alwaysLoad[skill.Name] || (skill.Metadata != nil && skill.Metadata.Meta() != nil && skill.Metadata.Meta().Always) {
@@ -198,6 +201,28 @@ func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	sb.WriteString("</skills>")
 	return sb.String()
 }
+
+// skillsUsageDirective is the set of hard rules about how skills must be
+// used. Kept terse and assertive because weaker local models (qwen3.5 etc.)
+// ignore soft hints. The skill-creator rule in particular spells out the
+// literal trigger phrases in EN + ZH — in practice "create/write/build a
+// skill" was reliably missed when phrased only abstractly.
+const skillsUsageDirective = `<skill_usage_rules>
+RULE 1 — Creating a skill. When the user asks to CREATE / BUILD / WRITE / MAKE / SCAFFOLD a skill ("帮我写一个 X skill", "create a foo skill", "turn this into a skill", "build a skill for Y"):
+  • Your VERY FIRST tool call MUST be: load_skill(name="skill-creator")
+  • Then follow skill-creator's workflow (define → test prompts → draft → eval → iterate). Do NOT call write_file to author SKILL.md, scripts, or scaffolding before load_skill("skill-creator") has been called in THIS turn.
+  • Loading a SIMILAR existing skill (e.g. "minimax-speech" for a TTS task) is context, not a substitute. You still MUST load skill-creator first.
+  • PATH CONVENTION: scaffold the skill at the RELATIVE path "skills/<skill-name>/..." (e.g. write_file("skills/minimax-tts/SKILL.md", ...)). The write_file tool routes "skills/..." to this agent's private skills dir where SkillsLoader discovers it. DO NOT write skills into the workspace (default tool root) — they won't be found there.
+
+RULE 2 — Using a skill. If the user's task matches the summary of a skill below, call load_skill(name) FIRST and follow it. Do not improvise the work with generic tools when a skill applies.
+
+RULE 3 — Installing an existing skill. Use the install_skill tool (searches skills.sh, falls back to clawhub). It writes to THIS agent's private skills dir. Do not install by calling write_file manually.
+
+RULE 4 — Global skills dir. ~/.fastclaw/skills/ is admin-managed. Never write there from chat under any circumstance.
+
+RULE 5 — Slash prefix. If the user's message starts with "/<skill-name>" (e.g. "/skill-creator build me a pdf skill"), that prefix is an explicit request to use that skill. Your VERY FIRST tool call must be load_skill(name="<skill-name>"), and you must then follow its workflow for the remainder of the message. Treat everything after the slash-name as the actual request.
+</skill_usage_rules>`
+
 
 // SkillEnvVars returns environment variables for a specific skill from global config.
 func (sl *SkillsLoader) SkillEnvVars(skillName string) map[string]string {

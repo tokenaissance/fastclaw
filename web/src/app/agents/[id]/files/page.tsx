@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Save, Check, Loader2 } from "lucide-react";
@@ -18,9 +17,16 @@ const WORKSPACE_FILES = [
   { name: "AGENTS.md", label: "Agents" },
 ];
 
+// Static-export pages hardcode useParams() to the `generateStaticParams` value
+// ("default"), so read the real id from the URL like the chat page does.
+function getAgentIdFromURL(): string {
+  if (typeof window === "undefined") return "default";
+  const match = window.location.pathname.match(/\/agents\/([^/]+)\//);
+  return match ? match[1] : "default";
+}
+
 export default function AgentFilesPage() {
-  const params = useParams();
-  const agentId = params.id as string;
+  const [agentId] = useState(() => getAgentIdFromURL());
   const [activeTab, setActiveTab] = useState("SOUL.md");
   const [files, setFiles] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -33,7 +39,7 @@ export default function AgentFilesPage() {
     Promise.all(
       WORKSPACE_FILES.map(async (f) => {
         try {
-          const res = await apiFetch(`/api/agents/${agentId}/files/${f.name}`);
+          const res = await apiFetch(`/api/agents/${agentId}/system-files/${f.name}`);
           if (res.ok) {
             const data = await res.json();
             return [f.name, data.content || ""] as [string, string];
@@ -50,7 +56,7 @@ export default function AgentFilesPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await apiFetch(`/api/agents/${agentId}/files/${activeTab}`, {
+      await apiFetch(`/api/agents/${agentId}/system-files/${activeTab}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: files[activeTab] || "" }),

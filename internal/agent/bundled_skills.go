@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 )
 
-//go:embed bundled_skills/*
+//go:embed all:bundled_skills
 var bundledSkillsFS embed.FS
 
 // InstallBundledSkills copies bundled skills to the managed skills directory
-// (~/.fastclaw/skills/) if they don't already exist.
+// (~/.fastclaw/skills/) if they don't already exist. Subdirectories (scripts,
+// references, assets, ...) are copied recursively so skills with supporting
+// files work out of the box.
 func InstallBundledSkills() {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -33,24 +35,42 @@ func InstallBundledSkills() {
 		skillName := entry.Name()
 		skillTarget := filepath.Join(targetDir, skillName)
 
-		// Skip if already exists (user may have customized it)
+		// Skip if already exists (user may have customized it).
 		if _, err := os.Stat(filepath.Join(skillTarget, "SKILL.md")); err == nil {
 			continue
 		}
 
-		// Copy skill directory
-		os.MkdirAll(skillTarget, 0o755)
-		skillFiles, _ := fs.ReadDir(bundledSkillsFS, filepath.Join("bundled_skills", skillName))
-		for _, f := range skillFiles {
-			if f.IsDir() {
-				continue
-			}
-			data, err := fs.ReadFile(bundledSkillsFS, filepath.Join("bundled_skills", skillName, f.Name()))
-			if err != nil {
-				continue
-			}
-			os.WriteFile(filepath.Join(skillTarget, f.Name()), data, 0o644)
+		srcRoot := filepath.Join("bundled_skills", skillName)
+		if err := copyEmbedTree(bundledSkillsFS, srcRoot, skillTarget); err != nil {
+			slog.Warn("failed to install bundled skill", "name", skillName, "error", err)
+			continue
 		}
 		slog.Info("installed bundled skill", "name", skillName, "path", skillTarget)
 	}
+}
+
+// copyEmbedTree walks src in the embed.FS and writes every regular file under
+// it to the corresponding path under dst, creating intermediate directories.
+func copyEmbedTree(src embed.FS, srcRoot, dst string) error {
+	return fs.WalkDir(src, srcRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcRoot, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := fs.ReadFile(src, path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
 }

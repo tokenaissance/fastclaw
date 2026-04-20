@@ -16,7 +16,9 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // AgentHandle is a minimal interface for interacting with an agent from the web UI.
@@ -28,6 +30,10 @@ type AgentHandle interface {
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
 	RenameWebChatSession(sessionId, title string) error
+	// ReloadWorkspaceFiles re-scans the agent's home (SOUL.md, skills, ...) so
+	// changes made by admin tools take effect on the next turn without a
+	// process restart.
+	ReloadWorkspaceFiles()
 }
 
 // AgentProvider gives the server access to the running agents.
@@ -50,9 +56,12 @@ type Server struct {
 	userResolver  api.UserResolver // for per-user agent routing
 	taskQueue     *taskqueue.Queue
 	apiServer     *api.Server
-	authToken     string           // gateway admin token (for auth middleware)
-	userRegistry  *users.Registry  // cloud mode user registry
-	dataStore     store.Store      // DB or file store for per-user config
+	authToken     string                 // gateway admin token (for auth middleware)
+	userRegistry  *users.Registry        // api key registry
+	agentBindings *users.AgentBindings   // agent → api key ownership (nil = no bindings file)
+	dataStore     store.Store            // DB or file store for per-user config
+	workspaceStore workspace.Store       // blob store for agent-generated artifacts
+	usage         usage.Meter            // per-tenant resource counters
 	startedAt     time.Time
 }
 
@@ -99,12 +108,33 @@ func (s *Server) SetStore(st store.Store) {
 	s.dataStore = st
 }
 
+// SetWorkspaceStore installs the blob store used for agent-generated
+// artifacts (PDFs, images, audio, ...). Handlers that serve these files
+// (download/preview) and the write_file tool route through it. Nil falls
+// back to direct filesystem access.
+func (s *Server) SetWorkspaceStore(ws workspace.Store) {
+	s.workspaceStore = ws
+}
+
+// SetUsageMeter installs the per-tenant resource counter read by the
+// /api/admin/usage endpoint.
+func (s *Server) SetUsageMeter(m usage.Meter) {
+	s.usage = m
+}
+
 // SetAuth configures authentication for the /api/* endpoints. In local mode
 // (token="" and registry=nil) all requests are treated as the local user.
 // In cloud mode, the bearer token is resolved to a user ID.
 func (s *Server) SetAuth(token string, registry *users.Registry) {
 	s.authToken = token
 	s.userRegistry = registry
+}
+
+// SetAgentBindings installs the agent → api key ownership registry. Without
+// this, every agent is implicitly admin-owned and api-key callers can't
+// create or list any agent (safe default for misconfigured setups).
+func (s *Server) SetAgentBindings(b *users.AgentBindings) {
+	s.agentBindings = b
 }
 
 // userAuth is middleware that resolves the bearer token to a user ID and
@@ -187,6 +217,11 @@ func (s *Server) Run(ctx context.Context) error {
 	// Sandbox-checked to stay inside the agent's workspace root.
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", ua(s.handleAgentFile))
 
+	// Agent identity/metadata files (SOUL.md, IDENTITY.md, ...) in the home dir.
+	// Used by the admin UI Files editor; names are allowlisted.
+	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", ua(s.handleGetAgentSystemFile))
+	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", ua(s.handlePutAgentSystemFile))
+
 	// Skills (global, not per-user)
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)
 	mux.HandleFunc("GET /api/skills/search", ua(s.handleSearchSkills))
@@ -196,6 +231,19 @@ func (s *Server) Run(ctx context.Context) error {
 	// Plugins (global, not per-user)
 	mux.HandleFunc("GET /api/plugins", s.handleListPlugins)
 	mux.HandleFunc("PUT /api/plugins/{id}", s.handleUpdatePlugin)
+
+	// Agent ↔ API key bindings (admin only). Controls which API key can
+	// read/write an agent; unbound agents are admin-only.
+	mux.HandleFunc("GET /api/agent-bindings", ua(s.handleListBindings))
+	mux.HandleFunc("POST /api/agents/{id}/binding", ua(s.handleBindAgent))
+
+	// Usage counters (admin only). Drives billing / quota dashboards.
+	mux.HandleFunc("GET /api/admin/usage", ua(s.handleGetUsage))
+
+	// Tool providers: admin-managed API keys/endpoints + per-category primary/
+	// fallback chains. Agents pick up changes on next start.
+	mux.HandleFunc("GET /api/tools", ua(s.handleGetTools))
+	mux.HandleFunc("PUT /api/tools", ua(s.handleSaveTools))
 
 	// Tasks
 	mux.HandleFunc("GET /api/tasks", ua(s.handleListTasks))

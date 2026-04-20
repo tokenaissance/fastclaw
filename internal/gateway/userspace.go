@@ -16,6 +16,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // UserSpace holds the per-user state that can be multiplexed inside one
@@ -32,7 +33,7 @@ type UserSpace struct {
 // loadUserSpace reads a user's config and instantiates their agent manager.
 // The shared message bus is reused so that cross-user plumbing (typing
 // indicators, outbound routing) stays in one place.
-func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store) (*UserSpace, error) {
+func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store) (*UserSpace, error) {
 	cfg, err := config.LoadForUser(userID)
 	if err != nil {
 		return nil, fmt.Errorf("load config for user %q: %w", userID, err)
@@ -48,19 +49,21 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store) (*UserSpac
 			agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
 		)
 	}
+	if ws != nil {
+		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
+	}
 	agentMgr, err := agent.NewManager(resolved, prov, mb, managerOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create agent manager for user %q: %w", userID, err)
 	}
 
 	// Tag each agent with the owning user ID so hooks (e.g. mem0) can
-	// namespace per-user data, and register web-search tools if configured.
+	// namespace per-user data, and register provider-backed tools based on
+	// this user's toolProviders + tools config.
 	for _, ag := range agentMgr.All() {
 		ag.SetOwnerUserID(userID)
-		if cfg.WebSearch.APIKey != "" {
-			ag.RegisterWebSearchTool(cfg.WebSearch.APIKey)
-		}
 	}
+	registerAgentToolChains(cfg, agentMgr.All())
 
 	var pool sandbox.ExecutorPool
 
@@ -69,8 +72,10 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store) (*UserSpac
 	{
 		// Check if any agent has sandbox enabled — use the first one's
 		// config to decide the pool backend.
+		var sandboxCfg config.SandboxCfg
 		for _, rc := range config.ResolveAgentsForUser(cfg, userID) {
 			if rc.Sandbox.Enabled {
+				sandboxCfg = rc.Sandbox
 				switch rc.Sandbox.Backend {
 				case "e2b":
 					// E2B needs an API key — check config first, then env.
@@ -95,6 +100,29 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store) (*UserSpac
 				}
 				break
 			}
+		}
+
+		// Wrap with a lifecycle pool so sandboxes are created lazily on
+		// first tool call and destroyed after an idle period. Dominant
+		// cost lever for multi-tenant cloud: an idle user pays $0 for
+		// sandbox compute. Local single-tenant deployments also benefit
+		// (no dead containers hanging around).
+		if pool != nil {
+			idle := time.Duration(sandboxCfg.IdleTTLSec) * time.Second
+			if idle <= 0 {
+				idle = 10 * time.Minute
+			}
+			lp := sandbox.NewLifecyclePool(pool, idle, 30*time.Second)
+			// When a workspace store is configured, the lifecycle pool
+			// hydrates /workspace on sandbox creation — so exec'd commands
+			// see files produced by write_file in previous sessions
+			// (including ones served by a different pod).
+			if ws != nil {
+				lp.SetWorkspace(ws)
+			}
+			lp.Start()
+			pool = lp
+			slog.Info("sandbox lifecycle pool enabled", "user", userID, "idleTTL", idle, "hydrate", ws != nil)
 		}
 
 		if pool != nil {
@@ -164,12 +192,13 @@ func newProviderFromConfig(cfg *config.Config) provider.Provider {
 // evicted; other users are loaded on first request and evicted after an idle
 // period to free memory when they stop chatting.
 type userSpaceRegistry struct {
-	mu       sync.RWMutex
-	spaces   map[string]*userSpaceEntry
-	bus      *bus.MessageBus
-	store    store.Store // optional DB store for sessions/memory
-	idleTTL  time.Duration // how long before an idle user is evicted (0 = never)
-	pinned   map[string]bool // user IDs that must never be evicted (e.g. "local")
+	mu        sync.RWMutex
+	spaces    map[string]*userSpaceEntry
+	bus       *bus.MessageBus
+	store     store.Store     // optional DB store for sessions/memory
+	workspace workspace.Store // optional blob store for generated artifacts
+	idleTTL   time.Duration   // how long before an idle user is evicted (0 = never)
+	pinned    map[string]bool // user IDs that must never be evicted (e.g. "local")
 }
 
 type userSpaceEntry struct {
@@ -227,7 +256,7 @@ func (r *userSpaceRegistry) getOrLoad(userID string) (*UserSpace, error) {
 		return e.space, nil
 	}
 
-	sp, err := loadUserSpace(userID, r.bus, r.store)
+	sp, err := loadUserSpace(userID, r.bus, r.store, r.workspace)
 	if err != nil {
 		return nil, err
 	}

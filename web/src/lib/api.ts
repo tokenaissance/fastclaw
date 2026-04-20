@@ -301,6 +301,102 @@ export async function deleteSkill(name: string) {
   return res.json();
 }
 
+// Search results use skills.sh's shape; clawhub has a different shape but the
+// admin UI only wires skills.sh (primary registry). Callers that want clawhub
+// go through installSkill with source="clawhub".
+export interface SkillSearchResult {
+  id: string;       // "<owner>/<repo>/<skillId>"
+  skillId: string;  // folder name — also the slug passed to installSkill
+  name: string;
+  source: string;   // "<owner>/<repo>"
+  installs: number;
+}
+
+export async function searchSkills(query: string): Promise<SkillSearchResult[]> {
+  if (!query.trim()) return [];
+  const res = await apiFetch(`/api/skills/search?source=skillssh&q=${encodeURIComponent(query)}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.results || []) as SkillSearchResult[];
+}
+
+export interface InstallSkillRequest {
+  name: string;
+  source?: "skillssh" | "clawhub" | "github" | "auto";
+  repo?: string;
+  agent?: string;  // omit for global install (admin only)
+}
+
+export interface InstallSkillResponse {
+  ok: boolean;
+  source?: string;
+  name?: string;
+  version?: string;
+  installedAt?: string;
+  files?: number;
+  error?: string;
+}
+
+export async function installSkill(req: InstallSkillRequest): Promise<InstallSkillResponse> {
+  const res = await apiFetch("/api/skills/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+// --- Tools (provider-backed capabilities: web_search, image_gen, tts, ...) ---
+
+export interface ToolProviderCatalog {
+  name: string;
+  label: string;
+  needsKey: boolean;
+  needsUrl: boolean;
+  models: string[];
+}
+
+export interface ToolCategoryCatalog {
+  name: string;
+  label: string;
+  providers: ToolProviderCatalog[];
+}
+
+export interface ToolProviderSettings {
+  apiKey?: string;
+  endpoint?: string;
+  options?: Record<string, string>;
+}
+
+export interface ToolCategorySettings {
+  primary?: string;
+  fallbacks?: string[];
+  autoFallback?: boolean;
+}
+
+export interface ToolsConfig {
+  categories: ToolCategoryCatalog[];
+  toolProviders: Record<string, ToolProviderSettings>;
+  tools: Record<string, ToolCategorySettings>;
+}
+
+export async function getTools(): Promise<ToolsConfig> {
+  const res = await apiFetch("/api/tools");
+  return res.json();
+}
+
+export async function saveTools(payload: {
+  toolProviders: Record<string, ToolProviderSettings>;
+  tools: Record<string, ToolCategorySettings>;
+}): Promise<{ ok: boolean; error?: string }> {
+  const res = await apiFetch("/api/tools", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
 // Plugins
 export async function getPlugins(): Promise<PluginInfo[]> {
   const res = await apiFetch("/api/plugins");

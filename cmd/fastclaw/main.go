@@ -125,6 +125,8 @@ func runGateway(port int) error {
 	webSrv.SetGatewayConfig(gwCfg)
 	webSrv.SetUserResolver(&apiResolver{gw: gw})
 	webSrv.SetStore(gw.Store())
+	webSrv.SetWorkspaceStore(gw.Workspace())
+	webSrv.SetUsageMeter(gw.Usage())
 
 	// Set up OpenAI-compatible API and WebSocket gateway.
 	// In cloud mode the user registry maps bearer tokens to user IDs; in
@@ -143,6 +145,14 @@ func runGateway(port int) error {
 	apiSrv := api.NewServer(&apiResolver{gw: gw}, gatewayToken, userReg, gwCfg)
 	webSrv.SetAPIServer(apiSrv)
 	webSrv.SetAuth(gatewayToken, userReg)
+
+	// Agent ↔ API key bindings. Always loaded — file is empty {} by default
+	// so local mode just treats every agent as admin-owned.
+	if bindings, err := users.LoadBindings(); err == nil {
+		webSrv.SetAgentBindings(bindings)
+	} else {
+		slog.Warn("failed to load agent bindings", "error", err)
+	}
 
 	bindMode := gwCfg.Bind
 	if bindMode == "" {

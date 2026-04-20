@@ -7,6 +7,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // ToolFunc is a function that executes a tool with JSON arguments and returns a result string.
@@ -30,8 +31,24 @@ type Registry struct {
 	// userRoot is where user-facing artifacts go. A relative path whose base
 	// matches a known system filename routes to systemRoot; everything else
 	// goes to userRoot.
-	systemRoot  string
-	userRoot    string
+	systemRoot string
+	userRoot   string
+	// workspaceStore is the optional durable blob store for agent-generated
+	// artifacts. When set, write_file / read_file / list_dir route through
+	// it for paths that would otherwise land under userRoot. Identity files
+	// (systemRoot) stay on the filesystem because the runtime context
+	// builder still reads them via the separate small-state Store.
+	workspaceStore workspace.Store
+	agentID        string
+}
+
+// SetWorkspaceStore installs a workspace store on the registry. File tools
+// called with paths destined for userRoot will be redirected to the store
+// (keyed by agentID). Pass both non-empty or the registry stays in pure
+// filesystem mode. Safe to call before or after registerBuiltins.
+func (r *Registry) SetWorkspaceStore(ws workspace.Store, agentID string) {
+	r.workspaceStore = ws
+	r.agentID = agentID
 }
 
 type registeredTool struct {

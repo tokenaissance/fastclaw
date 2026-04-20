@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
 )
 
 // Agent is the ReAct agent loop.
@@ -48,6 +50,11 @@ type Agent struct {
 	ftsStore          *store.FTSStore
 	piiScrubEnabled   bool
 	memoryCfg         config.MemoryCfg
+	// memoryStore is the optional Store-backed source of identity files
+	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
+	// can rewire a fresh ContextBuilder to keep reading from the Store
+	// instead of silently falling back to pod-local filesystem.
+	memoryStore       MemoryStore
 	skillsLearner     *SkillsLearner
 	turnCount         int
 	engine            *sdkEngine
@@ -123,7 +130,6 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	tools.RegisterMemorySearch(registry, rc.Home)
 	tools.RegisterWebFetch(registry)
 	tools.RegisterLoadSkill(registry, homeDir, rc.Home, "")
-	tools.RegisterSkillInstall(registry, 0) // 0 = use default port 18953
 
 	// Load skills with OpenClaw compatibility
 	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, globalSkillsCfg)
@@ -169,6 +175,12 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		engine:            eng,
 		costTracker:       eng.costTracker,
 	}
+
+	// Wire the skill-install tool after the Agent exists so it can hot-reload
+	// this agent's skills after a successful install. Installs go into the
+	// agent's own skills dir (never global) — see RegisterSkillInstall for
+	// the rationale.
+	tools.RegisterSkillInstall(registry, filepath.Join(rc.Home, "skills"), ag.ReloadWorkspaceFiles)
 
 	// Connect MCP servers and register their tools
 	if len(rc.MCPServers) > 0 {
@@ -290,9 +302,21 @@ func (a *Agent) HookRegistry() *HookRegistry {
 	return a.hooks
 }
 
-// RegisterWebSearchTool registers the web_search tool with the given API key.
-func (a *Agent) RegisterWebSearchTool(apiKey string) {
-	tools.RegisterWebSearch(a.registry, apiKey)
+// RegisterWebSearchChain exposes the web_search tool to this agent using a
+// provider chain (primary + fallbacks). Pass nil to skip — the tool won't
+// appear in the agent's tool list, so the model can't try to call it.
+func (a *Agent) RegisterWebSearchChain(chain *toolproviders.Chain) {
+	tools.RegisterWebSearchChain(a.registry, chain)
+}
+
+// RegisterImageGenChain exposes the image_gen tool to this agent.
+func (a *Agent) RegisterImageGenChain(chain *toolproviders.Chain) {
+	tools.RegisterImageGenChain(a.registry, chain)
+}
+
+// RegisterTTSChain exposes the tts tool to this agent.
+func (a *Agent) RegisterTTSChain(chain *toolproviders.Chain) {
+	tools.RegisterTTSChain(a.registry, chain)
 }
 
 // Sessions returns the session manager for this agent.
@@ -844,13 +868,23 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 // ReloadWorkspaceFiles re-reads workspace .md files (SOUL.md, AGENTS.md, etc.)
 // and rebuilds the context builder.
 func (a *Agent) ReloadWorkspaceFiles() {
-	a.memory = NewMemory(a.homePath)
+	if a.memoryStore != nil {
+		a.memory = NewMemoryWithStore(a.homePath, a.memoryStore, a.name)
+	} else {
+		a.memory = NewMemory(a.homePath)
+	}
 	// Rebuild skills summary
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg)
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
 	a.ctxBuilder = NewContextBuilder(a.homePath, a.memory, skillsSummary)
 	a.ctxBuilder.SetWorkspace(a.workspacePath)
+	// Preserve Store-backed identity reads across reload; without this,
+	// Postgres-mode pods silently fall back to pod-local filesystem.
+	if a.memoryStore != nil {
+		a.ctxBuilder.store = a.memoryStore
+		a.ctxBuilder.agentID = a.name
+	}
 }
 
 // extractMediaPaths scans tool output for MEDIA: lines and returns file paths.

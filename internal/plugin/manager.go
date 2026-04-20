@@ -275,6 +275,43 @@ func (m *Manager) ExecuteTool(ctx context.Context, pluginID, toolName string, ar
 	return toolResult.Result, nil
 }
 
+// ListProviders queries a plugin for the tool-provider slots it fills.
+// Plugins that don't implement provider.list simply return an empty slice.
+func (m *Manager) ListProviders(ctx context.Context, pluginID string) ([]ProviderDef, error) {
+	inst := m.Plugin(pluginID)
+	if inst == nil || inst.Process == nil || !inst.Process.IsRunning() {
+		return nil, fmt.Errorf("plugin %s not running", pluginID)
+	}
+	result, err := inst.Process.Call(ctx, MethodProviderList, nil)
+	if err != nil {
+		// Treat "unknown method" and friends as "plugin declares zero
+		// providers" so older plugins coexist with the new protocol.
+		return nil, nil
+	}
+	var listResult ProviderListResult
+	if err := json.Unmarshal(result, &listResult); err != nil {
+		return nil, fmt.Errorf("parse provider.list response: %w", err)
+	}
+	return listResult.Providers, nil
+}
+
+// ExecuteProvider invokes one of a plugin's registered providers.
+func (m *Manager) ExecuteProvider(ctx context.Context, pluginID string, params ProviderExecuteParams) (ProviderExecuteResult, error) {
+	inst := m.Plugin(pluginID)
+	if inst == nil || inst.Process == nil || !inst.Process.IsRunning() {
+		return ProviderExecuteResult{}, fmt.Errorf("plugin %s not running", pluginID)
+	}
+	result, err := inst.Process.Call(ctx, MethodProviderExecute, params)
+	if err != nil {
+		return ProviderExecuteResult{}, err
+	}
+	var out ProviderExecuteResult
+	if err := json.Unmarshal(result, &out); err != nil {
+		return ProviderExecuteResult{}, fmt.Errorf("parse provider.execute response: %w", err)
+	}
+	return out, nil
+}
+
 // SendToChannel sends a message through a channel plugin.
 func (m *Manager) SendToChannel(ctx context.Context, pluginID, chatID, text string) error {
 	inst := m.Plugin(pluginID)

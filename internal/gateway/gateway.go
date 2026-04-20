@@ -20,8 +20,94 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
+	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
+	"github.com/fastclaw-ai/fastclaw/internal/toolproviders/imagegen"
+	"github.com/fastclaw-ai/fastclaw/internal/toolproviders/tts"
+	"github.com/fastclaw-ai/fastclaw/internal/toolproviders/websearch"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/webhook"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
+
+// toolProviderRegistry is the process-global registry of built-in tool
+// providers. Populated once at startup; reads from it are concurrency-safe.
+// Keeping it as a package var lets both the Gateway and per-user spaces share
+// it without threading the reference through half a dozen constructors.
+var toolProviderRegistry = func() *toolproviders.Registry {
+	r := toolproviders.NewRegistry()
+	websearch.RegisterAll(r)
+	imagegen.RegisterAll(r)
+	tts.RegisterAll(r)
+	return r
+}()
+
+// ToolProviderRegistry exposes the registry for callers (e.g. admin API
+// handlers) that want to list available providers.
+func ToolProviderRegistry() *toolproviders.Registry { return toolProviderRegistry }
+
+// defaultStr returns v when non-empty, otherwise fallback. Single helper
+// so slog labels stay tidy.
+func defaultStr(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+// registerAgentToolChains wires every provider-backed tool category onto the
+// given agents. Each agent gets its own Chain that honors its per-agent
+// toolProviders/tools overrides from agent.json — one agent can point
+// web_search at searxng while another uses exa.
+func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
+	for _, ag := range agents {
+		resolved := cfg.MergedAgentConfigForUser(config.AgentEntry{ID: ag.Name()}, config.DefaultUserID)
+		if chain := buildToolChainFromResolved(resolved, "web_search"); chain != nil {
+			ag.RegisterWebSearchChain(chain)
+			slog.Info("web_search chain registered", "agent", ag.Name(), "providers", chain.Order)
+		}
+		if chain := buildToolChainFromResolved(resolved, "image_gen"); chain != nil {
+			ag.RegisterImageGenChain(chain)
+			slog.Info("image_gen chain registered", "agent", ag.Name(), "providers", chain.Order)
+		}
+		if chain := buildToolChainFromResolved(resolved, "tts"); chain != nil {
+			ag.RegisterTTSChain(chain)
+			slog.Info("tts chain registered", "agent", ag.Name(), "providers", chain.Order)
+		}
+	}
+}
+
+// buildToolChainFromResolved builds a Chain using the agent's merged view
+// (global defaults + agent.json overrides). Returns nil when the category
+// isn't configured or has no registered providers, which hides the tool.
+func buildToolChainFromResolved(resolved config.ResolvedAgent, category string) *toolproviders.Chain {
+	cat, ok := resolved.Tools[category]
+	if !ok {
+		return nil
+	}
+	order := cat.Chain()
+	if len(order) == 0 {
+		return nil
+	}
+	providers := resolved.ToolProviders // captured by closure below
+	chain := &toolproviders.Chain{
+		Category:     category,
+		Order:        order,
+		AutoFallback: cat.FallbackEnabled(),
+		Registry:     toolProviderRegistry,
+		GetConfig: func(name string) toolproviders.ProviderConfig {
+			pc := providers[name]
+			return toolproviders.ProviderConfig{
+				APIKey:   pc.APIKey,
+				Endpoint: pc.Endpoint,
+				Options:  pc.Options,
+			}
+		},
+	}
+	if !chain.Available() {
+		return nil
+	}
+	return chain
+}
 
 // Gateway is the main orchestrator that starts all services.
 //
@@ -47,7 +133,19 @@ type Gateway struct {
 	pluginMgr    *plugin.Manager
 	taskQueue    *taskqueue.Queue
 	store        store.Store
+	workspace    workspace.Store
+	usage        usage.Meter
 }
+
+// Workspace returns the durable artifact store (local FS or S3). Handlers
+// and tools use this to read/write agent-generated files.
+func (g *Gateway) Workspace() workspace.Store { return g.workspace }
+
+// Usage returns the per-tenant resource meter. Admin endpoints use this to
+// answer "how much did X consume", which is the input side of billing /
+// quota. Always non-nil — defaults to an in-memory meter when nothing
+// durable is configured.
+func (g *Gateway) Usage() usage.Meter { return g.usage }
 
 // New creates a new Gateway with multi-agent support.
 func New(cfg *config.Config) (*Gateway, error) {
@@ -66,6 +164,40 @@ func New(cfg *config.Config) (*Gateway, error) {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
+	// Workspace blob store (local FS or S3). Distinct from the Store above:
+	// that one holds small structured state (sessions, identity md files);
+	// this one holds arbitrary artifacts (generated PDFs/images/audio).
+	wsInner, err := workspace.Factory{
+		Backend:  cfg.Workspace.Backend,
+		LocalDir: cfg.Workspace.Local.Root,
+		S3: workspace.S3Config{
+			Endpoint:  cfg.Workspace.S3.Endpoint,
+			Region:    cfg.Workspace.S3.Region,
+			Bucket:    cfg.Workspace.S3.Bucket,
+			Prefix:    cfg.Workspace.S3.Prefix,
+			AccessKey: cfg.Workspace.S3.AccessKey,
+			SecretKey: cfg.Workspace.S3.SecretKey,
+			UseSSL:    cfg.Workspace.S3.UseSSL,
+		},
+	}.New(filepath.Join(homeDir, "workspaces"))
+	if err != nil {
+		return nil, fmt.Errorf("open workspace store: %w", err)
+	}
+	slog.Info("workspace store", "backend", defaultStr(cfg.Workspace.Backend, "local"))
+
+	// Usage meter sits on top of the workspace store so every agent Put is
+	// automatically counted as workspace_bytes. In-memory for now;
+	// swapping in a DB-backed implementation is a one-line change.
+	meter := usage.NewMemMeter()
+	ws := workspace.NewMetered(wsInner, func(ctx context.Context, agentID string, bytes int64) {
+		// agentID is the metering "agent" dimension. The API-key dimension
+		// comes from the request context; workspace writes from inside
+		// the agent loop don't carry it, so we record it as "" (admin).
+		// For tenant attribution we'd need to thread the caller through
+		// the tool stack — left as a follow-up.
+		meter.Add(ctx, "", agentID, usage.WorkspaceBytes, bytes)
+	})
+
 	// Resolve provider + agents for the local user. This mirrors what
 	// loadUserSpace does, but we keep the inline version here because the
 	// caller already handed us a *config.Config (avoiding a redundant disk
@@ -73,13 +205,30 @@ func New(cfg *config.Config) (*Gateway, error) {
 	llm := newProviderFromConfig(cfg)
 	slog.Info("local provider resolved", "defaultModel", cfg.Agents.Defaults.Model)
 
-	resolved := config.ResolveAgents(cfg)
+	// In Postgres-backed deployments a freshly-scheduled pod has an empty
+	// filesystem — DiscoverAgents returns nothing even though agents exist
+	// in the DB. Supplement filesystem discovery with the Store's agent
+	// list so any pod can serve any agent without relying on pod-local FS.
+	var storeAgentIDs []string
+	if st != nil {
+		if records, err := st.ListAgents(context.Background()); err == nil {
+			for _, ar := range records {
+				storeAgentIDs = append(storeAgentIDs, ar.ID)
+			}
+		} else {
+			slog.Warn("store ListAgents failed", "error", err)
+		}
+	}
+	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgentIDs)
 	var managerOpts []agent.ManagerOption
 	if st != nil {
 		managerOpts = append(managerOpts,
 			agent.WithSessionStore(session.NewStoreAdapter(st)),
 			agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
 		)
+	}
+	if ws != nil {
+		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
 	}
 	agentMgr, err := agent.NewManager(resolved, llm, mb, managerOpts...)
 	if err != nil {
@@ -98,6 +247,7 @@ func New(cfg *config.Config) (*Gateway, error) {
 		Agents:   agentMgr,
 	}
 	userReg := newUserSpaceRegistry(mb, st)
+	userReg.workspace = ws
 	userReg.put(localSpace)
 
 	slog.Info("agents loaded", "user", config.DefaultUserID, "count", len(resolved), "names", agentMgr.Names())
@@ -172,13 +322,10 @@ func New(cfg *config.Config) (*Gateway, error) {
 	}
 	scheduler := cron.NewScheduler(cronJobs, mb)
 
-	// Register web search tool for all agents if configured
-	if cfg.WebSearch.APIKey != "" {
-		for _, ag := range agentMgr.All() {
-			ag.RegisterWebSearchTool(cfg.WebSearch.APIKey)
-		}
-		slog.Info("web search registered", "provider", cfg.WebSearch.Provider)
-	}
+	// Register provider-backed tools (web_search, image_gen, tts, …) on every
+	// agent. Categories with no configured providers are simply hidden from
+	// the LLM's tool list.
+	registerAgentToolChains(cfg, agentMgr.All())
 
 	// Register sub-agent spawner for all agents
 	spawner := &gatewaySubAgentSpawner{agents: agentMgr}
@@ -235,6 +382,8 @@ func New(cfg *config.Config) (*Gateway, error) {
 		config:       cfg,
 		bus:          mb,
 		store:        st,
+		workspace:    ws,
+		usage:        meter,
 		users:        userReg,
 		localSpace:   localSpace,
 		agents:       agentMgr,
@@ -437,6 +586,11 @@ func (g *Gateway) Run() error {
 			}
 		}
 
+		// Register plugin-provided tool providers (e.g. a custom web_search
+		// backend) into the same provider registry the built-ins use, so
+		// fallback chains treat them uniformly.
+		plugin.RegisterPluginProviders(ctx, g.pluginMgr, toolProviderRegistry)
+
 		// Register hook plugins with all agents
 		for _, inst := range g.pluginMgr.HookPlugins() {
 			for _, ag := range g.agents.All() {
@@ -459,6 +613,15 @@ func (g *Gateway) Run() error {
 	// Stop plugins on shutdown
 	if g.pluginMgr != nil {
 		g.pluginMgr.StopAll()
+	}
+
+	// Tear down every live sandbox across every loaded user space. On
+	// rolling restart this means E2B instances stop billing immediately
+	// instead of waiting for their server-side max-TTL.
+	for _, sp := range g.users.all() {
+		if sp.SandboxPool != nil {
+			sp.SandboxPool.CloseAll()
+		}
 	}
 
 	slog.Info("gateway stopped")

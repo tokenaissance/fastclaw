@@ -67,11 +67,84 @@ type StorageCfg struct {
 	AutoMigrate bool   `json:"autoMigrate,omitempty"` // auto-create tables on startup
 }
 
+// WorkspaceCfg controls where agent-generated artifacts (PDFs, images,
+// audio, …) are stored. "local" keeps them on the pod's filesystem, which
+// won't survive pod restarts in cloud deployments. "s3" uses any S3-compat
+// bucket and is the only option for stateless multi-pod setups.
+type WorkspaceCfg struct {
+	Backend string            `json:"backend,omitempty"` // "local" (default) | "s3"
+	Local   WorkspaceLocalCfg `json:"local,omitempty"`
+	S3      WorkspaceS3Cfg    `json:"s3,omitempty"`
+}
 
-// WebSearchCfg configures web search.
+// WorkspaceLocalCfg configures the local filesystem backend.
+type WorkspaceLocalCfg struct {
+	Root string `json:"root,omitempty"` // default ~/.fastclaw/workspaces
+}
+
+// WorkspaceS3Cfg configures an S3-compatible backend. Field names mirror
+// internal/workspace.S3Config; conversion is a straight copy.
+type WorkspaceS3Cfg struct {
+	Endpoint  string `json:"endpoint"`
+	Region    string `json:"region,omitempty"`
+	Bucket    string `json:"bucket"`
+	Prefix    string `json:"prefix,omitempty"`
+	AccessKey string `json:"accessKey"`
+	SecretKey string `json:"secretKey"`
+	UseSSL    bool   `json:"useSSL"`
+}
+
+
+// WebSearchCfg is the legacy single-provider web search config, kept for
+// back-compat reading of older fastclaw.json files. New config uses
+// ToolProviders + Tools below; migration is lossless and one-way (handled
+// by MigrateLegacyWebSearch).
 type WebSearchCfg struct {
 	Provider string `json:"provider,omitempty"` // "brave"
 	APIKey   string `json:"apiKey,omitempty"`
+}
+
+// ToolProviderCfg holds the credentials/endpoint for one provider (e.g.
+// "exa" or "searxng"), shared across every tool category that uses it. Keys
+// live here so the admin UI has one place to configure them; tool
+// categories below just reference providers by name.
+type ToolProviderCfg struct {
+	APIKey   string            `json:"apiKey,omitempty"`
+	Endpoint string            `json:"endpoint,omitempty"`
+	Options  map[string]string `json:"options,omitempty"`
+}
+
+// ToolCategoryCfg chooses which provider(s) back a tool category
+// (e.g. web_search, image_gen). "primary" is tried first; if it misses and
+// autoFallback is true (the default), "fallbacks" are tried in order.
+// References are "<provider>/<model>" strings; the "<model>" suffix is
+// provider-specific (e.g. "exa/auto", "openai/gpt-image-1").
+type ToolCategoryCfg struct {
+	Primary      string   `json:"primary,omitempty"`
+	Fallbacks    []string `json:"fallbacks,omitempty"`
+	AutoFallback *bool    `json:"autoFallback,omitempty"`
+}
+
+// FallbackEnabled returns the effective autoFallback flag, defaulting to true.
+func (c ToolCategoryCfg) FallbackEnabled() bool {
+	if c.AutoFallback == nil {
+		return true
+	}
+	return *c.AutoFallback
+}
+
+// Chain returns [primary, fallbacks...] with empty entries filtered out.
+func (c ToolCategoryCfg) Chain() []string {
+	var out []string
+	if c.Primary != "" {
+		out = append(out, c.Primary)
+	}
+	for _, f := range c.Fallbacks {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // HooksCfg configures the webhook ingress server.
@@ -108,6 +181,11 @@ type SandboxCfg struct {
 	Policy   string `json:"policy,omitempty"`  // policy preset name
 	Backend  string `json:"backend,omitempty"` // "docker" (default), "e2b"
 	E2BKey   string `json:"e2bKey,omitempty"`  // E2B API key (fallback to E2B_API_KEY env)
+	// IdleTTLSec is how long a sandbox may sit unused before the lifecycle
+	// pool destroys it. The next tool call lazily recreates. Set to 0 to
+	// disable eviction (old behavior: sandboxes live until pod shutdown).
+	// Default (when Enabled && IdleTTLSec==0): 600 seconds = 10 minutes.
+	IdleTTLSec int `json:"idleTTLSec,omitempty"`
 }
 
 // GatewayAuth holds authentication settings for the gateway API.
@@ -195,9 +273,12 @@ type Config struct {
 	Heartbeat  HeartbeatCfg               `json:"heartbeat,omitempty"`
 	Storage    StorageCfg                 `json:"storage,omitempty"`
 	Sandbox    SandboxCfg                 `json:"sandbox,omitempty"`
-	WebSearch  WebSearchCfg               `json:"webSearch,omitempty"`
-	Hooks      HooksCfg                   `json:"hooks,omitempty"`
-	Plugins    PluginsCfg                 `json:"plugins,omitempty"`
+	WebSearch     WebSearchCfg               `json:"webSearch,omitempty"` // legacy; migrated into ToolProviders/Tools on load
+	ToolProviders map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
+	Tools         map[string]ToolCategoryCfg `json:"tools,omitempty"`
+	Workspace     WorkspaceCfg               `json:"workspace,omitempty"`
+	Hooks         HooksCfg                   `json:"hooks,omitempty"`
+	Plugins       PluginsCfg                 `json:"plugins,omitempty"`
 	Gateway    GatewayCfg                 `json:"gateway,omitempty"`
 	TaskQueue  TaskQueueCfg               `json:"taskQueue,omitempty"`
 	Skills        SkillsCfg                  `json:"skills,omitempty"`
@@ -330,6 +411,14 @@ type AgentFileConfig struct {
 	Workspace  string                     `json:"workspace,omitempty"`
 	Skills     SkillsConfig               `json:"skills,omitempty"`
 	MCPServers map[string]MCPServerConfig `json:"mcpServers,omitempty"`
+	// ToolProviders overrides / supplements global credentials for specific
+	// providers. Keys declared here shadow the same provider in the global
+	// toolProviders map.
+	ToolProviders map[string]ToolProviderCfg `json:"toolProviders,omitempty"`
+	// Tools overrides the chain for specific categories (e.g. this agent
+	// prefers a different primary than the global default). Categories not
+	// listed here inherit the global chain.
+	Tools map[string]ToolCategoryCfg `json:"tools,omitempty"`
 }
 
 // SkillsConfig controls skill loading for an agent.
@@ -377,6 +466,12 @@ type ResolvedAgent struct {
 	MCPServers        map[string]MCPServerConfig
 	Sandbox           SandboxCfg
 	PolicyPreset      string
+	// ToolProviders is the per-agent credentials view: it starts from the
+	// global toolProviders map and merges in any overrides from agent.json.
+	ToolProviders map[string]ToolProviderCfg
+	// Tools is the per-agent view of category→chain config (primary +
+	// fallbacks), with agent.json entries shadowing the global map.
+	Tools map[string]ToolCategoryCfg
 }
 
 // TeamEntry defines a team of agents with group chat behavior settings.
@@ -489,6 +584,7 @@ func loadConfigFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	applyDefaults(&cfg)
+	MigrateLegacyWebSearch(&cfg)
 	return &cfg, nil
 }
 
@@ -588,8 +684,25 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 		}
 	}
 
-	// Layer 3: agent.json in workspace (highest priority)
-	agentJSON := filepath.Join(workspace, "agent.json")
+	// Seed tool config from the global config. agent.json (layer 3) overlays
+	// individual providers/categories below, so agents inherit shared keys
+	// until they explicitly shadow one.
+	if len(cfg.ToolProviders) > 0 {
+		resolved.ToolProviders = make(map[string]ToolProviderCfg, len(cfg.ToolProviders))
+		for k, v := range cfg.ToolProviders {
+			resolved.ToolProviders[k] = v
+		}
+	}
+	if len(cfg.Tools) > 0 {
+		resolved.Tools = make(map[string]ToolCategoryCfg, len(cfg.Tools))
+		for k, v := range cfg.Tools {
+			resolved.Tools[k] = v
+		}
+	}
+
+	// Layer 3: agent.json in the agent's home dir (not workspace — that's
+	// the user-facing content dir). Agent-level overrides shadow global.
+	agentJSON := filepath.Join(home, "agent.json")
 	if data, readErr := os.ReadFile(agentJSON); readErr == nil {
 		var fileCfg AgentFileConfig
 		if jsonErr := json.Unmarshal(data, &fileCfg); jsonErr == nil {
@@ -614,6 +727,26 @@ func (cfg *Config) MergedAgentConfigForUser(entry AgentEntry, userID string) Res
 				}
 				resolved.MCPServers[k] = v
 			}
+
+			// Merge per-agent tool providers (whole-entry replace: a provider
+			// declared at the agent level replaces the global one entirely —
+			// keys don't deep-merge, which avoids surprising half-populated
+			// credentials).
+			for name, pc := range fileCfg.ToolProviders {
+				if resolved.ToolProviders == nil {
+					resolved.ToolProviders = make(map[string]ToolProviderCfg)
+				}
+				resolved.ToolProviders[name] = pc
+			}
+			// Merge per-agent tool categories. An agent declaring
+			// tools.web_search fully replaces the global web_search chain;
+			// categories it doesn't mention still inherit the global chain.
+			for cat, tc := range fileCfg.Tools {
+				if resolved.Tools == nil {
+					resolved.Tools = make(map[string]ToolCategoryCfg)
+				}
+				resolved.Tools[cat] = tc
+			}
 		}
 	}
 
@@ -630,10 +763,31 @@ func ResolveAgents(cfg *Config) []ResolvedAgent {
 
 // ResolveAgentsForUser is like ResolveAgents (userID kept for backward compat, ignored).
 func ResolveAgentsForUser(cfg *Config, userID string) []ResolvedAgent {
-	// Discover agents from filesystem
+	return ResolveAgentsWithExtra(cfg, userID, nil)
+}
+
+// ResolveAgentsWithExtra merges filesystem-discovered agents with an extra
+// list provided by the caller (e.g. agent IDs read from the Store in
+// Postgres-backed deployments). De-duplicates by ID; filesystem entries win
+// on overlap since they carry agent.json overrides. Used by the gateway to
+// build a consistent agent list across pods whether they have a local
+// filesystem copy or not.
+func ResolveAgentsWithExtra(cfg *Config, userID string, extra []string) []ResolvedAgent {
 	entries := DiscoverAgents()
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		seen[e.ID] = true
+	}
+	for _, id := range extra {
+		if id != "" && !seen[id] {
+			entries = append(entries, AgentEntry{ID: id})
+			seen[id] = true
+		}
+	}
 	if len(entries) == 0 {
-		// No agents found — create a default one
+		// Still empty — the very first run on a fresh pod; keep the
+		// historical default so the UI doesn't break before the user has
+		// created anything.
 		entries = []AgentEntry{{ID: "default"}}
 	}
 

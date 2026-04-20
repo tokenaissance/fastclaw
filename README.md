@@ -107,7 +107,7 @@ Click an agent to enter its management panel:
 - Plugin system (JSON-RPC subprocess)
 
 ### Skills
-- Bundled skills: code-runner, image-gen, data-analysis, translation, web-search, skill-manager
+- Bundled skills: code-runner, image-gen, data-analysis, translation, web-search, skill-creator
 - Install from [ClawHub](https://clawhub.ai) or [skills.sh](https://skills.sh)
 - Agent-private or globally shared
 

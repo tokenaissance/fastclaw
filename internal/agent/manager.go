@@ -8,14 +8,16 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // ManagerOption configures optional Manager behavior.
 type ManagerOption func(*managerOpts)
 
 type managerOpts struct {
-	sessionStore session.SessionStore
-	memoryStore  MemoryStore
+	sessionStore   session.SessionStore
+	memoryStore    MemoryStore
+	workspaceStore workspace.Store
 }
 
 func WithSessionStore(st session.SessionStore) ManagerOption {
@@ -24,6 +26,13 @@ func WithSessionStore(st session.SessionStore) ManagerOption {
 
 func WithMemoryStore(st MemoryStore) ManagerOption {
 	return func(o *managerOpts) { o.memoryStore = st }
+}
+
+// WithWorkspaceStore installs a durable blob store on every agent's tool
+// registry so file operations (write_file / read_file / list_dir) land in
+// shared storage instead of pod-local filesystem.
+func WithWorkspaceStore(ws workspace.Store) ManagerOption {
+	return func(o *managerOpts) { o.workspaceStore = ws }
 }
 
 // Manager loads and manages all agent instances.
@@ -57,6 +66,10 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 			ag.memory = NewMemoryWithStore(rc.Home, mopt.memoryStore, rc.ID)
 			ag.ctxBuilder.store = mopt.memoryStore
 			ag.ctxBuilder.agentID = rc.ID
+			ag.memoryStore = mopt.memoryStore
+		}
+		if mopt.workspaceStore != nil {
+			ag.registry.SetWorkspaceStore(mopt.workspaceStore, rc.ID)
 		}
 		m.agents[rc.ID] = ag
 

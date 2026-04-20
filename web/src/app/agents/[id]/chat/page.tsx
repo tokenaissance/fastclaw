@@ -4,8 +4,9 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getChatHistory, getChatSessions, sendChatStream, getAuthToken, type ChatHistoryMessage, type ChatStreamEvent } from "@/lib/api";
-import { Bot, Send, Copy, Check, Plus, MessageSquare, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music } from "lucide-react";
+import { getChatHistory, getChatSessions, sendChatStream, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo } from "@/lib/api";
+import { Bot, Send, Copy, Check, Plus, MessageSquare, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal } from "lucide-react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -109,6 +110,64 @@ export default function AgentChatPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Slash-command menu state. The menu opens when the textarea holds a
+  // token beginning with `/` at the caret; selecting a skill swaps that
+  // token for `/<skill-name> `, leaving the cursor after the space so the
+  // user can keep typing their prompt.
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
+  const [slashIndex, setSlashIndex] = useState(0);
+
+  useEffect(() => {
+    getSkills().then(setSkills).catch(() => setSkills([]));
+  }, []);
+
+  // Detect whether the caret is inside a /token and, if so, what's been
+  // typed after the slash. Cheap enough to run every keystroke.
+  const slashContext = (value: string, caret: number): { start: number; query: string } | null => {
+    const before = value.slice(0, caret);
+    // Require the slash to be at start-of-message or preceded by whitespace
+    // so paths / URLs with slashes don't trigger the menu.
+    const match = /(^|\s)\/([\w-]*)$/.exec(before);
+    if (!match) return null;
+    return { start: caret - match[2].length - 1, query: match[2] };
+  };
+
+  const filteredSkills = slashOpen
+    ? skills
+        .filter((s) => {
+          const q = slashQuery.toLowerCase();
+          if (!q) return true;
+          return s.name.toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q);
+        })
+        .slice(0, 8)
+    : [];
+
+  const selectSkill = useCallback(
+    (skill: SkillInfo) => {
+      const el = textareaRef.current;
+      if (!el) return;
+      const caret = el.selectionStart ?? input.length;
+      const ctx = slashContext(input, caret);
+      if (!ctx) return;
+      const before = input.slice(0, ctx.start);
+      const after = input.slice(caret);
+      const insert = `/${skill.name} `;
+      const next = before + insert + after;
+      setInput(next);
+      setSlashOpen(false);
+      setSlashQuery("");
+      setSlashIndex(0);
+      requestAnimationFrame(() => {
+        const pos = before.length + insert.length;
+        el.focus();
+        el.setSelectionRange(pos, pos);
+      });
+    },
+    [input],
+  );
 
   // Load sessions when agent changes
   const loadSessions = useCallback((agentId: string) => {
@@ -293,9 +352,50 @@ export default function AgentChatPage() {
     // sending the message. keyCode 229 also signals "composing" on some
     // browsers where isComposing isn't set.
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
+    // Slash menu keyboard handling takes precedence when open: arrows move
+    // the selection, Enter confirms, Escape closes without sending.
+    if (slashOpen && filteredSkills.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlashIndex((i) => (i + 1) % filteredSkills.length);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlashIndex((i) => (i - 1 + filteredSkills.length) % filteredSkills.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        selectSkill(filteredSkills[slashIndex]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSlashOpen(false);
+        return;
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    }
+  };
+
+  // onChange wrapper: update input + slash menu visibility in one pass.
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const next = e.target.value;
+    setInput(next);
+    const caret = e.target.selectionStart ?? next.length;
+    const ctx = slashContext(next, caret);
+    if (ctx) {
+      setSlashOpen(true);
+      setSlashQuery(ctx.query);
+      setSlashIndex(0);
+    } else {
+      setSlashOpen(false);
     }
   };
 
@@ -465,16 +565,25 @@ export default function AgentChatPage() {
 
         {/* Input */}
         <div className="shrink-0 px-4 pb-6 pt-2">
-          <div className="mx-auto max-w-2xl">
+          <div className="mx-auto max-w-2xl relative">
+            {slashOpen && filteredSkills.length > 0 && (
+              <SlashMenu
+                skills={filteredSkills}
+                activeIndex={slashIndex}
+                onHover={setSlashIndex}
+                onSelect={selectSkill}
+              />
+            )}
             <div className="flex items-end gap-2 rounded-xl border border-border bg-card px-4 py-3 focus-within:ring-2 focus-within:ring-ring/20 transition-shadow">
               <textarea
                 ref={textareaRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
+                onBlur={() => setTimeout(() => setSlashOpen(false), 120)}
                 placeholder={
                   selectedAgent
-                    ? `Message ${selectedAgent}...`
+                    ? `Message ${selectedAgent}... ("/" to pick a skill)`
                     : "Select an agent first"
                 }
                 disabled={!selectedAgent || sending}
@@ -778,6 +887,62 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function SlashMenu({
+  skills,
+  activeIndex,
+  onHover,
+  onSelect,
+}: {
+  skills: SkillInfo[];
+  activeIndex: number;
+  onHover: (i: number) => void;
+  onSelect: (s: SkillInfo) => void;
+}) {
+  return (
+    <div className="absolute bottom-full left-0 right-0 mb-2 rounded-xl border border-border bg-popover shadow-lg overflow-hidden z-20">
+      <div className="max-h-[320px] overflow-y-auto py-1">
+        {skills.map((s, i) => (
+          <button
+            key={s.name}
+            // onMouseDown fires before the textarea's onBlur so the click
+            // isn't swallowed by the blur-driven menu close.
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onSelect(s);
+            }}
+            onMouseEnter={() => onHover(i)}
+            className={`w-full flex items-start gap-3 px-3 py-2 text-left transition-colors ${
+              i === activeIndex ? "bg-muted/60" : "hover:bg-muted/40"
+            }`}
+          >
+            <Puzzle className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-medium truncate">{s.name}</p>
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+                  {s.type || "skill"}
+                </span>
+              </div>
+              {s.description && (
+                <p className="text-xs text-muted-foreground line-clamp-1">
+                  {s.description}
+                </p>
+              )}
+            </div>
+          </button>
+        ))}
+      </div>
+      <Link
+        href="/skills/"
+        className="flex items-center gap-2 border-t border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
+      >
+        <SlidersHorizontal className="h-3.5 w-3.5" />
+        Manage Skills
+      </Link>
     </div>
   );
 }

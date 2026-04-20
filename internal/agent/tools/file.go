@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,18 @@ type listDirArgs struct {
 
 var errOutsideSandbox = fmt.Errorf("access denied: path is outside the allowed sandbox directory")
 
+// globalSkillsDirSuffix is used to detect attempts to write into the
+// admin-managed global skills directory (~/.fastclaw/skills/). Reads are
+// fine — the skills layer already exposes this content — but writes from
+// chat would let agents silently install/overwrite skills for every other
+// agent on the host.
+const globalSkillsDirSuffix = "/.fastclaw/skills"
+
+// errGlobalSkillsDirWrite is returned when write_file targets
+// ~/.fastclaw/skills/ from inside an agent chat. The message tells the model
+// exactly how to recover.
+var errGlobalSkillsDirWrite = fmt.Errorf("access denied: ~/.fastclaw/skills/ is the admin-managed global skills directory. To create a new skill, load the \"skill-creator\" skill and follow its workflow (it scaffolds into this agent's private skills dir). To install an existing one, use the install_skill tool")
+
 // systemFiles are the agent metadata/identity files. When a relative path
 // references one of these by basename, file tools resolve it against the
 // system root rather than the user root.
@@ -41,16 +54,46 @@ var systemFiles = map[string]bool{
 	"agent.json":   true,
 }
 
-// rootForPath returns the root a relative path should resolve against: the
-// system root for identity files (SOUL.md, IDENTITY.md, ...), the user root
-// for everything else. Absolute paths are returned as-is.
+// isWorkspacePath decides whether a write/read/list_dir path belongs in the
+// workspace store (vs. the agent's home / systemRoot on disk). Uses the same
+// rules as rootForPath: identity filenames, the `skills/` subtree, and
+// absolute paths stay on disk; everything else is workspace-scoped.
+func (r *Registry) isWorkspacePath(path string) bool {
+	if filepath.IsAbs(path) {
+		return false
+	}
+	clean := filepath.Clean(path)
+	if clean == "skills" || strings.HasPrefix(clean, "skills"+string(filepath.Separator)) {
+		return false
+	}
+	if !strings.ContainsRune(clean, filepath.Separator) && systemFiles[clean] {
+		return false
+	}
+	return true
+}
+
+// rootForPath returns the root a relative path should resolve against:
+//   - systemRoot (agent home) for identity files (SOUL.md, IDENTITY.md, …)
+//     and for anything under the `skills/` subtree, which must land in the
+//     agent's private skills dir so SkillsLoader actually discovers it;
+//   - userRoot (agent workspace) for everything else, which is user-facing
+//     artifact territory.
+//
+// Absolute paths are returned as-is.
 func (r *Registry) rootForPath(path string) string {
 	if filepath.IsAbs(path) {
 		return ""
 	}
 	clean := filepath.Clean(path)
-	// Only single-segment relative paths can target a system file — nested
-	// paths like "notes/SOUL.md" are treated as user content.
+	// `skills/...` always routes to the agent's home so write_file
+	// ("skills/foo/SKILL.md") ends up in the location SkillsLoader scans.
+	// Without this, skill-creator's scaffolding ends up in the workspace
+	// where nothing ever finds it.
+	if clean == "skills" || strings.HasPrefix(clean, "skills"+string(filepath.Separator)) {
+		return r.systemRoot
+	}
+	// Single-segment system files (SOUL.md, IDENTITY.md, ...) also route
+	// home; nested paths like "notes/SOUL.md" stay in user content.
 	if !strings.ContainsRune(clean, filepath.Separator) && systemFiles[clean] {
 		return r.systemRoot
 	}
@@ -103,6 +146,14 @@ func resolvePath(root, path string) string {
 	return filepath.Clean(filepath.Join(root, path))
 }
 
+// isGlobalSkillsPath reports whether absPath points at or under the
+// admin-managed ~/.fastclaw/skills/ directory. Works across user home
+// locations by matching the stable suffix.
+func isGlobalSkillsPath(absPath string) bool {
+	clean := filepath.Clean(absPath)
+	return strings.HasSuffix(clean, globalSkillsDirSuffix) || strings.Contains(clean, globalSkillsDirSuffix+string(filepath.Separator))
+}
+
 // resolvePathSandboxed resolves a path and validates that it stays within
 // sandboxRoot. Returns an error when the resolved path escapes.
 func resolvePathSandboxed(root, sandboxRoot, path string) (string, error) {
@@ -131,6 +182,21 @@ func makeReadFile(r *Registry) ToolFunc {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
 
+		// Mirror makeWriteFile's routing: userRoot-destined paths go to the
+		// workspace store when one is configured.
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, args.Path)
+			if err != nil {
+				return "", fmt.Errorf("workspace get: %w", err)
+			}
+			defer rc.Close()
+			data, err := io.ReadAll(rc)
+			if err != nil {
+				return "", fmt.Errorf("workspace read: %w", err)
+			}
+			return string(data), nil
+		}
+
 		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
 		if err != nil {
 			return "", err
@@ -151,9 +217,24 @@ func makeWriteFile(r *Registry) ToolFunc {
 			return "", fmt.Errorf("parse args: %w", err)
 		}
 
+		// When a workspace store is configured, route userRoot-destined
+		// writes through it. Identity files (systemRoot) still hit the
+		// filesystem because the memory store already covers their
+		// durability via a separate path.
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			if err := r.workspaceStore.Put(ctx, r.agentID, args.Path,
+				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
+				return "", fmt.Errorf("workspace put: %w", err)
+			}
+			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
+		}
+
 		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)
 		if err != nil {
 			return "", err
+		}
+		if isGlobalSkillsPath(fullPath) {
+			return "", errGlobalSkillsDirWrite
 		}
 		dir := filepath.Dir(fullPath)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -173,6 +254,43 @@ func makeListDir(r *Registry) ToolFunc {
 		var args listDirArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
+		}
+
+		// Workspace store has a flat key namespace; we synthesise a "dir
+		// listing" by filtering List output to entries whose agent-relative
+		// path sits under args.Path's prefix.
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			objs, err := r.workspaceStore.List(ctx, r.agentID)
+			if err != nil {
+				return "", fmt.Errorf("workspace list: %w", err)
+			}
+			prefix := strings.Trim(filepath.ToSlash(filepath.Clean(args.Path)), "/")
+			if prefix == "." {
+				prefix = ""
+			}
+			var sb strings.Builder
+			seenDirs := map[string]bool{}
+			for _, o := range objs {
+				p := filepath.ToSlash(o.Path)
+				if prefix != "" && !strings.HasPrefix(p, prefix+"/") && p != prefix {
+					continue
+				}
+				rel := strings.TrimPrefix(p, prefix)
+				rel = strings.TrimPrefix(rel, "/")
+				if rel == "" {
+					continue
+				}
+				if i := strings.IndexByte(rel, '/'); i >= 0 {
+					dirName := rel[:i]
+					if !seenDirs[dirName] {
+						seenDirs[dirName] = true
+						fmt.Fprintf(&sb, "d %s/\n", dirName)
+					}
+					continue
+				}
+				fmt.Fprintf(&sb, "f %s (%d bytes)\n", rel, o.Size)
+			}
+			return sb.String(), nil
 		}
 
 		fullPath, err := resolvePathSandboxed(r.rootForPath(args.Path), r.sandboxRoot, args.Path)

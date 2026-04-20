@@ -4,29 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
+
+	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
 
-// RegisterSkillInstall registers tools for searching and installing skills from
-// ClawHub (clawhub.ai) and GitHub (skills.sh ecosystem).
-// These run on the host (not in sandbox) via FastClaw's own API.
-func RegisterSkillInstall(r *Registry, gatewayPort int) {
-	if gatewayPort <= 0 {
-		gatewayPort = 18953
-	}
-	base := fmt.Sprintf("http://localhost:%d", gatewayPort)
-
+// RegisterSkillInstall wires the per-agent skill search and install tools
+// into registry r.
+//
+// agentSkillsDir is the per-agent skills directory (conventionally
+// <agentHome>/skills). Agent-initiated installs always land under that path —
+// never in the global ~/.fastclaw/skills/ — so one agent can't alter another
+// agent's capabilities just by chatting.
+//
+// onReload is called after a successful install so the owning agent can
+// re-scan its skills dir and expose the new skill on the next turn without
+// a restart. Pass nil to disable hot reload.
+func RegisterSkillInstall(r *Registry, agentSkillsDir string, onReload func()) {
 	r.Register(
 		"search_skills",
-		"Search for skills on ClawHub (clawhub.ai) registry. Returns available skills matching the query.",
+		"Search for skills on skills.sh (primary registry) and clawhub.ai. Returns the top matches so you can pick one to install.",
 		map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"query": map[string]interface{}{
 					"type":        "string",
-					"description": "Search query (e.g. 'translation', 'code review', 'data analysis')",
+					"description": "Search query (e.g. 'pdf', 'translation', 'web scraping')",
 				},
 			},
 			"required": []string{"query"},
@@ -35,104 +38,88 @@ func RegisterSkillInstall(r *Registry, gatewayPort int) {
 			var params struct {
 				Query string `json:"query"`
 			}
-			json.Unmarshal(args, &params)
-
-			resp, err := http.Get(fmt.Sprintf("%s/api/skills/search?q=%s&source=clawhub", base, params.Query))
-			if err != nil {
-				return "", fmt.Errorf("search failed: %w", err)
+			if err := json.Unmarshal(args, &params); err != nil {
+				return "", err
 			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-
-			var result struct {
-				Results []struct {
-					Package struct {
-						Name        string `json:"name"`
-						Summary     string `json:"summary"`
-						DisplayName string `json:"displayName"`
-					} `json:"package"`
-				} `json:"results"`
+			if params.Query == "" {
+				return "", fmt.Errorf("query is required")
 			}
-			if json.Unmarshal(body, &result) == nil && len(result.Results) > 0 {
-				var lines []string
-				for _, r := range result.Results {
-					name := r.Package.Name
-					desc := r.Package.Summary
-					if desc == "" {
-						desc = r.Package.DisplayName
-					}
-					lines = append(lines, fmt.Sprintf("- %s: %s", name, desc))
+
+			var b strings.Builder
+			sh, shErr := skills.SearchSkillsSh(params.Query)
+			if shErr == nil && len(sh) > 0 {
+				fmt.Fprintf(&b, "skills.sh (%d results):\n", len(sh))
+				limit := 10
+				if len(sh) < limit {
+					limit = len(sh)
 				}
-				return fmt.Sprintf("Found %d skills:\n%s", len(result.Results), strings.Join(lines, "\n")), nil
+				for _, r := range sh[:limit] {
+					fmt.Fprintf(&b, "- %s (from %s, %d installs)\n", r.SkillID, r.Source, r.Installs)
+				}
+			} else if shErr != nil {
+				fmt.Fprintf(&b, "skills.sh search error: %v\n", shErr)
+			} else {
+				b.WriteString("skills.sh: no matches\n")
 			}
-			return string(body), nil
+			return b.String(), nil
 		},
 	)
 
 	r.Register(
 		"install_skill",
-		"Install a skill from ClawHub or GitHub to the global skills directory (available to all agents).",
+		"Install a skill into THIS agent's private skills directory. Tries skills.sh first, then clawhub.ai. If neither has it, returns a not-found error — at that point ask the user whether to build a custom skill with the skill-creator skill instead of retrying. Installed skills are scoped to this agent only; they do not affect other agents.",
 		map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"name": map[string]interface{}{
 					"type":        "string",
-					"description": "Skill name/slug for ClawHub, or GitHub repo (owner/repo) for GitHub",
+					"description": "Skill name/slug (what you'd see listed on skills.sh or clawhub). For GitHub installs, use 'owner/repo' in the `repo` field instead.",
 				},
-				"source": map[string]interface{}{
+				"repo": map[string]interface{}{
 					"type":        "string",
-					"description": "Source: 'clawhub' (default) or 'github'",
+					"description": "Optional: GitHub 'owner/repo' to install from a specific repo instead of the public registries. When set, `name` is the skill folder inside the repo (omit for whole-repo skills).",
 				},
 			},
 			"required": []string{"name"},
 		},
 		func(ctx context.Context, args json.RawMessage) (string, error) {
 			var params struct {
-				Name   string `json:"name"`
-				Source string `json:"source"`
+				Name string `json:"name"`
+				Repo string `json:"repo"`
 			}
-			json.Unmarshal(args, &params)
-
-			if params.Source == "" {
-				if strings.Contains(params.Name, "/") {
-					params.Source = "github"
-				} else {
-					params.Source = "clawhub"
-				}
+			if err := json.Unmarshal(args, &params); err != nil {
+				return "", err
 			}
-
-			var reqBody map[string]string
-			if params.Source == "github" {
-				reqBody = map[string]string{"source": "github", "repo": params.Name}
-			} else {
-				reqBody = map[string]string{"source": "clawhub", "skill": params.Name}
+			if params.Name == "" && params.Repo == "" {
+				return "", fmt.Errorf("name or repo is required")
+			}
+			if agentSkillsDir == "" {
+				return "", fmt.Errorf("agent skills directory not configured")
 			}
 
-			bodyBytes, _ := json.Marshal(reqBody)
-			resp, err := http.Post(fmt.Sprintf("%s/api/skills/install", base), "application/json", strings.NewReader(string(bodyBytes)))
+			var (
+				result *skills.Result
+				err    error
+			)
+			switch {
+			case params.Repo != "":
+				result, err = skills.InstallFromGitHubRepo(params.Repo, params.Name, agentSkillsDir)
+			default:
+				result, err = skills.InstallAuto(params.Name, agentSkillsDir)
+			}
 			if err != nil {
-				return "", fmt.Errorf("install failed: %w", err)
+				return "", fmt.Errorf("%w — if the user still wants this capability, offer to build a custom skill using the skill-creator skill", err)
 			}
-			defer resp.Body.Close()
-			result, _ := io.ReadAll(resp.Body)
 
-			var res struct {
-				OK      bool   `json:"ok"`
-				Name    string `json:"name"`
-				Version string `json:"version"`
-				Error   string `json:"error"`
+			if onReload != nil {
+				onReload()
 			}
-			json.Unmarshal(result, &res)
-
-			if res.OK {
-				msg := fmt.Sprintf("Successfully installed skill '%s'", res.Name)
-				if res.Version != "" {
-					msg += fmt.Sprintf(" (version %s)", res.Version)
-				}
-				msg += " to the global skills directory. All agents can now use it."
-				return msg, nil
+			msg := fmt.Sprintf("Installed %q from %s to %s (%d files).", result.Name, result.Source, result.InstalledAt, result.FilesWritten)
+			if result.Version != "" {
+				msg += fmt.Sprintf(" Version/ref: %s.", result.Version)
 			}
-			return "", fmt.Errorf("install failed: %s", res.Error)
+			msg += " The skill is now available in this agent only; it will be picked up on the next turn."
+			return msg, nil
 		},
 	)
 }

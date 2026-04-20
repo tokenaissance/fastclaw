@@ -114,6 +114,39 @@ func LoadEnv() *EnvConfig {
 	return cfg
 }
 
+// applyWorkspaceEnv copies workspace-backend vars onto a fully-resolved
+// config. Called from ApplyToConfig — kept as a separate helper so
+// gateway.New doesn't have to know the env-var name convention.
+func applyWorkspaceEnv(cfg *Config) {
+	if v := os.Getenv("FASTCLAW_WORKSPACE_BACKEND"); v != "" {
+		cfg.Workspace.Backend = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_LOCAL_ROOT"); v != "" {
+		cfg.Workspace.Local.Root = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_ENDPOINT"); v != "" {
+		cfg.Workspace.S3.Endpoint = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_REGION"); v != "" {
+		cfg.Workspace.S3.Region = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_BUCKET"); v != "" {
+		cfg.Workspace.S3.Bucket = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_PREFIX"); v != "" {
+		cfg.Workspace.S3.Prefix = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_ACCESSKEY"); v != "" {
+		cfg.Workspace.S3.AccessKey = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_SECRETKEY"); v != "" {
+		cfg.Workspace.S3.SecretKey = v
+	}
+	if v := os.Getenv("FASTCLAW_WORKSPACE_S3_USESSL"); v != "" {
+		cfg.Workspace.S3.UseSSL = v == "true" || v == "1"
+	}
+}
+
 // ApplyToConfig merges EnvConfig values into a legacy Config struct.
 // This bridges the gap while we migrate away from fastclaw.json.
 func (e *EnvConfig) ApplyToConfig(cfg *Config) {
@@ -148,6 +181,10 @@ func (e *EnvConfig) ApplyToConfig(cfg *Config) {
 			cfg.Sandbox.E2BKey = e.Sandbox.E2BKey
 		}
 	}
+	// Workspace backend vars are read directly from the env (not mirrored
+	// in EnvConfig) since they came later and the EnvConfig struct is
+	// already doing too much indirection.
+	applyWorkspaceEnv(cfg)
 }
 
 // GenerateToken creates a random hex token.
