@@ -89,13 +89,26 @@ func runGateway(port int) error {
 		Level: slog.LevelInfo,
 	})))
 
-	// Check if config exists
+	// Check if config exists. When FASTCLAW_* env vars are set (typical
+	// K8s/container deploy), a missing fastclaw.json is fine — env
+	// provides the infra fields and the UI bootstraps product config.
+	// Absent both env and file, fall back to the setup wizard for
+	// interactive local onboarding.
 	cfg, err := config.Load()
 	if err != nil {
-		// Config doesn't exist — run setup wizard
-		slog.Info("no config found, starting setup wizard", "url", fmt.Sprintf("http://localhost:%d", port))
-		return runSetupWizard(port)
+		if hasInfraEnv() {
+			slog.Info("no fastclaw.json found, bootstrapping from env")
+			cfg = &config.Config{}
+		} else {
+			slog.Info("no config found, starting setup wizard", "url", fmt.Sprintf("http://localhost:%d", port))
+			return runSetupWizard(port)
+		}
 	}
+
+	// Env vars win over JSON for infra fields — see ApplyToConfig. This
+	// is what makes FASTCLAW_STORAGE_DSN / FASTCLAW_OBJECT_STORE_* / etc.
+	// actually take effect at runtime.
+	config.LoadEnv().ApplyToConfig(cfg)
 
 	slog.Info("starting gateway")
 
@@ -233,6 +246,30 @@ func runSetupWizard(port int) error {
 	// Config was saved, now start the gateway
 	slog.Info("restarting as gateway")
 	return runGateway(port)
+}
+
+// hasInfraEnv reports whether the environment carries enough infra config
+// to run without a fastclaw.json. Used by runGateway to skip the setup
+// wizard in container/K8s deployments where JSON doesn't exist but env is
+// comprehensive.
+//
+// The gate is loose on purpose: one of these vars being set strongly
+// implies "this is a container deploy, don't prompt the user". Missing
+// ones (e.g. token when mode=local) are fine because ApplyToConfig still
+// populates them from defaults.
+func hasInfraEnv() bool {
+	for _, k := range []string{
+		"FASTCLAW_MODE",
+		"FASTCLAW_AUTH_TOKEN",
+		"FASTCLAW_STORAGE_TYPE",
+		"FASTCLAW_STORAGE_DSN",
+		"FASTCLAW_OBJECT_STORE_TYPE",
+	} {
+		if os.Getenv(k) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func openBrowser(url string) {

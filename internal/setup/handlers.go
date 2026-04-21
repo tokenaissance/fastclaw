@@ -54,26 +54,44 @@ func unwrapPathError(err error) error {
 	return nil
 }
 
-// saveUserConfig persists the config for the request's user.
-// Writes to file (always) and to Store (if available, for DB-backed deployments).
+// saveUserConfig persists a UI-originated config update. Infra fields
+// (storage, objectStore, gateway.auth.token, sandbox) are deliberately
+// NOT overwritten — those belong to the deployment and are sourced from
+// env / Secret in cloud mode or bootstrap JSON in local mode. Letting the
+// UI touch them would let an admin brick their own deployment.
+//
+// Everything else (providers, toolProviders, tools, agents.defaults,
+// channels, plugins, cron, skills, …) flows through to disk + the DB
+// store as before.
 func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 	if _, err := config.EnsureUserDir(); err != nil {
 		return err
 	}
-	// Write to global config path (~/.fastclaw/fastclaw.json)
 	configPath, err := config.GlobalConfigPath()
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	// Read-modify-write: start from what's on disk so infra fields are
+	// preserved verbatim. When there's no file yet (first-run bootstrap)
+	// we inherit whatever the caller assembled — the setup wizard still
+	// gets to write a complete initial JSON.
+	merged := *cfg
+	if existingData, readErr := os.ReadFile(configPath); readErr == nil {
+		var existing config.Config
+		if jsonErr := json.Unmarshal(existingData, &existing); jsonErr == nil {
+			merged.Storage = existing.Storage
+			merged.ObjectStore = existing.ObjectStore
+			merged.Gateway = existing.Gateway
+			merged.Sandbox = existing.Sandbox
+		}
+	}
+	data, err := json.MarshalIndent(&merged, "", "  ")
 	if err != nil {
 		return err
 	}
-	// Always write to file (bootstrap source)
 	if err := os.WriteFile(configPath, data, 0o644); err != nil {
 		return err
 	}
-	// Also save to DB store if available
 	if s.dataStore != nil {
 		var rawCfg map[string]interface{}
 		json.Unmarshal(data, &rawCfg)
