@@ -34,7 +34,30 @@ func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 		return cfg, nil
 	}
 
-	// Auto-provision if missing.
+	// In cloud mode the pod-local fastclaw.json is ephemeral and the
+	// watcher hot-reloads from it — provisioning a stub here writes an
+	// empty providers/default-agent blob that then blows away the DB-
+	// hydrated config on every fresh pod. Hydrate from the DB instead.
+	cloudMode := s.gatewayCfg != nil && s.gatewayCfg.Mode == "cloud"
+	if cloudMode && s.dataStore != nil {
+		if gc, gerr := s.dataStore.GetConfig(r.Context()); gerr == nil && gc != nil && len(gc.Data) > 0 {
+			blob, merr := json.Marshal(gc.Data)
+			if merr == nil {
+				var stored config.Config
+				if uerr := json.Unmarshal(blob, &stored); uerr == nil {
+					return &stored, nil
+				}
+			}
+		}
+		// Nothing in DB yet — return a zero-value config so the setup
+		// wizard can flow. Don't write anything to disk.
+		return &config.Config{
+			Providers: map[string]config.ProviderConfig{},
+			Channels:  map[string]config.ChannelConfig{},
+		}, nil
+	}
+
+	// Local mode: auto-provision if missing.
 	if os.IsNotExist(unwrapPathError(err)) {
 		if provErr := users.ProvisionWorkspace(userID); provErr != nil {
 			return nil, fmt.Errorf("auto-provision user %s: %w", userID, provErr)
@@ -155,16 +178,32 @@ func (s *Server) resolveAllAgents(r *http.Request) []AgentHandle {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	configPath, err := config.GlobalConfigPath()
-	if err != nil {
-		jsonResponse(w, http.StatusOK, map[string]any{
-			"configured": false,
-			"running":    false,
-		})
-		return
+	// Deployment mode decides where "configured" lives. In cloud mode the
+	// pod-local fastclaw.json is ephemeral and doesn't roam across replicas,
+	// so we treat the shared dataStore as the source of truth.
+	mode := ""
+	if s.gatewayCfg != nil {
+		mode = s.gatewayCfg.Mode
 	}
-	_, statErr := os.Stat(configPath)
-	configured := statErr == nil
+
+	configured := false
+	if mode == "cloud" && s.dataStore != nil {
+		if gc, err := s.dataStore.GetConfig(r.Context()); err == nil && gc != nil && len(gc.Data) > 0 {
+			configured = true
+		}
+	} else {
+		configPath, err := config.GlobalConfigPath()
+		if err != nil {
+			jsonResponse(w, http.StatusOK, map[string]any{
+				"configured": false,
+				"running":    false,
+				"mode":       mode,
+			})
+			return
+		}
+		_, statErr := os.Stat(configPath)
+		configured = statErr == nil
+	}
 
 	userID := config.UserIDFromContext(r.Context())
 	isAdmin := userID == config.DefaultUserID && s.authToken != ""
@@ -173,6 +212,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"configured": configured,
 		"running":    s.agentProvider != nil,
 		"port":       s.port,
+		"mode":       mode,
 		"agents":     []any{},
 		"channels":   []any{},
 		"provider":   nil,
@@ -591,26 +631,34 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Gateway (always set)
-	port := req.Port
-	if port == 0 {
-		port = 18953
-	}
-	gatewayToken := req.GatewayToken
-	if gatewayToken == "" {
-		gatewayToken = generateRandomToken(32)
-	}
-	cfg.Gateway = config.GatewayCfg{
-		Port: port,
-		Auth: config.GatewayAuth{
-			Token: gatewayToken,
-		},
-		HTTP: config.GatewayHTTP{
-			Endpoints: config.GatewayHTTPEndpoints{
-				ChatCompletions: config.GatewayEndpoint{Enabled: true},
-				Agents:          config.GatewayEndpoint{Enabled: true},
+	// Gateway: infra fields (port/token/mode/bind) belong to the deployment,
+	// not the UI. In cloud mode they come from env; in local mode from an
+	// existing fastclaw.json or UI input on first run. Either way, avoid
+	// clobbering an already-loaded gateway config with UI-provided values.
+	cloudMode := s.gatewayCfg != nil && s.gatewayCfg.Mode == "cloud"
+	if cloudMode && s.gatewayCfg != nil {
+		cfg.Gateway = *s.gatewayCfg
+	} else {
+		port := req.Port
+		if port == 0 {
+			port = 18953
+		}
+		gatewayToken := req.GatewayToken
+		if gatewayToken == "" {
+			gatewayToken = generateRandomToken(32)
+		}
+		cfg.Gateway = config.GatewayCfg{
+			Port: port,
+			Auth: config.GatewayAuth{
+				Token: gatewayToken,
 			},
-		},
+			HTTP: config.GatewayHTTP{
+				Endpoints: config.GatewayHTTPEndpoints{
+					ChatCompletions: config.GatewayEndpoint{Enabled: true},
+					Agents:          config.GatewayEndpoint{Enabled: true},
+				},
+			},
+		}
 	}
 
 	// Telegram (optional)
@@ -673,6 +721,34 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join(agentDir, filename)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			os.WriteFile(path, []byte(content), 0o644)
+		}
+	}
+
+	// In cloud deploys the pod-local filesystem is ephemeral and not shared
+	// across replicas. Mirror the config, the agent record, and its identity
+	// files into the shared dataStore so any pod can serve the agent after
+	// restart/scheduling. Failures here are logged but don't block the save
+	// — local fastclaw.json on this pod is still a valid fallback.
+	if s.dataStore != nil {
+		var rawCfg map[string]interface{}
+		if marshalled, err := json.Marshal(cfg); err == nil {
+			_ = json.Unmarshal(marshalled, &rawCfg)
+		}
+		if err := s.dataStore.SaveConfig(r.Context(), &store.GlobalConfig{Data: rawCfg}); err != nil {
+			slog.Warn("dataStore.SaveConfig failed", "error", err)
+		}
+		agentRecord := &store.AgentRecord{
+			ID:    agentID,
+			Name:  req.AgentName,
+			Model: cfg.Agents.Defaults.Model,
+		}
+		if err := s.dataStore.SaveAgent(r.Context(), agentRecord); err != nil {
+			slog.Warn("dataStore.SaveAgent failed", "error", err)
+		}
+		for filename, content := range wsFiles {
+			if err := s.dataStore.SaveWorkspaceFile(r.Context(), agentID, filename, []byte(content)); err != nil {
+				slog.Warn("dataStore.SaveWorkspaceFile failed", "file", filename, "error", err)
+			}
 		}
 	}
 

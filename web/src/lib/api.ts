@@ -2,6 +2,7 @@ export interface StatusResponse {
   configured: boolean;
   running: boolean;
   port: number;
+  mode?: string;
   uptime: string;
   agents: AgentInfo[];
   channels: ChannelInfo[];

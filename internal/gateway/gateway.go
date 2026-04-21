@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -52,6 +53,43 @@ func defaultStr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// mergeCloudConfig copies product-level fields from the DB-persisted config
+// into the live env-bootstrapped config. Infra fields (Gateway, Storage,
+// ObjectStore, Sandbox) are left alone — they must come from env / Secret
+// so ops keeps control of the deployment surface even after a UI save.
+func mergeCloudConfig(dst, src *config.Config) {
+	if src == nil {
+		return
+	}
+	if len(src.Providers) > 0 {
+		dst.Providers = src.Providers
+	}
+	if len(src.Channels) > 0 {
+		dst.Channels = src.Channels
+	}
+	if len(src.Bindings) > 0 {
+		dst.Bindings = src.Bindings
+	}
+	if len(src.Teams) > 0 {
+		dst.Teams = src.Teams
+	}
+	if len(src.CronJobs) > 0 {
+		dst.CronJobs = src.CronJobs
+	}
+	if src.Agents.Defaults.Model != "" {
+		dst.Agents.Defaults = src.Agents.Defaults
+	}
+	if len(src.ToolProviders) > 0 {
+		dst.ToolProviders = src.ToolProviders
+	}
+	if len(src.Tools) > 0 {
+		dst.Tools = src.Tools
+	}
+	if src.Heartbeat.IntervalMinutes > 0 {
+		dst.Heartbeat = src.Heartbeat
+	}
 }
 
 // registerAgentToolChains wires every provider-backed tool category onto the
@@ -162,6 +200,26 @@ func New(cfg *config.Config) (*Gateway, error) {
 	}, homeDir)
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
+	}
+
+	// Cloud pods boot with an empty fastclaw.json (env bootstrap). Hydrate
+	// product fields (providers, agents.defaults, channels, bindings, …)
+	// from the shared dataStore so any replica serves the same config that
+	// the setup wizard persisted. Infra fields stay on the pod-local/env
+	// side — we only pull product knobs out of the DB.
+	if cfg.Gateway.Mode == "cloud" && st != nil {
+		if gc, err := st.GetConfig(context.Background()); err == nil && gc != nil && len(gc.Data) > 0 {
+			if blob, err := json.Marshal(gc.Data); err == nil {
+				var stored config.Config
+				if err := json.Unmarshal(blob, &stored); err == nil {
+					mergeCloudConfig(cfg, &stored)
+				} else {
+					slog.Warn("decode stored config", "error", err)
+				}
+			}
+		} else if err != nil {
+			slog.Warn("store GetConfig failed", "error", err)
+		}
 	}
 
 	// Workspace blob store (local FS or S3). Distinct from the Store above:
@@ -510,9 +568,17 @@ func (g *Gateway) Run() error {
 		g.users.startEvictor(ctx)
 	}()
 
-	// Start config file watcher for hot-reload
-	wg.Add(1)
-	go g.startConfigWatcher(ctx, &wg)
+	// Start config file watcher for hot-reload. Cloud pods have an
+	// ephemeral /data/.fastclaw and each request that touches the API
+	// may write a bootstrap stub — letting the watcher act on that would
+	// overwrite the DB-hydrated in-memory config (providers wiped, fake
+	// "default" agent added). Config truth in cloud lives in the DB.
+	if g.config.Gateway.Mode != "cloud" {
+		wg.Add(1)
+		go g.startConfigWatcher(ctx, &wg)
+	} else {
+		slog.Info("config watcher disabled in cloud mode")
+	}
 
 	// Start dedup cleanup goroutine
 	wg.Add(1)

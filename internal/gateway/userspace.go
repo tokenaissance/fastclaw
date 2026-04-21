@@ -164,26 +164,38 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 // same fallback logic Gateway.New used to use inline.
 func newProviderFromConfig(cfg *config.Config) provider.Provider {
 	var providerCfg config.ProviderConfig
+	var matchedKey string
 	defaultModel := cfg.Agents.Defaults.Model
 	if parts := strings.SplitN(defaultModel, "/", 2); len(parts) == 2 {
 		if p, ok := cfg.Providers[parts[0]]; ok {
 			providerCfg = p
+			matchedKey = parts[0]
 		}
 	}
 	if providerCfg.APIKey == "" {
 		for _, key := range []string{"default", "openai", "openrouter"} {
 			if p, ok := cfg.Providers[key]; ok {
 				providerCfg = p
+				matchedKey = key
 				break
 			}
 		}
 	}
 	if providerCfg.APIKey == "" {
-		for _, p := range cfg.Providers {
+		for k, p := range cfg.Providers {
 			providerCfg = p
+			matchedKey = k
 			break
 		}
 	}
+	slog.Info("provider selected",
+		"key", matchedKey,
+		"apiBase", providerCfg.APIBase,
+		"apiType", providerCfg.APIType,
+		"hasKey", providerCfg.APIKey != "",
+		"defaultModel", defaultModel,
+		"providerCount", len(cfg.Providers),
+	)
 	return provider.NewProvider(providerCfg.APIKey, providerCfg.APIBase, providerCfg.APIType)
 }
 

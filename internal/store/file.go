@@ -100,8 +100,9 @@ func (f *FileStore) DeleteAgent(ctx context.Context, agentID string) error {
 // --- Sessions ---
 
 func (f *FileStore) sessionPath(agentID, sessionKey string) string {
-	safe := strings.ReplaceAll(sessionKey, ":", "_")
-	return filepath.Join(f.agentDir(agentID), "sessions", safe+".jsonl")
+	// sessionKey is already filename-safe — session.sessionKey() produces
+	// "channel_chatID" so no re-encoding is needed here.
+	return filepath.Join(f.agentDir(agentID), "sessions", sessionKey+".jsonl")
 }
 
 func (f *FileStore) GetSession(ctx context.Context, agentID, sessionKey string) (*SessionRecord, error) {

@@ -22,7 +22,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import { testProvider, saveConfig } from "@/lib/api";
+import { testProvider, saveConfig, getStatus } from "@/lib/api";
 import { login as loginWithToken } from "@/lib/auth";
 
 const PROVIDERS: Record<string, { apiBase: string; apiType: string; models: string[] }> = {
@@ -143,9 +143,19 @@ export default function OnboardPage() {
   const [launched, setLaunched] = useState(false);
   const [copiedToken, setCopiedToken] = useState(false);
   const [mounted, setMounted] = useState(false);
+  // Cloud deploys get port + admin token from env/Secret, so the wizard
+  // must not ask the operator to invent them. Discovered once on mount via
+  // /api/status; we default to "local" so a failed probe never hides UI.
+  const [mode, setMode] = useState<string>("local");
+  const isCloud = mode === "cloud";
 
   useEffect(() => {
     setMounted(true);
+    getStatus()
+      .then((s) => {
+        if (s.mode) setMode(s.mode);
+      })
+      .catch(() => {});
   }, []);
 
   const updateConfig = useCallback(
@@ -155,9 +165,12 @@ export default function OnboardPage() {
     []
   );
 
-  // Generate gateway token when entering the final step
+  // Generate gateway token when entering the final step — local mode only.
+  // Cloud deploys use FASTCLAW_AUTH_TOKEN from Secret; the admin already
+  // holds it to have reached this page, so generating another one would
+  // overwrite their working bearer on launch.
   useEffect(() => {
-    if (step === 3 && !config.gatewayToken) {
+    if (step === 3 && !config.gatewayToken && !isCloud) {
       const chars = "abcdef0123456789";
       let token = "";
       for (let i = 0; i < 64; i++) {
@@ -165,7 +178,7 @@ export default function OnboardPage() {
       }
       updateConfig({ gatewayToken: token });
     }
-  }, [step, config.gatewayToken, updateConfig]);
+  }, [step, config.gatewayToken, updateConfig, isCloud]);
 
   const handleProviderChange = useCallback(
     (provider: string | null) => {
@@ -208,8 +221,11 @@ export default function OnboardPage() {
   }, [config.apiBase, config.apiKey, config.model, config.apiType, config.authType]);
 
   const handleLaunch = useCallback(async () => {
-    // Auto-login before saving (in case the server restarts and drops the connection)
-    if (config.gatewayToken) {
+    // Auto-login before saving (in case the server restarts and drops the
+    // connection). Cloud mode uses the operator's pre-issued admin token,
+    // which is already in storage — don't overwrite it with the random
+    // one the wizard generated for local flows.
+    if (config.gatewayToken && !isCloud) {
       loginWithToken(config.gatewayToken);
     }
 
@@ -226,7 +242,7 @@ export default function OnboardPage() {
     setTimeout(() => {
       window.location.href = "/overview/";
     }, 3000);
-  }, [config]);
+  }, [config, isCloud]);
 
   const canProceed = useCallback(() => {
     switch (step) {
@@ -561,17 +577,19 @@ export default function OnboardPage() {
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label>Port</Label>
-                <Input
-                  type="number"
-                  value={config.port}
-                  onChange={(e) =>
-                    updateConfig({ port: parseInt(e.target.value) || 18953 })
-                  }
-                  className="font-mono"
-                />
-              </div>
+              {!isCloud && (
+                <div className="space-y-2">
+                  <Label>Port</Label>
+                  <Input
+                    type="number"
+                    value={config.port}
+                    onChange={(e) =>
+                      updateConfig({ port: parseInt(e.target.value) || 18953 })
+                    }
+                    className="font-mono"
+                  />
+                </div>
+              )}
 
               <div className="space-y-2">
                 <Label>
@@ -654,42 +672,46 @@ export default function OnboardPage() {
                     />
                     <Separator />
                     <SummaryRow label="Agent Name" value={config.agentName} />
-                    <SummaryRow
-                      label="Port"
-                      value={String(config.port)}
-                      mono
-                    />
+                    {!isCloud && (
+                      <SummaryRow
+                        label="Port"
+                        value={String(config.port)}
+                        mono
+                      />
+                    )}
                   </div>
 
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-2">
-                    <p className="text-sm font-medium text-amber-500">Admin Token</p>
-                    <p className="text-xs text-muted-foreground">
-                      Save this token — you&apos;ll need it to log in to the admin dashboard.
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <code className="flex-1 rounded-md bg-background px-3 py-2 font-mono text-xs break-all select-all">
-                        {config.gatewayToken || "auto-generated on launch"}
-                      </code>
-                      <button
-                        onClick={() => {
-                          const token = config.gatewayToken;
-                          if (token) {
-                            navigator.clipboard.writeText(token);
-                            setCopiedToken(true);
-                            setTimeout(() => setCopiedToken(false), 2000);
-                          }
-                        }}
-                        className="shrink-0 rounded-md border border-border p-2 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-                        title="Copy token"
-                      >
-                        {copiedToken ? (
-                          <svg className="h-4 w-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                        ) : (
-                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
-                        )}
-                      </button>
+                  {!isCloud && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-2">
+                      <p className="text-sm font-medium text-amber-500">Admin Token</p>
+                      <p className="text-xs text-muted-foreground">
+                        Save this token — you&apos;ll need it to log in to the admin dashboard.
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <code className="flex-1 rounded-md bg-background px-3 py-2 font-mono text-xs break-all select-all">
+                          {config.gatewayToken || "auto-generated on launch"}
+                        </code>
+                        <button
+                          onClick={() => {
+                            const token = config.gatewayToken;
+                            if (token) {
+                              navigator.clipboard.writeText(token);
+                              setCopiedToken(true);
+                              setTimeout(() => setCopiedToken(false), 2000);
+                            }
+                          }}
+                          className="shrink-0 rounded-md border border-border p-2 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                          title="Copy token"
+                        >
+                          {copiedToken ? (
+                            <svg className="h-4 w-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          ) : (
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                          )}
+                        </button>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   <Button
                     onClick={handleLaunch}

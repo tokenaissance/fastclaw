@@ -14,7 +14,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
-// Session holds the message history for a channel:chat_id pair.
+// Session holds the message history for a channel_chat_id pair.
 type Session struct {
 	mu                sync.Mutex
 	Messages          []provider.Message
@@ -26,7 +26,7 @@ type Session struct {
 	sessionKey        string
 }
 
-// Manager manages sessions, keyed by "channel:chat_id".
+// Manager manages sessions, keyed by "channel_chat_id".
 // SessionStore is an optional interface for database-backed session persistence.
 type SessionStore interface {
 	GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
@@ -60,8 +60,14 @@ func NewManagerWithStore(dataDir string, st SessionStore, agentID string) *Manag
 	}
 }
 
+// sessionKey returns the canonical, storage-agnostic key for a session.
+// Uses "_" rather than ":" so filesystem backends don't need to re-encode
+// the key into a filename-safe form on every call and DB-backed backends
+// end up with the same literal string in their session_key column.
+// Everything downstream (DB rows, JSONL filenames, ListWebSessions' prefix
+// filter) can now share one encoding instead of each picking its own.
 func sessionKey(channel, chatID string) string {
-	return channel + ":" + chatID
+	return channel + "_" + chatID
 }
 
 // Get returns or creates a session for the given channel and chat ID.
@@ -75,13 +81,11 @@ func (m *Manager) Get(channel, chatID string) *Session {
 		return s
 	}
 
-	safeKey := strings.ReplaceAll(key, ":", "_")
-	filePath := filepath.Join(m.dataDir, safeKey+".jsonl")
+	filePath := filepath.Join(m.dataDir, key+".jsonl")
 
 	s := &Session{
 		filePath:   filePath,
 		store:      m.store,
-		
 		agentID:    m.agentID,
 		sessionKey: key,
 	}
@@ -326,13 +330,15 @@ func (m *Manager) ListWebSessions() []WebSession {
 
 // DeleteWebSession removes a web chat session file and its metadata.
 func (m *Manager) DeleteWebSession(sessionId string) error {
+	key := sessionKey("web", sessionId)
+
 	// Remove from in-memory cache
 	m.mu.Lock()
-	delete(m.sessions, "web:"+sessionId)
+	delete(m.sessions, key)
 	m.mu.Unlock()
 
 	if m.store != nil {
-		return m.store.DeleteSession(context.Background(), m.agentID, "web:"+sessionId)
+		return m.store.DeleteSession(context.Background(), m.agentID, key)
 	}
 
 	safeId := strings.ReplaceAll(sessionId, "/", "_")
@@ -346,7 +352,7 @@ func (m *Manager) DeleteWebSession(sessionId string) error {
 // RenameWebSession sets a custom title for a web chat session.
 func (m *Manager) RenameWebSession(sessionId, title string) error {
 	if m.store != nil {
-		return m.store.RenameSession(context.Background(), m.agentID, "web:"+sessionId, title)
+		return m.store.RenameSession(context.Background(), m.agentID, sessionKey("web", sessionId), title)
 	}
 
 	safeId := strings.ReplaceAll(sessionId, "/", "_")
