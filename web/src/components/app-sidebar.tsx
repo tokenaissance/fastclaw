@@ -16,14 +16,10 @@ import { NavUser } from "@/components/nav-user";
 import {
   BotIcon,
   BrainIcon,
-  KeyIcon,
   LayoutDashboardIcon,
   PlusIcon,
-  RadioIcon,
-  SettingsIcon,
   SparklesIcon,
   Wand2Icon,
-  WrenchIcon,
 } from "lucide-react";
 import {
   getAgents,
@@ -45,23 +41,13 @@ function extractAgentId(pathname: string): string | null {
 const PLATFORM_NAV: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
-  { title: "Skills", url: "/skills/", icon: SparklesIcon },
-  { title: "Tools", url: "/tools/", icon: WrenchIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
-  { title: "Channels", url: "/channels/", icon: RadioIcon },
-  { title: "Settings", url: "/settings/", icon: SettingsIcon },
+  { title: "Skills", url: "/skills/", icon: SparklesIcon },
 ];
-
-const ADMIN_NAV: NavItem = {
-  title: "API Keys",
-  url: "/users/",
-  icon: KeyIcon,
-};
 
 const AGENT_NAV = (agentId: string): NavItem[] => [
   { title: "New chat", url: `/agents/${agentId}/chat/`, icon: PlusIcon },
   { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
-  { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
   { title: "Model", url: `/agents/${agentId}/models/`, icon: BrainIcon },
 ];
 
@@ -126,7 +112,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   }, [activeAgentId]);
 
   const isAdmin = status?.isAdmin ?? false;
-  const platformItems = isAdmin ? [...PLATFORM_NAV, ADMIN_NAV] : PLATFORM_NAV;
+  const platformItems = PLATFORM_NAV;
 
   return (
     <Sidebar collapsible="icon" {...props}>
