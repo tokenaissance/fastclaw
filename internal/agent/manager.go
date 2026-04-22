@@ -98,6 +98,16 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 		}
 		if mopt.workspaceStore != nil {
 			ag.registry.SetWorkspaceStore(mopt.workspaceStore, rc.ID)
+			// Also make the store available to SkillsLoader so object-store
+			// skills (global + per-agent) are hydrated on every turn. Without
+			// this, pods that didn't handle the original upload will never
+			// see a new skill.
+			ag.workspaceStore = mopt.workspaceStore
+			ag.agentID = rc.ID
+			// Refresh skills now that workspaceStore is wired — the initial
+			// NewAgent pass loaded only the filesystem, missing anything that
+			// lives only in OSS.
+			ag.ReloadWorkspaceFiles()
 		}
 		m.agents[rc.ID] = ag
 

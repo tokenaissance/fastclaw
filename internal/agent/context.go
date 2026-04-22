@@ -55,6 +55,12 @@ func NewContextBuilder(home string, memory *Memory, skillsSummary string) *Conte
 // distinct from the agent's home (identity) dir.
 func (cb *ContextBuilder) SetWorkspace(p string) { cb.workspace = p }
 
+// SetSkillsSummary updates the skills summary baked into the system prompt.
+// Called from refreshSkillsFromStore so skills hydrated from the object
+// store at turn start end up visible to the model without rebuilding the
+// whole context builder.
+func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
+
 // BuildSystemPrompt assembles the system prompt from identity, bootstrap files, memory, and skills.
 func (cb *ContextBuilder) BuildSystemPrompt() string {
 	var parts []string

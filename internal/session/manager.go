@@ -71,6 +71,16 @@ func sessionKey(channel, chatID string) string {
 }
 
 // Get returns or creates a session for the given channel and chat ID.
+//
+// In multi-replica deployments (store-backed mode), every Get() reloads
+// Messages from the store so a request served by pod B sees writes made
+// by pod A. Without this, each pod's in-memory cache drifts away from
+// Postgres: the first refresh after a cross-pod write returns whichever
+// pod-local snapshot happened to be warm. We deliberately overwrite
+// Messages on the cached Session rather than re-creating the struct so
+// transient fields (snapshot, LastConsolidated) survive.
+//
+// File-backed mode stays cache-first since there's only one process.
 func (m *Manager) Get(channel, chatID string) *Session {
 	key := sessionKey(channel, chatID)
 
@@ -78,6 +88,13 @@ func (m *Manager) Get(channel, chatID string) *Session {
 	defer m.mu.Unlock()
 
 	if s, ok := m.sessions[key]; ok {
+		if m.store != nil {
+			if msgs, err := m.store.GetSession(context.Background(), m.agentID, key); err == nil {
+				s.mu.Lock()
+				s.Messages = msgs
+				s.mu.Unlock()
+			}
+		}
 		return s
 	}
 

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/skills"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -70,11 +73,18 @@ type SkillRequires struct {
 
 // SkillsLoader discovers and merges skills from multiple layers with OpenClaw compatibility.
 type SkillsLoader struct {
-	homeDir     string
-	agentDir    string
-	teamDir     string
-	skillsCfg   config.SkillsConfig
-	globalCfg   config.SkillsCfg
+	homeDir   string
+	agentDir  string
+	teamDir   string
+	skillsCfg config.SkillsConfig
+	globalCfg config.SkillsCfg
+	// workspaceStore is optional: when set, LoadSkills hydrates the global
+	// and agent skill directories from the object store before scanning the
+	// filesystem. Without this, a skill uploaded to the store after a pod's
+	// UserSpace was cached is invisible to that pod until restart — and
+	// completely invisible on replicas that didn't handle the upload.
+	workspaceStore workspace.Store
+	agentID        string
 }
 
 // NewSkillsLoader creates a new skills loader.
@@ -94,10 +104,40 @@ func NewSkillsLoaderWithGlobal(homeDir, agentDir, teamDir string, skillsCfg conf
 	return sl
 }
 
+// WithObjectStore wires a workspace.Store + agentID so LoadSkills hydrates
+// skills from the object store before scanning the filesystem. Returns the
+// loader for chaining.
+func (sl *SkillsLoader) WithObjectStore(ws workspace.Store, agentID string) *SkillsLoader {
+	sl.workspaceStore = ws
+	sl.agentID = agentID
+	return sl
+}
+
 // LoadSkills discovers skills from all layers and returns them merged.
 // Precedence: agent workspace > user installed > managed > extra dirs.
 func (sl *SkillsLoader) LoadSkills() []Skill {
-	skills := make(map[string]Skill)
+	// Mirror object-store skills to the local filesystem so a skill
+	// uploaded to OSS (or installed on another replica) is visible here
+	// this turn — not on next pod restart. Cheap idempotent hydrate; the
+	// store does "skip if size matches" per object.
+	if sl.workspaceStore != nil {
+		ctx := context.Background()
+		managedDir := fastclawManagedDir()
+		if managedDir != "" {
+			keep := BundledSkillNames()
+			if err := skills.HydrateSkillsDown(ctx, sl.workspaceStore, skills.GlobalSkillOwner, managedDir, keep...); err != nil {
+				slog.Warn("global skill hydrate failed", "error", err)
+			}
+		}
+		if sl.agentID != "" && sl.agentDir != "" {
+			agentSkills := filepath.Join(sl.agentDir, "skills")
+			if err := skills.HydrateSkillsDown(ctx, sl.workspaceStore, sl.agentID, agentSkills); err != nil {
+				slog.Warn("agent skill hydrate failed", "error", err)
+			}
+		}
+	}
+
+	skillsMap := make(map[string]Skill)
 
 	disabled := make(map[string]bool, len(sl.skillsCfg.Disabled))
 	for _, name := range sl.skillsCfg.Disabled {
@@ -115,7 +155,7 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 		dir = expandPath(dir)
 		for name, skill := range discoverSkillsEnhanced(dir, "extra") {
 			if !disabled[name] {
-				skills[name] = skill
+				skillsMap[name] = skill
 			}
 		}
 	}
@@ -124,7 +164,7 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 	managedDir := fastclawManagedDir()
 	for name, skill := range discoverSkillsEnhanced(managedDir, "managed") {
 		if !disabled[name] {
-			skills[name] = skill
+			skillsMap[name] = skill
 		}
 	}
 
@@ -132,7 +172,7 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 	userDir := filepath.Join(sl.homeDir, "skills")
 	for name, skill := range discoverSkillsEnhanced(userDir, "user") {
 		if !disabled[name] {
-			skills[name] = skill
+			skillsMap[name] = skill
 		}
 	}
 
@@ -141,7 +181,7 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 		teamSkillsDir := filepath.Join(sl.teamDir, "skills")
 		for name, skill := range discoverSkillsEnhanced(teamSkillsDir, "team") {
 			if !disabled[name] {
-				skills[name] = skill
+				skillsMap[name] = skill
 			}
 		}
 	}
@@ -150,13 +190,13 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 	agentSkillsDir := filepath.Join(sl.agentDir, "skills")
 	for name, skill := range discoverSkillsEnhanced(agentSkillsDir, "agent") {
 		if !disabled[name] {
-			skills[name] = skill
+			skillsMap[name] = skill
 		}
 	}
 
 	// Apply gating and env injection
-	result := make([]Skill, 0, len(skills))
-	for _, s := range skills {
+	result := make([]Skill, 0, len(skillsMap))
+	for _, s := range skillsMap {
 		if s.Gated {
 			slog.Debug("skill gated", "name", s.Name, "reason", s.GateReason)
 			continue

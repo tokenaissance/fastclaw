@@ -22,6 +22,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // Agent is the ReAct agent loop.
@@ -55,10 +56,15 @@ type Agent struct {
 	// can rewire a fresh ContextBuilder to keep reading from the Store
 	// instead of silently falling back to pod-local filesystem.
 	memoryStore       MemoryStore
-	skillsLearner     *SkillsLearner
-	turnCount         int
-	engine            *sdkEngine
-	costTracker       *costtracker.Tracker
+	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
+	// and global skill dirs from the object store on every turn so skills
+	// uploaded post-boot or on a sibling replica become visible here.
+	workspaceStore workspace.Store
+	skillsLearner  *SkillsLearner
+	turnCount      int
+	engine         *sdkEngine
+	costTracker    *costtracker.Tracker
+	agentID        string
 }
 
 // NewAgent creates a new Agent from a resolved config.
@@ -131,7 +137,11 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	tools.RegisterWebFetch(registry)
 	tools.RegisterLoadSkill(registry, homeDir, rc.Home, "")
 
-	// Load skills with OpenClaw compatibility
+	// Load skills with OpenClaw compatibility. We can't hydrate from OSS
+	// here — the Agent isn't constructed yet and the manager hasn't wired
+	// workspaceStore. The manager will call ReloadWorkspaceFiles after
+	// wiring to refresh the summary with OSS-hosted skills, and runOnce
+	// re-hydrates on every turn to pick up later uploads.
 	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, globalSkillsCfg)
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
@@ -412,6 +422,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return result.reply
 	}
 
+	a.refreshSkillsFromStore()
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
 
 	// Hook: BeforeSystemPrompt
@@ -689,6 +700,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return provider.NewStreamReader(ch)
 	}
 
+	a.refreshSkillsFromStore()
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
@@ -887,6 +899,22 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	a.maxToolIterations = rc.MaxToolIterations
 }
 
+// refreshSkillsFromStore mirrors OSS-hosted skills (global and per-agent)
+// to the local filesystem and rebuilds the skills summary baked into the
+// system prompt. No-op when no workspace store is configured. Called at
+// the top of every turn so a skill uploaded after pod start — or on a
+// sibling replica — becomes visible here on the next message instead of
+// requiring a pod restart.
+func (a *Agent) refreshSkillsFromStore() {
+	if a.workspaceStore == nil {
+		return
+	}
+	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
+		WithObjectStore(a.workspaceStore, a.agentID)
+	skills := loader.LoadSkills()
+	a.ctxBuilder.SetSkillsSummary(loader.BuildSkillsSummary(skills))
+}
+
 // ReloadWorkspaceFiles re-reads workspace .md files (SOUL.md, AGENTS.md, etc.)
 // and rebuilds the context builder.
 func (a *Agent) ReloadWorkspaceFiles() {
@@ -895,8 +923,14 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	} else {
 		a.memory = NewMemory(a.homePath)
 	}
-	// Rebuild skills summary
+	// Rebuild skills summary. When a workspace store is configured,
+	// LoadSkills first hydrates global + per-agent skill dirs from object
+	// storage so skills uploaded on another replica (or post-boot on this
+	// one) become visible.
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg)
+	if a.workspaceStore != nil {
+		loader.WithObjectStore(a.workspaceStore, a.agentID)
+	}
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
 	a.ctxBuilder = NewContextBuilder(a.homePath, a.memory, skillsSummary)
