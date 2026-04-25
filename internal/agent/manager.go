@@ -42,6 +42,7 @@ type managerOpts struct {
 	sessionStore   session.SessionStore
 	memoryStore    MemoryStore
 	workspaceStore workspace.Store
+	userID         string
 }
 
 func WithSessionStore(st session.SessionStore) ManagerOption {
@@ -50,6 +51,13 @@ func WithSessionStore(st session.SessionStore) ManagerOption {
 
 func WithMemoryStore(st MemoryStore) ManagerOption {
 	return func(o *managerOpts) { o.memoryStore = st }
+}
+
+// WithUserID tags every agent the Manager loads with the owning user, so
+// store-backed Memory + Session calls scope rows by user_id. UserSpace
+// passes the resolved user; local-mode gateway uses config.DefaultUserID.
+func WithUserID(userID string) ManagerOption {
+	return func(o *managerOpts) { o.userID = userID }
 }
 
 // WithWorkspaceStore installs a durable blob store on every agent's tool
@@ -80,16 +88,22 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 		return nil, err
 	}
 
+	uid := mopt.userID
+	if uid == "" {
+		uid = config.DefaultUserID
+	}
 	for _, rc := range resolved {
 		ag := NewAgent(rc, providerForAgent(rc, prov), mb, homeDir)
+		ag.SetOwnerUserID(uid)
 		// Inject store-backed session manager if available
 		if mopt.sessionStore != nil {
-			ag.sessions = session.NewManagerWithStore(rc.Home+"/sessions", mopt.sessionStore, rc.ID)
+			ag.sessions = session.NewManagerWithStoreForUser(rc.Home+"/sessions", mopt.sessionStore, uid, rc.ID)
 		}
 		if mopt.memoryStore != nil {
-			ag.memory = NewMemoryWithStore(rc.Home, mopt.memoryStore, rc.ID)
+			ag.memory = NewMemoryWithStoreForUser(rc.Home, mopt.memoryStore, uid, rc.ID)
 			ag.ctxBuilder.store = mopt.memoryStore
 			ag.ctxBuilder.agentID = rc.ID
+			ag.ctxBuilder.userID = uid
 			ag.memoryStore = mopt.memoryStore
 			// Identity files (SOUL/IDENTITY/USER/...) share the same DB
 			// store as memory so write_file from the agent ends up in

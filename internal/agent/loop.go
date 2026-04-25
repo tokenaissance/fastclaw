@@ -939,7 +939,7 @@ func (a *Agent) refreshSkillsFromStore() {
 // and rebuilds the context builder.
 func (a *Agent) ReloadWorkspaceFiles() {
 	if a.memoryStore != nil {
-		a.memory = NewMemoryWithStore(a.homePath, a.memoryStore, a.name)
+		a.memory = NewMemoryWithStoreForUser(a.homePath, a.memoryStore, a.ownerUserID, a.name)
 	} else {
 		a.memory = NewMemory(a.homePath)
 	}

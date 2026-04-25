@@ -8,12 +8,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 	_ "github.com/lib/pq"          // PostgreSQL driver
 	_ "modernc.org/sqlite"         // SQLite driver (pure Go, no CGO)
 )
 
 // DBStore implements Store using a SQL database (PostgreSQL or SQLite).
-// The user_id column is kept in SQL for backwards compatibility but always set to ''.
+//
+// Row scoping by `user_id` matches the resolved user ID on the request
+// context (config.WithUserID — set by HTTP / API / channel middleware).
+// Tables that hold per-(user, agent) state (sessions, workspace_files —
+// MEMORY.md / USER.md / IDENTITY.md / SOUL.md all live here) are scoped
+// per request. Tables that hold platform-shared state (configs,
+// agents, cron_jobs) keep user_id = '' for now; that distinction will go
+// away when agent records become user-scoped too.
 type DBStore struct {
 	db      *sql.DB
 	dialect string // "postgres" or "sqlite"
@@ -69,6 +77,18 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate: add sessions.title: %w", err)
 	}
 	_ = altered
+	// One-time backfill: per-(user, agent) tables previously stored every
+	// row under user_id='' (single-user assumption). Now that queries scope
+	// by the resolved user_id (default "local"), legacy rows would become
+	// invisible. Stamp them as the local user so existing installations
+	// keep loading. Idempotent — re-runs find nothing to update.
+	for _, table := range []string{"sessions", "workspace_files"} {
+		if _, err := d.db.ExecContext(ctx,
+			fmt.Sprintf("UPDATE %s SET user_id = %s WHERE user_id = %s", table, d.ph(1), d.ph(2)),
+			config.DefaultUserID, ""); err != nil {
+			return fmt.Errorf("migrate: backfill %s.user_id: %w", table, err)
+		}
+	}
 	return nil
 }
 
@@ -266,11 +286,19 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 	}
 	defer tx.Rollback()
 
+	uid := userIDFromCtx(ctx)
+	// agents table is still platform-scoped (user_id=''); workspace_files
+	// and sessions hold per-user state and are scoped by the resolved user.
+	tableUserID := map[string]string{
+		"workspace_files": uid,
+		"sessions":        uid,
+		"agents":          "",
+	}
 	for _, table := range []string{"workspace_files", "sessions", "agents"} {
 		if d.dialect == "postgres" {
-			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE user_id = $1 AND agent_id = $2", table), "", agentID)
+			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE user_id = $1 AND agent_id = $2", table), tableUserID[table], agentID)
 		} else {
-			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE user_id = ? AND agent_id = ?", table), "", agentID)
+			tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE user_id = ? AND agent_id = ?", table), tableUserID[table], agentID)
 		}
 	}
 
@@ -282,7 +310,7 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 func (d *DBStore) GetSession(ctx context.Context, agentID, sessionKey string) (*SessionRecord, error) {
 	row := d.db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT messages, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s", d.ph(1), d.ph(2), d.ph(3)),
-		"", agentID, sessionKey)
+		userIDFromCtx(ctx), agentID, sessionKey)
 
 	var msgsStr string
 	var rec SessionRecord
@@ -297,13 +325,14 @@ func (d *DBStore) SaveSession(ctx context.Context, agentID, sessionKey string, s
 	msgsData, _ := json.Marshal(session.Messages)
 	now := time.Now()
 	count := len(session.Messages)
+	uid := userIDFromCtx(ctx)
 
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
 			`INSERT INTO sessions (user_id, agent_id, session_key, messages, message_count, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, $6)
 			 ON CONFLICT (user_id, agent_id, session_key) DO UPDATE SET messages=$4, message_count=$5, updated_at=$6`,
-			"", agentID, sessionKey, string(msgsData), count, now)
+			uid, agentID, sessionKey, string(msgsData), count, now)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
@@ -311,14 +340,14 @@ func (d *DBStore) SaveSession(ctx context.Context, agentID, sessionKey string, s
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (user_id, agent_id, session_key) DO UPDATE SET
 		   messages=excluded.messages, message_count=excluded.message_count, updated_at=excluded.updated_at`,
-		"", agentID, sessionKey, string(msgsData), count, now)
+		uid, agentID, sessionKey, string(msgsData), count, now)
 	return err
 }
 
 func (d *DBStore) ListSessions(ctx context.Context, agentID string) ([]SessionMeta, error) {
 	rows, err := d.db.QueryContext(ctx,
 		fmt.Sprintf("SELECT session_key, title, message_count, updated_at FROM sessions WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC", d.ph(1), d.ph(2)),
-		"", agentID)
+		userIDFromCtx(ctx), agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +365,7 @@ func (d *DBStore) ListSessions(ctx context.Context, agentID string) ([]SessionMe
 func (d *DBStore) DeleteSession(ctx context.Context, agentID, sessionKey string) error {
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s", d.ph(1), d.ph(2), d.ph(3)),
-		"", agentID, sessionKey)
+		userIDFromCtx(ctx), agentID, sessionKey)
 	return err
 }
 
@@ -344,7 +373,7 @@ func (d *DBStore) RenameSession(ctx context.Context, agentID, sessionKey, title 
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf("UPDATE sessions SET title = %s WHERE user_id = %s AND agent_id = %s AND session_key = %s",
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
-		title, "", agentID, sessionKey)
+		title, userIDFromCtx(ctx), agentID, sessionKey)
 	return err
 }
 
@@ -367,7 +396,7 @@ func (d *DBStore) SaveMemory(ctx context.Context, agentID, content string) error
 func (d *DBStore) GetWorkspaceFile(ctx context.Context, agentID, filename string) ([]byte, error) {
 	row := d.db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT content FROM workspace_files WHERE user_id = %s AND agent_id = %s AND filename = %s", d.ph(1), d.ph(2), d.ph(3)),
-		"", agentID, filename)
+		userIDFromCtx(ctx), agentID, filename)
 
 	var content string
 	if err := row.Scan(&content); err != nil {
@@ -378,26 +407,27 @@ func (d *DBStore) GetWorkspaceFile(ctx context.Context, agentID, filename string
 
 func (d *DBStore) SaveWorkspaceFile(ctx context.Context, agentID, filename string, data []byte) error {
 	now := time.Now()
+	uid := userIDFromCtx(ctx)
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
 			`INSERT INTO workspace_files (user_id, agent_id, filename, content, updated_at)
 			 VALUES ($1, $2, $3, $4, $5)
 			 ON CONFLICT (user_id, agent_id, filename) DO UPDATE SET content=$4, updated_at=$5`,
-			"", agentID, filename, string(data), now)
+			uid, agentID, filename, string(data), now)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
 		`INSERT INTO workspace_files (user_id, agent_id, filename, content, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (user_id, agent_id, filename) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at`,
-		"", agentID, filename, string(data), now)
+		uid, agentID, filename, string(data), now)
 	return err
 }
 
 func (d *DBStore) ListWorkspaceFiles(ctx context.Context, agentID string) ([]string, error) {
 	rows, err := d.db.QueryContext(ctx,
 		fmt.Sprintf("SELECT filename FROM workspace_files WHERE user_id = %s AND agent_id = %s ORDER BY filename", d.ph(1), d.ph(2)),
-		"", agentID)
+		userIDFromCtx(ctx), agentID)
 	if err != nil {
 		return nil, err
 	}

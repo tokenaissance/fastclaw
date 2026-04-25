@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
@@ -22,8 +23,19 @@ type Session struct {
 	filePath          string
 	snapshot          []provider.Message // undo snapshot
 	store             SessionStore
+	userID            string
 	agentID           string
 	sessionKey        string
+}
+
+// ctx returns a context tagged with this Session's user so the store layer
+// can scope SQL by user_id. Falls back to context.Background() when no
+// user is set; the store will then default to config.DefaultUserID.
+func (s *Session) ctx() context.Context {
+	if s.userID == "" {
+		return context.Background()
+	}
+	return config.WithUserID(context.Background(), s.userID)
 }
 
 // Manager manages sessions, keyed by "channel_chat_id".
@@ -41,6 +53,7 @@ type Manager struct {
 	sessions map[string]*Session
 	dataDir  string
 	store    SessionStore
+	userID   string
 	agentID  string
 }
 
@@ -52,12 +65,32 @@ func NewManager(dataDir string) *Manager {
 }
 
 func NewManagerWithStore(dataDir string, st SessionStore, agentID string) *Manager {
+	return NewManagerWithStoreForUser(dataDir, st, config.DefaultUserID, agentID)
+}
+
+// NewManagerWithStoreForUser is the user-scoped constructor: store reads
+// and writes carry user_id so per-(user, agent) sessions don't collide
+// when multiple users hit the same agentID. CLI / heartbeat callers that
+// don't have a user can use NewManagerWithStore which defaults to local.
+func NewManagerWithStoreForUser(dataDir string, st SessionStore, userID, agentID string) *Manager {
+	if userID == "" {
+		userID = config.DefaultUserID
+	}
 	return &Manager{
 		sessions: make(map[string]*Session),
 		dataDir:  dataDir,
 		store:    st,
+		userID:   userID,
 		agentID:  agentID,
 	}
+}
+
+// ctx returns a context tagged with this Manager's user for store calls.
+func (m *Manager) ctx() context.Context {
+	if m.userID == "" {
+		return context.Background()
+	}
+	return config.WithUserID(context.Background(), m.userID)
 }
 
 // sessionKey returns the canonical, storage-agnostic key for a session.
@@ -89,7 +122,7 @@ func (m *Manager) Get(channel, chatID string) *Session {
 
 	if s, ok := m.sessions[key]; ok {
 		if m.store != nil {
-			if msgs, err := m.store.GetSession(context.Background(), m.agentID, key); err == nil {
+			if msgs, err := m.store.GetSession(m.ctx(), m.agentID, key); err == nil {
 				s.mu.Lock()
 				s.Messages = msgs
 				s.mu.Unlock()
@@ -103,13 +136,14 @@ func (m *Manager) Get(channel, chatID string) *Session {
 	s := &Session{
 		filePath:   filePath,
 		store:      m.store,
+		userID:     m.userID,
 		agentID:    m.agentID,
 		sessionKey: key,
 	}
 
 	// Load from store (DB) if available, otherwise from file
 	if m.store != nil {
-		msgs, err := m.store.GetSession(context.Background(), m.agentID, key)
+		msgs, err := m.store.GetSession(m.ctx(), m.agentID, key)
 		if err == nil && len(msgs) > 0 {
 			s.Messages = msgs
 		}
@@ -134,7 +168,7 @@ func (s *Session) Append(msg provider.Message) {
 	s.Messages = append(s.Messages, msg)
 
 	if s.store != nil {
-		s.store.SaveSession(context.Background(), s.agentID, s.sessionKey, s.Messages)
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.Messages)
 	} else {
 		s.appendToFile(msg)
 	}
@@ -175,7 +209,7 @@ func (s *Session) ReplaceMessages(msgs []provider.Message) {
 	s.LastConsolidated = 0
 
 	if s.store != nil {
-		s.store.SaveSession(context.Background(), s.agentID, s.sessionKey, s.Messages)
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.Messages)
 	} else {
 		s.rewriteFile()
 	}
@@ -188,7 +222,7 @@ func (s *Session) Clear() {
 	s.Messages = nil
 	s.LastConsolidated = 0
 	if s.store != nil {
-		s.store.DeleteSession(context.Background(), s.agentID, s.sessionKey)
+		s.store.DeleteSession(s.ctx(), s.agentID, s.sessionKey)
 	} else {
 		os.Remove(s.filePath)
 	}
@@ -265,7 +299,7 @@ type WebSession struct {
 // a list with id, title, preview, and timestamps.
 func (m *Manager) ListWebSessions() []WebSession {
 	if m.store != nil {
-		sessions, err := m.store.ListWebSessions(context.Background(), m.agentID)
+		sessions, err := m.store.ListWebSessions(m.ctx(), m.agentID)
 		if err == nil {
 			return sessions
 		}
@@ -355,7 +389,7 @@ func (m *Manager) DeleteWebSession(sessionId string) error {
 	m.mu.Unlock()
 
 	if m.store != nil {
-		return m.store.DeleteSession(context.Background(), m.agentID, key)
+		return m.store.DeleteSession(m.ctx(), m.agentID, key)
 	}
 
 	safeId := strings.ReplaceAll(sessionId, "/", "_")
@@ -369,7 +403,7 @@ func (m *Manager) DeleteWebSession(sessionId string) error {
 // RenameWebSession sets a custom title for a web chat session.
 func (m *Manager) RenameWebSession(sessionId, title string) error {
 	if m.store != nil {
-		return m.store.RenameSession(context.Background(), m.agentID, sessionKey("web", sessionId), title)
+		return m.store.RenameSession(m.ctx(), m.agentID, sessionKey("web", sessionId), title)
 	}
 
 	safeId := strings.ReplaceAll(sessionId, "/", "_")

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/privacy"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
@@ -25,6 +26,7 @@ type MemoryStore interface {
 type Memory struct {
 	workspace string
 	store     MemoryStore
+	userID    string
 	agentID   string
 }
 
@@ -33,7 +35,30 @@ func NewMemory(workspace string) *Memory {
 }
 
 func NewMemoryWithStore(workspace string, st MemoryStore, agentID string) *Memory {
-	return &Memory{workspace: workspace, store: st, agentID: agentID}
+	return NewMemoryWithStoreForUser(workspace, st, config.DefaultUserID, agentID)
+}
+
+// NewMemoryWithStoreForUser is the user-scoped constructor: store reads /
+// writes carry user_id so 10 users hitting the same agentID each get their
+// own MEMORY.md / USER.md without colliding. Callers that don't yet know
+// the user (CLI, heartbeat) should use NewMemoryWithStore which defaults
+// to config.DefaultUserID.
+func NewMemoryWithStoreForUser(workspace string, st MemoryStore, userID, agentID string) *Memory {
+	if userID == "" {
+		userID = config.DefaultUserID
+	}
+	return &Memory{workspace: workspace, store: st, userID: userID, agentID: agentID}
+}
+
+// ctx returns a context tagged with this Memory's user so SQL queries in
+// the store layer scope correctly. The store falls back to DefaultUserID
+// when no user is on the context, but going through here is explicit and
+// keeps callers from accidentally writing under "".
+func (m *Memory) ctx() context.Context {
+	if m.userID == "" {
+		return context.Background()
+	}
+	return config.WithUserID(context.Background(), m.userID)
 }
 
 // memoryPath returns the path to MEMORY.md.
@@ -49,7 +74,7 @@ func (m *Memory) historyPath() string {
 // LoadMemory reads the long-term memory.
 func (m *Memory) LoadMemory() string {
 	if m.store != nil {
-		content, err := m.store.GetMemory(context.Background(), m.agentID)
+		content, err := m.store.GetMemory(m.ctx(), m.agentID)
 		if err == nil {
 			return content
 		}
@@ -64,7 +89,7 @@ func (m *Memory) LoadMemory() string {
 // SaveMemory overwrites the long-term memory.
 func (m *Memory) SaveMemory(content string) error {
 	if m.store != nil {
-		return m.store.SaveMemory(context.Background(), m.agentID, content)
+		return m.store.SaveMemory(m.ctx(), m.agentID, content)
 	}
 	os.MkdirAll(m.workspace, 0o755)
 	return os.WriteFile(m.memoryPath(), []byte(content), 0o644)
@@ -191,7 +216,7 @@ func (m *Memory) SaveUserFile(content string) error {
 		}
 	}
 	if m.store != nil {
-		return m.store.SaveWorkspaceFile(context.Background(), m.agentID, "USER.md", []byte(content))
+		return m.store.SaveWorkspaceFile(m.ctx(), m.agentID, "USER.md", []byte(content))
 	}
 	os.MkdirAll(m.workspace, 0o755)
 	return os.WriteFile(filepath.Join(m.workspace, "USER.md"), []byte(content), 0o644)
@@ -200,7 +225,7 @@ func (m *Memory) SaveUserFile(content string) error {
 // LoadUserFile reads the USER.md file.
 func (m *Memory) LoadUserFile() string {
 	if m.store != nil {
-		data, err := m.store.GetWorkspaceFile(context.Background(), m.agentID, "USER.md")
+		data, err := m.store.GetWorkspaceFile(m.ctx(), m.agentID, "USER.md")
 		if err == nil {
 			return string(data)
 		}

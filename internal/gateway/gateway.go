@@ -281,7 +281,7 @@ func New(cfg *config.Config) (*Gateway, error) {
 		}
 	}
 	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgentIDs)
-	var managerOpts []agent.ManagerOption
+	managerOpts := []agent.ManagerOption{agent.WithUserID(config.DefaultUserID)}
 	if st != nil {
 		managerOpts = append(managerOpts,
 			agent.WithSessionStore(session.NewStoreAdapter(st)),
@@ -294,11 +294,6 @@ func New(cfg *config.Config) (*Gateway, error) {
 	agentMgr, err := agent.NewManager(resolved, llm, mb, managerOpts...)
 	if err != nil {
 		return nil, err
-	}
-
-	// Tag local agents with owner user ID for hook namespacing.
-	for _, ag := range agentMgr.All() {
-		ag.SetOwnerUserID(config.DefaultUserID)
 	}
 
 	// Attach sandbox (E2B / Docker) to every local-user agent so exec +

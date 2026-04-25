@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
 // bootstrapFiles are loaded in order to build the system prompt.
@@ -38,7 +40,18 @@ type ContextBuilder struct {
 	sandboxEnabled bool
 	sandboxBackend string
 	store          MemoryStore
+	userID         string
 	agentID        string
+}
+
+// ctx returns a context tagged with this builder's user, used when reading
+// identity files (SOUL/IDENTITY/USER/...) from a store-backed setup so the
+// SQL row scope matches per-(user, agent).
+func (cb *ContextBuilder) ctx() context.Context {
+	if cb.userID == "" {
+		return context.Background()
+	}
+	return config.WithUserID(context.Background(), cb.userID)
 }
 
 // NewContextBuilder creates a new context builder.
@@ -250,7 +263,7 @@ Structure your reasoning before acting. Think before you respond.`, depth)
 func (cb *ContextBuilder) loadFile(name string) string {
 	// Try store first (DB), fall back to file
 	if cb.store != nil {
-		data, err := cb.store.GetWorkspaceFile(context.Background(), cb.agentID, name)
+		data, err := cb.store.GetWorkspaceFile(cb.ctx(), cb.agentID, name)
 		if err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}

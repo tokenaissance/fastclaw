@@ -188,7 +188,7 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 			}
 		}
 	}
-	var managerOpts []agent.ManagerOption
+	managerOpts := []agent.ManagerOption{agent.WithUserID(userID)}
 	if st != nil {
 		managerOpts = append(managerOpts,
 			agent.WithSessionStore(session.NewStoreAdapter(st)),
@@ -203,12 +203,10 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 		return nil, fmt.Errorf("create agent manager for user %q: %w", userID, err)
 	}
 
-	// Tag each agent with the owning user ID so hooks (e.g. mem0) can
-	// namespace per-user data, and register provider-backed tools based on
-	// this user's toolProviders + tools config.
-	for _, ag := range agentMgr.All() {
-		ag.SetOwnerUserID(userID)
-	}
+	// SetOwnerUserID is now performed inside agent.NewManager via
+	// WithUserID; the loop here was the only previous wiring point and
+	// would double-tag if we kept it.
+	_ = userID
 	registerAgentToolChains(cfg, agentMgr.All())
 
 	var pool sandbox.ExecutorPool
