@@ -23,6 +23,28 @@ var bootstrapFiles = []string{
 	"IDENTITY.md",
 }
 
+// PlatformAgentID is the reserved agent_id under which platform-shared
+// identity files live. When a per-(user, function) agent's own copy of an
+// inheritable file is empty, ContextBuilder falls back to the platform
+// row at (user_id=DefaultUserID, agent_id=PlatformAgentID). This is what
+// lets ThinkAny / Manus / ChatGPT-style products keep one editable
+// baseline SOUL.md instead of duplicating it across every user agent.
+const PlatformAgentID = "__platform__"
+
+// platformInheritable lists identity files where the platform baseline
+// is meaningful. SOUL/IDENTITY define agent persona; AGENTS/BOOTSTRAP/
+// HEARTBEAT/TOOLS describe shared behavior. USER/MEMORY/HISTORY are
+// strictly per-(user, agent) — they describe the user themselves or the
+// agent's accumulated memory of them — so platform-fallback is wrong.
+var platformInheritable = map[string]bool{
+	"SOUL.md":      true,
+	"IDENTITY.md":  true,
+	"AGENTS.md":    true,
+	"BOOTSTRAP.md": true,
+	"HEARTBEAT.md": true,
+	"TOOLS.md":     true,
+}
+
 // GroupContext holds information about the group chat environment for system prompt injection.
 type GroupContext struct {
 	BotUsername string   // this agent's bot username
@@ -261,17 +283,26 @@ Structure your reasoning before acting. Think before you respond.`, depth)
 }
 
 func (cb *ContextBuilder) loadFile(name string) string {
-	// Try store first (DB), fall back to file
+	// Try per-agent store row first (DB), fall back to file.
 	if cb.store != nil {
 		data, err := cb.store.GetWorkspaceFile(cb.ctx(), cb.agentID, name)
 		if err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}
 	}
-	path := filepath.Join(cb.home, name)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
+	if path := filepath.Join(cb.home, name); cb.home != "" {
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			return strings.TrimSpace(string(data))
+		}
 	}
-	return strings.TrimSpace(string(data))
+	// Per-agent file is missing or empty. For inheritable identity files,
+	// fall back to the platform baseline so products with one shared
+	// SOUL/IDENTITY don't have to copy it into every per-user agent.
+	if platformInheritable[name] && cb.store != nil {
+		platformCtx := config.WithUserID(context.Background(), config.DefaultUserID)
+		if data, err := cb.store.GetWorkspaceFile(platformCtx, PlatformAgentID, name); err == nil && len(data) > 0 {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return ""
 }

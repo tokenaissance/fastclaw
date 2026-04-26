@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
@@ -118,6 +119,13 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if !agentNameRE.MatchString(req.ID) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent name must be 3–32 chars, lowercase letters, digits or hyphens, and cannot start with a hyphen"})
+		return
+	}
+	if req.ID == agent.PlatformAgentID {
+		// Reserved for the platform-shared identity layer. Per-user agents
+		// inheriting from it must not be able to overwrite it via the
+		// public agent-create endpoint.
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent id is reserved"})
 		return
 	}
 
