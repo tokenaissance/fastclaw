@@ -223,17 +223,24 @@ func New(cfg *config.Config) (*Gateway, error) {
 		}
 	}
 
-	// Cloud pods boot with an empty fastclaw.json (env bootstrap). Hydrate
-	// product fields (providers, agents.defaults, channels, bindings, …)
-	// from the shared dataStore so any replica serves the same config that
-	// the setup wizard persisted. Infra fields stay on the pod-local/env
-	// side — we only pull product knobs out of the DB.
-	if cfg.Gateway.Mode == "cloud" && st != nil {
+	// Hydrate product fields (providers, agents.defaults, channels, …)
+	// from the DB on EVERY mode, not just cloud — local mode benefits too
+	// after #4 made the store the source of truth. Infra fields (storage,
+	// objectStore, sandbox) still come from env/Secret because they're
+	// deployment-time concerns; we only adopt Gateway.Auth.Token from
+	// the store as a last-resort fallback so a UI-completed onboarding
+	// flow's freshly-generated token survives a process restart without
+	// the operator having to copy-paste it into FASTCLAW_AUTH_TOKEN.
+	if st != nil {
 		if gc, err := st.GetConfig(context.Background()); err == nil && gc != nil && len(gc.Data) > 0 {
 			if blob, err := json.Marshal(gc.Data); err == nil {
 				var stored config.Config
 				if err := json.Unmarshal(blob, &stored); err == nil {
 					mergeCloudConfig(cfg, &stored)
+					if cfg.Gateway.Auth.Token == "" && stored.Gateway.Auth.Token != "" {
+						cfg.Gateway.Auth.Token = stored.Gateway.Auth.Token
+						slog.Info("adopted gateway token from store")
+					}
 				} else {
 					slog.Warn("decode stored config", "error", err)
 				}
