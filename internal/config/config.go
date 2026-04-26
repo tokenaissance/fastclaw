@@ -530,10 +530,15 @@ type TeamConfig struct {
 	Routing map[string]string `json:"routing"`
 }
 
-// HomeDir returns the FastClaw global root directory (~/.fastclaw).
-// This directory holds host-wide resources that are not scoped per-user:
-// HomeDir returns ~/.fastclaw — the root for all FastClaw data.
+// HomeDir returns the FastClaw root directory — `$FASTCLAW_HOME` if set,
+// otherwise `~/.fastclaw`. The env override exists so multiple FastClaw
+// instances can run side-by-side (one per agent product) without
+// fighting over the same ~/.fastclaw — useful during local debugging
+// of imgany / copyweb / podlm in parallel without Docker.
 func HomeDir() (string, error) {
+	if h := os.Getenv("FASTCLAW_HOME"); h != "" {
+		return h, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
