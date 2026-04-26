@@ -249,6 +249,13 @@ func New(cfg *config.Config) (*Gateway, error) {
 			slog.Warn("store GetConfig failed", "error", err)
 		}
 	}
+	// Re-apply defaults after every overlay (env, fastclaw.json, store)
+	// so a stored cfg that left MaxTokens / Temperature /
+	// MaxToolIterations at 0 doesn't propagate the zeros into the
+	// resolved agent — Otherwise the agent loop hits its iteration cap
+	// on iteration 0 and the very first chat turn errors out with
+	// "max tool iterations reached max=0".
+	config.ApplyDefaults(cfg)
 
 	// Workspace blob store (local FS or S3). Distinct from the Store above:
 	// that one holds small structured state (sessions, identity md files);

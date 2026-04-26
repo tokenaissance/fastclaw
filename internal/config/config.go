@@ -688,7 +688,12 @@ func LoadForUser(userID string) (*Config, error) {
 	return loadConfigFile(configPath)
 }
 
-func applyDefaults(cfg *Config) {
+// ApplyDefaults fills in zero-valued knobs on Agents.Defaults. Idempotent
+// — safe to call after every cfg mutation (loadConfigFile already does;
+// gateway.New repeats it after the store overlay so a stored config that
+// omits MaxToolIterations doesn't end up at 0 and immediately trip the
+// "max tool iterations reached" guard on the very first turn).
+func ApplyDefaults(cfg *Config) {
 	if cfg.Agents.Defaults.MaxTokens == 0 {
 		cfg.Agents.Defaults.MaxTokens = 8192
 	}
@@ -699,6 +704,10 @@ func applyDefaults(cfg *Config) {
 		cfg.Agents.Defaults.MaxToolIterations = 20
 	}
 }
+
+// applyDefaults is the unexported alias kept for the existing in-package
+// callers; same logic, same guarantees.
+func applyDefaults(cfg *Config) { ApplyDefaults(cfg) }
 
 // MergedAgentConfig merges defaults with an agent entry and its workspace agent.json
 // to produce a fully resolved agent config. Priority: agent.json > entry > defaults.
