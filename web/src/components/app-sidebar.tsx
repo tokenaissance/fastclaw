@@ -16,9 +16,11 @@ import { NavUser } from "@/components/nav-user";
 import {
   BotIcon,
   BrainIcon,
+  GlobeIcon,
   LayoutDashboardIcon,
   PlusIcon,
   SparklesIcon,
+  UsersIcon,
   Wand2Icon,
 } from "lucide-react";
 import {
@@ -41,8 +43,17 @@ function extractAgentId(pathname: string): string | null {
 const PLATFORM_NAV: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
+  // Platform layer: shared SOUL/IDENTITY/TOOLS that every per-user agent
+  // inherits when its own row is empty (#3). The link reuses the standard
+  // agent customize page since the system-files API accepts any agent_id;
+  // admin always has access via canAccessAgent.
+  { title: "Platform", url: "/agents/__platform__/customize/", icon: GlobeIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
+  // Cloud-mode user registry. Hidden in 4812569 to declutter local-only
+  // installs; restoring now that #12 makes it the canonical way to mint
+  // per-user tokens (instead of hand-editing users.json).
+  { title: "Users", url: "/users/", icon: UsersIcon },
 ];
 
 const AGENT_NAV = (agentId: string): NavItem[] => [
