@@ -30,12 +30,20 @@ type DockerSandbox struct {
 }
 
 // NewDockerSandbox creates a new sandbox configuration (container is created lazily).
+//
+// Default policy leaves NetMode unset, which means Docker uses the
+// default bridge network (= internet access). Most product agents
+// need outbound HTTP for LLM provider calls / image APIs / pip
+// installs; locking the sandbox down with NetMode="none" used to be
+// the default and silently broke generate-image-style skills with
+// DNS resolution errors. Operators that want hard isolation pass an
+// explicit policy with NetMode: "none".
 func NewDockerSandbox(image, workspace string, policy *Policy) *DockerSandbox {
 	if image == "" {
 		image = "fastclaw/sandbox:latest"
 	}
 	if policy == nil {
-		policy = &Policy{NetMode: "none"}
+		policy = &Policy{}
 	}
 	return &DockerSandbox{
 		image:     image,

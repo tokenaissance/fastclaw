@@ -203,11 +203,17 @@ type TaskQueueCfg struct {
 
 // SandboxCfg holds sandbox configuration for an agent.
 type SandboxCfg struct {
-	Enabled  bool   `json:"enabled"`
-	Image    string `json:"image,omitempty"`
-	Policy   string `json:"policy,omitempty"`  // policy preset name
-	Backend  string `json:"backend,omitempty"` // "docker" (default), "e2b"
-	E2BKey   string `json:"e2bKey,omitempty"`  // E2B API key (fallback to E2B_API_KEY env)
+	Enabled bool   `json:"enabled"`
+	Image   string `json:"image,omitempty"`
+	Policy  string `json:"policy,omitempty"`  // policy preset name
+	Backend string `json:"backend,omitempty"` // "docker" (default), "e2b"
+	E2BKey  string `json:"e2bKey,omitempty"`  // E2B API key (fallback to E2B_API_KEY env)
+	// Network is the Docker --network mode for the sandbox container.
+	// Default "" maps to Docker's default bridge (= internet access)
+	// because product agents commonly need to call out (image APIs,
+	// upstream LLMs, package installs). Set to "none" for hard
+	// isolation when you trust nothing the agent runs.
+	Network string `json:"network,omitempty"`
 	// IdleTTLSec is how long a sandbox may sit unused before the lifecycle
 	// pool destroys it. The next tool call lazily recreates. Set to 0 to
 	// disable eviction (old behavior: sandboxes live until pod shutdown).

@@ -67,9 +67,10 @@ func attachSandboxToAgents(
 					"user", userID, "backend", "e2b", "template", template)
 			default: // "docker" or empty
 				userDir, _ := config.UserDir(userID)
-				pool = sandbox.NewDockerExecutorPool(rc.Sandbox.Image, userDir, nil)
+				policy := &sandbox.Policy{NetMode: rc.Sandbox.Network}
+				pool = sandbox.NewDockerExecutorPool(rc.Sandbox.Image, userDir, policy)
 				slog.Info("sandbox executor pool created",
-					"user", userID, "backend", "docker")
+					"user", userID, "backend", "docker", "network", rc.Sandbox.Network)
 			}
 			break
 		}
