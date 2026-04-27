@@ -30,16 +30,15 @@ func BundledSkillNames() []string {
 	return names
 }
 
-// InstallBundledSkills copies bundled skills to the managed skills directory
-// (~/.fastclaw/skills/) if they don't already exist. Subdirectories (scripts,
-// references, assets, ...) are copied recursively so skills with supporting
-// files work out of the box.
+// InstallBundledSkills copies any bundled skills (currently none — see
+// bundled_skills/README.md) to the managed skills directory if they
+// don't already exist. Honors FASTCLAW_HOME so per-product instances
+// each get their own copy.
 func InstallBundledSkills() {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	targetDir := managedSkillsDir()
+	if targetDir == "" {
 		return
 	}
-	targetDir := filepath.Join(home, ".fastclaw", "skills")
 	os.MkdirAll(targetDir, 0o755)
 
 	entries, err := fs.ReadDir(bundledSkillsFS, "bundled_skills")
@@ -66,6 +65,20 @@ func InstallBundledSkills() {
 		}
 		slog.Info("installed bundled skill", "name", skillName, "path", skillTarget)
 	}
+}
+
+// managedSkillsDir is the per-FastClaw-instance global skills location.
+// Mirrors fastclawManagedDir in internal/agent/skills.go but kept local
+// here so this file's only dependency is os/filepath.
+func managedSkillsDir() string {
+	if h := os.Getenv("FASTCLAW_HOME"); h != "" {
+		return filepath.Join(h, "skills")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".fastclaw", "skills")
 }
 
 // copyEmbedTree walks src in the embed.FS and writes every regular file under

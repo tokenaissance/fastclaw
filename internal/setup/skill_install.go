@@ -127,11 +127,11 @@ func resolveInstallTarget(r *http.Request, agentID string) (string, error) {
 	if config.UserIDFromContext(r.Context()) != config.DefaultUserID {
 		return "", fmt.Errorf("global skills are admin-managed; pass an 'agent' id to install into one agent only")
 	}
-	home, err := os.UserHomeDir()
+	home, err := config.HomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".fastclaw", "skills")
+	dir := filepath.Join(home, "skills")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
