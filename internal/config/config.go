@@ -890,12 +890,12 @@ func ResolveAgentsWithExtra(cfg *Config, userID string, extra []string) []Resolv
 			seen[id] = true
 		}
 	}
-	if len(entries) == 0 {
-		// Still empty — the very first run on a fresh pod; keep the
-		// historical default so the UI doesn't break before the user has
-		// created anything.
-		entries = []AgentEntry{{ID: "default"}}
-	}
+	// Pre-#5 we injected a placeholder "default" agent here so the sidebar
+	// had something to render before the user onboarded. Now that the
+	// merged-wizard gateway shows /onboard for empty installs and the
+	// agent switcher tolerates an empty list, the placeholder just
+	// leaks an unused workspaces/default/ dir on every fresh install.
+	// Returning an empty list is correct.
 
 	agents := make([]ResolvedAgent, 0, len(entries))
 	for _, entry := range entries {
