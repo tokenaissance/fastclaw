@@ -108,6 +108,7 @@ func (s *DockerSandbox) Create() error {
 			dirs = []string{filepath.Join(home, ".fastclaw", "skills")}
 		}
 	}
+	mounted := make(map[string]bool)
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -117,6 +118,12 @@ func (s *DockerSandbox) Create() error {
 			if !e.IsDir() {
 				continue
 			}
+			// Dedupe by container path. Earlier dirs win (per-agent
+			// before global), matching SkillsLoader's precedence.
+			if mounted[e.Name()] {
+				continue
+			}
+			mounted[e.Name()] = true
 			host := filepath.Join(dir, e.Name())
 			args = append(args, "-v", fmt.Sprintf("%s:/skills/%s:ro", host, e.Name()))
 		}
