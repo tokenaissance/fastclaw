@@ -18,7 +18,6 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
-	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
 // loadUserConfig reads the config for the user identified by the request
@@ -57,32 +56,19 @@ func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 		}, nil
 	}
 
-	// Auto-provision a default agent on first access — but NOT for the
-	// default (local) user, since the missing file there means "setup
-	// wizard hasn't run yet" and writing a stub flips `configured` to true,
-	// sending the UI to the login/overview screen instead of onboarding.
-	// Return an empty config so GET /api/config can still succeed without
-	// side effects.
+	// No config on disk and no store row — return an empty cfg so callers
+	// like /api/config and /api/status can answer truthfully. Pre-#5 we
+	// auto-provisioned a per-user workspace + default agent here, but
+	// that meant any random GET against an unknown user_id silently
+	// minted a new agent (and a workspace dir) — operators saw phantom
+	// agents materialize without any explicit action. Onboarding for
+	// non-default users is now an explicit POST /api/agents call from
+	// the application layer.
 	if os.IsNotExist(unwrapPathError(err)) {
-		if userID == config.DefaultUserID {
-			return &config.Config{
-				Providers: map[string]config.ProviderConfig{},
-				Channels:  map[string]config.ChannelConfig{},
-			}, nil
-		}
-		// Prefer the store-aware path so cloud pods don't write per-user
-		// directories on ephemeral disk. Falls through to the legacy FS
-		// implementation when no store is wired (early bootstrap, tests).
-		if s.dataStore != nil {
-			if provErr := users.ProvisionWorkspaceInStore(r.Context(), s.dataStore, userID); provErr != nil {
-				return nil, fmt.Errorf("auto-provision user %s: %w", userID, provErr)
-			}
-			return s.loadUserConfig(r) // re-enter; agent rows are now visible
-		}
-		if provErr := users.ProvisionWorkspace(userID); provErr != nil {
-			return nil, fmt.Errorf("auto-provision user %s: %w", userID, provErr)
-		}
-		return config.LoadForUser(userID)
+		return &config.Config{
+			Providers: map[string]config.ProviderConfig{},
+			Channels:  map[string]config.ChannelConfig{},
+		}, nil
 	}
 	return nil, err
 }

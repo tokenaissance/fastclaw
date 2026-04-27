@@ -19,11 +19,14 @@ type OpenAIProvider struct {
 	client  *http.Client
 }
 
-// NewOpenAI creates a new OpenAI-compatible provider.
+// NewOpenAI creates a new OpenAI-compatible provider. apiBase is taken
+// verbatim — the operator's configured URL is the only source of truth.
+// We intentionally do NOT default to "https://api.openai.com/v1" when
+// apiBase is empty: that silent default produced "why is it calling
+// OpenAI" mysteries when users had only a deepseek provider configured
+// but the resolution path picked up an empty cfg. An empty apiBase now
+// causes calls to fail loudly, which is what we want.
 func NewOpenAI(apiKey, apiBase string) *OpenAIProvider {
-	if apiBase == "" {
-		apiBase = "https://api.openai.com/v1"
-	}
 	apiBase = strings.TrimRight(apiBase, "/")
 	return &OpenAIProvider{
 		apiKey:  apiKey,

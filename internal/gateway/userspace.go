@@ -225,43 +225,52 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 	}, nil
 }
 
-// newProviderFromConfig picks an LLM provider from a user's config with the
-// same fallback logic Gateway.New used to use inline.
+// newProviderFromConfig picks an LLM provider for the user's default
+// model. Strict resolution — no silent fallbacks:
+//
+//   - Default model must be "<provider-key>/<model-id>".
+//   - cfg.Providers[<provider-key>] must exist and have a non-empty APIKey.
+//
+// If either condition fails, returns nil and logs a clear reason. The
+// agent loop will surface the missing-provider state as an error on the
+// first chat turn instead of silently calling api.openai.com with an
+// empty key.
 func newProviderFromConfig(cfg *config.Config) provider.Provider {
-	var providerCfg config.ProviderConfig
-	var matchedKey string
 	defaultModel := cfg.Agents.Defaults.Model
-	if parts := strings.SplitN(defaultModel, "/", 2); len(parts) == 2 {
-		if p, ok := cfg.Providers[parts[0]]; ok {
-			providerCfg = p
-			matchedKey = parts[0]
-		}
+	parts := strings.SplitN(defaultModel, "/", 2)
+	if len(parts) != 2 {
+		slog.Warn("no provider configured: default model is missing the '<provider>/<model>' prefix",
+			"defaultModel", defaultModel, "providerCount", len(cfg.Providers))
+		return nil
 	}
-	if providerCfg.APIKey == "" {
-		for _, key := range []string{"default", "openai", "openrouter"} {
-			if p, ok := cfg.Providers[key]; ok {
-				providerCfg = p
-				matchedKey = key
-				break
-			}
-		}
+	key := parts[0]
+	p, ok := cfg.Providers[key]
+	if !ok {
+		slog.Warn("no provider configured: default model references a provider key that isn't in cfg.Providers",
+			"key", key, "defaultModel", defaultModel,
+			"availableKeys", providerKeyList(cfg.Providers))
+		return nil
 	}
-	if providerCfg.APIKey == "" {
-		for k, p := range cfg.Providers {
-			providerCfg = p
-			matchedKey = k
-			break
-		}
+	if p.APIKey == "" {
+		slog.Warn("provider matched but its APIKey is empty",
+			"key", key, "apiBase", p.APIBase)
+		return nil
 	}
 	slog.Info("provider selected",
-		"key", matchedKey,
-		"apiBase", providerCfg.APIBase,
-		"apiType", providerCfg.APIType,
-		"hasKey", providerCfg.APIKey != "",
+		"key", key,
+		"apiBase", p.APIBase,
+		"apiType", p.APIType,
 		"defaultModel", defaultModel,
-		"providerCount", len(cfg.Providers),
 	)
-	return provider.NewProvider(providerCfg.APIKey, providerCfg.APIBase, providerCfg.APIType)
+	return provider.NewProvider(p.APIKey, p.APIBase, p.APIType)
+}
+
+func providerKeyList(m map[string]config.ProviderConfig) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // userSpaceRegistry is a thread-safe lazy-loaded map of user spaces owned by

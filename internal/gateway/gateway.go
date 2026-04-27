@@ -202,27 +202,6 @@ func New(cfg *config.Config) (*Gateway, error) {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
-	// One-time legacy import: when the DB has no config row yet but a
-	// fastclaw.json exists on disk (typical pre-#4 install upgrading
-	// in-place), copy product fields into the store so subsequent saves
-	// can be DB-only. Idempotent — once configs has any rows, we skip.
-	if st != nil {
-		if gc, _ := st.GetConfig(context.Background()); gc == nil || len(gc.Data) == 0 {
-			if legacy, err := config.Load(); err == nil && legacy != nil {
-				if blob, err := json.Marshal(legacy); err == nil {
-					var raw map[string]interface{}
-					if err := json.Unmarshal(blob, &raw); err == nil {
-						if err := st.SaveConfig(context.Background(), &store.GlobalConfig{Data: raw}); err == nil {
-							slog.Info("imported legacy fastclaw.json into store")
-						} else {
-							slog.Warn("legacy import: SaveConfig failed", "error", err)
-						}
-					}
-				}
-			}
-		}
-	}
-
 	// Hydrate product fields (providers, agents.defaults, channels, …)
 	// from the DB on EVERY mode, not just cloud — local mode benefits too
 	// after #4 made the store the source of truth. Infra fields (storage,

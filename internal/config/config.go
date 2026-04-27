@@ -872,30 +872,24 @@ func ResolveAgentsForUser(cfg *Config, userID string) []ResolvedAgent {
 	return ResolveAgentsWithExtra(cfg, userID, nil)
 }
 
-// ResolveAgentsWithExtra merges filesystem-discovered agents with an extra
-// list provided by the caller (e.g. agent IDs read from the Store in
-// Postgres-backed deployments). De-duplicates by ID; filesystem entries win
-// on overlap since they carry agent.json overrides. Used by the gateway to
-// build a consistent agent list across pods whether they have a local
-// filesystem copy or not.
+// ResolveAgentsWithExtra builds the agent list from `extra` only. The
+// store is the single source of truth for which agents exist; we no
+// longer scan the filesystem (DiscoverAgents) or synthesize defaults.
+// Earlier behavior — "if there's a directory at agents/foo/agent/, the
+// agent foo exists" — meant orphan FS dirs from old test runs would
+// auto-revive agents that the operator thought were gone, and that
+// arbitrary FS state could shadow what the DB said. Both confused the
+// hell out of operators wondering "why is this agent loading".
 func ResolveAgentsWithExtra(cfg *Config, userID string, extra []string) []ResolvedAgent {
-	entries := DiscoverAgents()
-	seen := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		seen[e.ID] = true
-	}
+	entries := make([]AgentEntry, 0, len(extra))
+	seen := make(map[string]bool, len(extra))
 	for _, id := range extra {
-		if id != "" && !seen[id] {
-			entries = append(entries, AgentEntry{ID: id})
-			seen[id] = true
+		if id == "" || seen[id] {
+			continue
 		}
+		entries = append(entries, AgentEntry{ID: id})
+		seen[id] = true
 	}
-	// Pre-#5 we injected a placeholder "default" agent here so the sidebar
-	// had something to render before the user onboarded. Now that the
-	// merged-wizard gateway shows /onboard for empty installs and the
-	// agent switcher tolerates an empty list, the placeholder just
-	// leaks an unused workspaces/default/ dir on every fresh install.
-	// Returning an empty list is correct.
 
 	agents := make([]ResolvedAgent, 0, len(entries))
 	for _, entry := range entries {
