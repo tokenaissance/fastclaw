@@ -884,6 +884,17 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		s.SetAuth(t, s.userRegistry)
 	}
 
+	// Refresh the running agent manager so the just-created agent is
+	// usable for chat without a process restart. handleCreateAgent does
+	// the same after individual create calls; handleSaveConfig has to
+	// do it too because onboarding goes through here, and pre-#5 the
+	// "wizard exits → gateway boot reads DB" flow used to cover this.
+	if s.agentProvider != nil {
+		if err := s.agentProvider.ReloadAgents(); err != nil {
+			slog.Warn("failed to reload agents after save", "error", err)
+		}
+	}
+
 	slog.Info("config saved", "agent", agentID,
 		"backend", configBackend(s.dataStore),
 		"hasProvider", len(cfg.Providers) > 0,
