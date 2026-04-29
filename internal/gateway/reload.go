@@ -176,21 +176,45 @@ func (g *Gateway) reloadConfig() {
 // reloadSandbox handles sandbox-related changes during hot-reload.
 //
 // Cases:
-//   - Pool exists, new agents were added → enroll new agents into the
-//     existing pool (Get is keyed on agentID, idempotent for existing).
+//   - Pool exists, sandbox config materially changed (image, backend,
+//     network, e2b key, idle TTL, enabled toggle) → tear the pool down
+//     and fall through to the rebuild path. The Settings page exposes
+//     these fields to the user, so edits have to take effect without a
+//     process restart; the pre-existing "rare enough, restart fixes it"
+//     assumption stopped holding once the UI grew Sandbox controls.
+//   - Pool exists, no material change → enroll any newly-added agents
+//     into the existing pool (Get is keyed on agentID, idempotent).
 //   - No pool yet, fresh config wants sandbox → bootstrap via
 //     attachSandboxToAgents (this is the path the onboard wizard hits:
 //     gateway booted with no fastclaw.json, then user enabled sandbox).
 //   - No pool, no sandbox wanted → attachSandboxToAgents falls back to
 //     path-only restriction so newly-added agents still can't escape.
-//
-// Backend / image flips (docker→e2b, image change) are NOT handled here
-// — those need a tear-down + rebuild and are rare enough that "restart
-// the gateway" is fine for now.
 func (g *Gateway) reloadSandbox(newCfg *config.Config) {
 	g.mu.RLock()
 	pool := g.localSpace.SandboxPool
+	var oldSandbox config.SandboxCfg
+	if g.config != nil {
+		oldSandbox = g.config.Sandbox
+	}
 	g.mu.RUnlock()
+
+	if pool != nil && sandboxRebuildNeeded(oldSandbox, newCfg.Sandbox) {
+		slog.Info("sandbox config changed, tearing down pool",
+			"oldBackend", oldSandbox.Backend, "newBackend", newCfg.Sandbox.Backend,
+			"oldImage", oldSandbox.Image, "newImage", newCfg.Sandbox.Image,
+			"oldEnabled", oldSandbox.Enabled, "newEnabled", newCfg.Sandbox.Enabled)
+		pool.CloseAll()
+		// Drop the pool reference from every agent so an in-flight tool
+		// call doesn't keep using a now-torn-down lazyExecutor. The
+		// rebuild path below re-wires either a new pool or nil.
+		for _, ag := range g.agents.All() {
+			ag.SetSandboxPool(nil)
+		}
+		g.mu.Lock()
+		g.localSpace.SandboxPool = nil
+		g.mu.Unlock()
+		pool = nil
+	}
 
 	if pool != nil {
 		// Pool already exists from boot. New agents added via this reload
@@ -202,7 +226,23 @@ func (g *Gateway) reloadSandbox(newCfg *config.Config) {
 		return
 	}
 
-	resolved := config.ResolveAgents(newCfg)
+	// Mirror reloadAgents: agents live in the store, not in newCfg, so a
+	// bare ResolveAgents(newCfg) returns an empty list and
+	// attachSandboxToAgents never sees Sandbox.Enabled — the pool stays
+	// nil and the freshly-onboarded agent gets no executor wired.
+	// Without the store load, the very first chat after onboarding fails
+	// with "sandbox required but no executor available" until the user
+	// restarts the gateway (gateway.New's own attachSandboxToAgents runs
+	// over store-loaded agents and recovers).
+	var storeAgents []config.AgentEntry
+	if g.store != nil {
+		if records, err := g.store.ListAgents(context.Background()); err == nil {
+			for _, ar := range records {
+				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
+			}
+		}
+	}
+	resolved := config.ResolveAgentsWithExtra(newCfg, "", storeAgents)
 	newPool := attachSandboxToAgents(config.DefaultUserID, resolved, g.agents, g.workspace)
 	if newPool != nil {
 		g.mu.Lock()
@@ -210,6 +250,20 @@ func (g *Gateway) reloadSandbox(newCfg *config.Config) {
 		g.mu.Unlock()
 		slog.Info("hot-reload: sandbox pool created")
 	}
+}
+
+// sandboxRebuildNeeded reports whether a sandbox config change is severe
+// enough to require tearing down the live pool. Tracks every field that
+// NewDockerExecutorPool / NewE2BExecutorPool / NewLifecyclePool capture
+// at construction — changes to any of them won't take effect on a
+// running pool, so we have to recreate it.
+func sandboxRebuildNeeded(old, new config.SandboxCfg) bool {
+	return old.Enabled != new.Enabled ||
+		old.Backend != new.Backend ||
+		old.Image != new.Image ||
+		old.Network != new.Network ||
+		old.E2BKey != new.E2BKey ||
+		old.IdleTTLSec != new.IdleTTLSec
 }
 
 // resolveProviderCfg picks the active provider config from a Config.

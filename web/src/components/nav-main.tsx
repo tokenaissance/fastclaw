@@ -16,6 +16,11 @@ export interface NavItem {
   title: string;
   url: string;
   icon: LucideIcon;
+  // active overrides the default pathname-based prefix match. Use this
+  // when two items share the same pathname and only differ in query
+  // (e.g. "New chat" vs an open session under /agents/<id>/chat/, where
+  // the prefix rule would highlight both).
+  active?: boolean;
 }
 
 function isActive(pathname: string, href: string) {
@@ -50,7 +55,7 @@ export function NavMain({
       <SidebarGroupLabel>{label}</SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
-          const active = isActive(pathname, item.url);
+          const active = item.active ?? isActive(pathname, item.url);
           return (
             <SidebarMenuItem key={item.url}>
               <SidebarMenuButton

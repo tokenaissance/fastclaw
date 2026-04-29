@@ -44,6 +44,10 @@ import { deleteChatSession, renameChatSession } from "@/lib/api";
 export interface SessionItem {
   id: string;
   title: string;
+  // Set when the session's first user turn carried an image attachment.
+  // Renders as a small thumbnail before the title so multimodal chats
+  // show "image + text" instead of just the text label.
+  thumbnailUrl?: string;
 }
 
 export function NavSessions({
@@ -181,6 +185,14 @@ function SessionRow({
         tooltip={session.title}
         onClick={onOpen}
       >
+        {session.thumbnailUrl && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={session.thumbnailUrl}
+            alt=""
+            className="h-5 w-5 shrink-0 rounded object-cover"
+          />
+        )}
         <span className="truncate">{session.title || session.id}</span>
       </SidebarMenuButton>
       <DropdownMenu>

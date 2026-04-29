@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import {
   Sidebar,
   SidebarContent,
@@ -49,15 +49,36 @@ const PLATFORM_NAV: NavItem[] = [
   { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 
-const AGENT_NAV = (agentId: string): NavItem[] => [
-  { title: "New chat", url: `/agents/${agentId}/chat/`, icon: PlusIcon },
-  { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
-  { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
-];
+// "New chat" is active iff we're on the chat route AND no session is
+// open. Two corrections vs. the default prefix matching:
+//   1. ?session=… on /chat/ → suppress (otherwise New chat lights up
+//      while a specific session is open).
+//   2. /customize/ and /skills/ → suppress (`!hasSession` alone made
+//      New chat light up on every sibling agent page since pathname
+//      didn't match anyway).
+const AGENT_NAV = (
+  agentId: string,
+  pathname: string,
+  hasSession: boolean,
+): NavItem[] => {
+  const onChatRoute = pathname.startsWith(`/agents/${agentId}/chat`);
+  return [
+    {
+      title: "New chat",
+      url: `/agents/${agentId}/chat/`,
+      icon: PlusIcon,
+      active: onChatRoute && !hasSession,
+    },
+    { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
+    { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
+  ];
+};
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const activeAgentId = extractAgentId(pathname);
+  const hasOpenSession = !!searchParams?.get("session");
 
   const [status, setStatus] = React.useState<StatusResponse | null>(null);
   const [agents, setAgents] = React.useState<AgentSwitcherItem[]>([]);
@@ -97,6 +118,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             list.map((s) => ({
               id: s.id,
               title: s.title || s.preview || s.id,
+              thumbnailUrl: s.thumbnailUrl,
             })),
           ),
         )
@@ -125,7 +147,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         {activeAgentId ? (
-          <NavMain label="Agent" items={AGENT_NAV(activeAgentId)} />
+          <NavMain label="Agent" items={AGENT_NAV(activeAgentId, pathname, hasOpenSession)} />
         ) : (
           <NavMain label="Platform" items={platformItems} />
         )}

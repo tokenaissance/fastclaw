@@ -403,12 +403,28 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	for _, m := range msgs {
 		switch m.Role {
 		case "user":
-			if m.Content != "" {
-				history = append(history, map[string]any{
-					"role":    "user",
-					"content": m.Content,
-				})
+			// Multimodal user turns store text inside ContentParts and
+			// leave Content empty (see HandleMessageStream's image
+			// attachment path). Surface both shapes here:
+			//   - text (Content fallback to joined text parts)
+			//   - imageUrls (image_url parts) so the chat UI can render
+			//     image thumbnails on bubbles loaded from history, not
+			//     just on the live in-flight bubble.
+			text := m.TextContent()
+			var imageURLs []string
+			for _, p := range m.ContentParts {
+				if p.Type == "image_url" && p.ImageURL != nil && p.ImageURL.URL != "" {
+					imageURLs = append(imageURLs, p.ImageURL.URL)
+				}
 			}
+			if text == "" && len(imageURLs) == 0 {
+				continue
+			}
+			entry := map[string]any{"role": "user", "content": text}
+			if len(imageURLs) > 0 {
+				entry["imageUrls"] = imageURLs
+			}
+			history = append(history, entry)
 		case "assistant":
 			entry := map[string]any{"role": "assistant"}
 			if m.Content != "" {
@@ -507,7 +523,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	}
 	if len(imageURLs) > 0 {
 		userMsg.Content = ""
-		parts := []provider.ContentPart{{Type: "text", Text: msg.Text}}
+		// Skip an empty leading text part — image-only sends used to
+		// produce `[{text: ""}, {image_url}, …]` which some upstreams
+		// reject as a content-less wire message.
+		var parts []provider.ContentPart
+		if msg.Text != "" {
+			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
+		}
 		for _, u := range imageURLs {
 			parts = append(parts, provider.ContentPart{
 				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},
@@ -823,7 +845,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 	if len(imageURLs) > 0 {
 		userMsg.Content = ""
-		parts := []provider.ContentPart{{Type: "text", Text: msg.Text}}
+		// Skip an empty leading text part — image-only sends used to
+		// produce `[{text: ""}, {image_url}, …]` which some upstreams
+		// reject as a content-less wire message.
+		var parts []provider.ContentPart
+		if msg.Text != "" {
+			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
+		}
 		for _, u := range imageURLs {
 			parts = append(parts, provider.ContentPart{
 				Type: "image_url", ImageURL: &provider.ImageURL{URL: u, Detail: "auto"},

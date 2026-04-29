@@ -99,16 +99,33 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 		}
 		sessionId := strings.TrimPrefix(m.Key, "web_")
 		preview := ""
+		thumb := ""
 		rec, err := a.st.GetSession(ctx, agentID, m.Key)
 		if err == nil && rec != nil {
 			for _, msg := range rec.Messages {
-				if msg.Role == "user" && msg.Content != "" {
-					preview = msg.Content
-					if len(preview) > 100 {
-						preview = preview[:100] + "..."
-					}
-					break
+				if msg.Role != "user" {
+					continue
 				}
+				// Multimodal user turns (text + image attachment) live
+				// in ContentParts with Content="". Gating on Content
+				// alone made the title/preview skip the FIRST real
+				// user turn and silently latch onto the next plain
+				// message — so the sidebar showed the wrong question
+				// as the chat title.
+				text := userText(msg)
+				img := userImage(msg)
+				if text == "" && img == "" {
+					continue
+				}
+				preview = text
+				if preview == "" {
+					preview = "[image]"
+				}
+				if len(preview) > 100 {
+					preview = preview[:100] + "..."
+				}
+				thumb = img
+				break
 			}
 		}
 		if preview == "" {
@@ -122,14 +139,67 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 			title = preview
 		}
 		sessions = append(sessions, WebSession{
-			ID:        sessionId,
-			Title:     title,
-			Preview:   preview,
-			CreatedAt: m.UpdatedAt.UnixMilli(),
-			UpdatedAt: m.UpdatedAt.UnixMilli(),
+			ID:           sessionId,
+			Title:        title,
+			Preview:      preview,
+			ThumbnailURL: thumb,
+			CreatedAt:    m.UpdatedAt.UnixMilli(),
+			UpdatedAt:    m.UpdatedAt.UnixMilli(),
 		})
 	}
 	return sessions, nil
+}
+
+// userText pulls the user-visible text from a stored user turn. Falls
+// back to ContentParts' "text" parts when Content is empty (the shape
+// produced by HandleMessageStream when the turn carried image
+// attachments). Without this, callers gating on Content silently treat
+// multimodal turns as empty.
+func userText(m store.SessionMessage) string {
+	if m.Content != "" {
+		return m.Content
+	}
+	if m.ContentParts == nil {
+		return ""
+	}
+	raw, err := json.Marshal(m.ContentParts)
+	if err != nil {
+		return ""
+	}
+	var parts []provider.ContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+	var out []string
+	for _, p := range parts {
+		if p.Type == "text" && p.Text != "" {
+			out = append(out, p.Text)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// userImage returns the first image_url URL from a stored user turn's
+// ContentParts, or "" if none. Powers the sidebar thumbnail next to
+// the chat title.
+func userImage(m store.SessionMessage) string {
+	if m.ContentParts == nil {
+		return ""
+	}
+	raw, err := json.Marshal(m.ContentParts)
+	if err != nil {
+		return ""
+	}
+	var parts []provider.ContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+	for _, p := range parts {
+		if p.Type == "image_url" && p.ImageURL != nil && p.ImageURL.URL != "" {
+			return p.ImageURL.URL
+		}
+	}
+	return ""
 }
 
 func (a *StoreAdapter) DeleteSession(ctx context.Context, agentID, sessionKey string) error {

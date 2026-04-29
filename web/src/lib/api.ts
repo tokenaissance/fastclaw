@@ -254,6 +254,10 @@ export interface ChatHistoryMessage {
   name?: string;
   toolCallId?: string;
   metadata?: ToolResultMetadata;
+  // Set on user-role messages whose original turn carried image
+  // attachments. The chat UI renders these as inline thumbnails on
+  // bubbles loaded from history.
+  imageUrls?: string[];
 }
 
 export async function getChatHistory(agentId: string, sessionId: string): Promise<ChatHistoryMessage[]> {
@@ -261,7 +265,7 @@ export async function getChatHistory(agentId: string, sessionId: string): Promis
   return res.json();
 }
 
-export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string }[]> {
+export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string; thumbnailUrl?: string }[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
   return res.json();
 }

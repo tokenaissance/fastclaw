@@ -86,11 +86,16 @@ func unwrapPathError(err error) error {
 	return nil
 }
 
-// saveUserConfig persists a UI-originated config update. Infra fields
-// (storage, objectStore, gateway.auth.token, sandbox) are deliberately
-// NOT overwritten — those belong to the deployment and are sourced from
-// env / Secret. Letting the UI touch them would let an admin brick their
-// own deployment.
+// saveUserConfig persists a UI-originated config update. Most infra
+// fields (objectStore, gateway.auth.token) are deliberately NOT
+// overwritten — they belong to the deployment and are sourced from env
+// / Secret. Sandbox USED to be in that bucket but the Settings page
+// now exposes Backend / Image / E2B key directly, so it has to round-
+// trip; preserving the stored value here was silently undoing every
+// save and the Docker Image field appeared blank after refresh.
+// Other UI handlers (cron, plugins, tools) load the full config via
+// loadUserConfig before mutating, so cfg.Sandbox already carries the
+// correct existing value when they call us — writing it back is fine.
 //
 // Everything else (providers, toolProviders, tools, agents.defaults,
 // channels, plugins, cron, skills, …) goes to the DB store. The
@@ -113,7 +118,6 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 					merged.Storage = stored.Storage
 					merged.ObjectStore = stored.ObjectStore
 					merged.Gateway = stored.Gateway
-					merged.Sandbox = stored.Sandbox
 				}
 			}
 		}
@@ -142,7 +146,6 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 			merged.Storage = existing.Storage
 			merged.ObjectStore = existing.ObjectStore
 			merged.Gateway = existing.Gateway
-			merged.Sandbox = existing.Sandbox
 		}
 	}
 	data, err := json.MarshalIndent(&merged, "", "  ")

@@ -32,6 +32,25 @@ type Message struct {
 	RawAssistant json.RawMessage `json:"_raw,omitempty"`
 }
 
+// TextContent returns the message's user-visible text. Falls back to
+// joining the `text` parts of ContentParts when Content is empty —
+// which is the shape we store for user messages that arrive with
+// attachments (Content="" + ContentParts=[text, image_url, ...]).
+// Without this fallback, history/preview/title code that gates on
+// `Content != ""` silently drops every multimodal turn.
+func (m Message) TextContent() string {
+	if m.Content != "" {
+		return m.Content
+	}
+	var parts []string
+	for _, p := range m.ContentParts {
+		if p.Type == "text" && p.Text != "" {
+			parts = append(parts, p.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 // ContentPart represents a part of multimodal content.
 type ContentPart struct {
 	Type     string    `json:"type"`                // "text" or "image_url"

@@ -293,6 +293,11 @@ type WebSession struct {
 	Preview   string `json:"preview"`
 	CreatedAt int64  `json:"createdAt"` // unix ms
 	UpdatedAt int64  `json:"updatedAt"` // unix ms
+	// ThumbnailURL is the first image_url attached to the FIRST user
+	// turn of the session, surfaced so the sidebar can show "image +
+	// text" instead of just the text title for multimodal chats.
+	// Empty for sessions whose opening message had no image.
+	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
 }
 
 // ListWebSessions scans session files for web chat sessions and returns
@@ -324,6 +329,7 @@ func (m *Manager) ListWebSessions() []WebSession {
 
 		// Read first user message as preview
 		preview := ""
+		thumb := ""
 		fh, err := os.Open(f)
 		if err != nil {
 			continue
@@ -331,17 +337,48 @@ func (m *Manager) ListWebSessions() []WebSession {
 		scanner := bufio.NewScanner(fh)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
+			// Multimodal user turns store text inside content_parts and
+			// leave content empty — read both shapes so the preview
+			// doesn't latch onto a later plain message and mislabel the
+			// session, and pull the first image_url so the sidebar can
+			// surface a thumbnail.
 			var msg struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
+				Role         string                 `json:"role"`
+				Content      string                 `json:"content"`
+				ContentParts []provider.ContentPart `json:"content_parts"`
 			}
-			if json.Unmarshal(scanner.Bytes(), &msg) == nil && msg.Role == "user" && msg.Content != "" {
-				preview = msg.Content
-				if len(preview) > 100 {
-					preview = preview[:100] + "..."
+			if json.Unmarshal(scanner.Bytes(), &msg) != nil || msg.Role != "user" {
+				continue
+			}
+			text := msg.Content
+			img := ""
+			if text == "" {
+				var parts []string
+				for _, p := range msg.ContentParts {
+					if p.Type == "text" && p.Text != "" {
+						parts = append(parts, p.Text)
+					}
 				}
-				break
+				text = strings.Join(parts, "\n")
 			}
+			for _, p := range msg.ContentParts {
+				if p.Type == "image_url" && p.ImageURL != nil && p.ImageURL.URL != "" {
+					img = p.ImageURL.URL
+					break
+				}
+			}
+			if text == "" && img == "" {
+				continue
+			}
+			preview = text
+			if preview == "" {
+				preview = "[image]"
+			}
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			thumb = img
+			break
 		}
 		fh.Close()
 
@@ -359,11 +396,12 @@ func (m *Manager) ListWebSessions() []WebSession {
 		}
 
 		sessions = append(sessions, WebSession{
-			ID:        sessionId,
-			Title:     title,
-			Preview:   preview,
-			CreatedAt: info.ModTime().UnixMilli(),
-			UpdatedAt: info.ModTime().UnixMilli(),
+			ID:           sessionId,
+			Title:        title,
+			Preview:      preview,
+			ThumbnailURL: thumb,
+			CreatedAt:    info.ModTime().UnixMilli(),
+			UpdatedAt:    info.ModTime().UnixMilli(),
 		})
 	}
 

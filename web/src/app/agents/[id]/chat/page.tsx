@@ -179,7 +179,20 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
   while (i < history.length) {
     const h = history[i];
     if (h.role === "user") {
-      msgs.push({ id: `h-${i}`, role: "user", content: h.content || "", timestamp: 0 });
+      // Surface image attachments on history-loaded user bubbles. The
+      // server emits `imageUrls` on user turns whose ContentParts had
+      // image_url blocks; map them into UserAttachment entries so the
+      // existing bubble renderer (live-send path) handles them with no
+      // additional branching.
+      const attachments: UserAttachment[] | undefined =
+        h.imageUrls && h.imageUrls.length > 0
+          ? h.imageUrls.map((url, idx) => ({
+              name: `image-${idx + 1}`,
+              isImage: true,
+              previewUrl: url,
+            }))
+          : undefined;
+      msgs.push({ id: `h-${i}`, role: "user", content: h.content || "", timestamp: 0, attachments });
       i++;
     } else if (h.role === "assistant" && h.toolCalls && h.toolCalls.length > 0) {
       // Group: assistant tool_calls + following tool results + final assistant content
@@ -474,7 +487,6 @@ export default function AgentChatPage() {
 
     let userBubbleAttachments: UserAttachment[] = [];
     let imageDataUrls: string[] = [];
-    let attachmentNote = "";
 
     if (filesToUpload.length > 0) {
       userBubbleAttachments = filesToUpload.map((f) => ({
@@ -509,11 +521,12 @@ export default function AgentChatPage() {
           }),
         )
       ).filter((s): s is string => !!s);
-
-      const names = filesToUpload.map((f) => f.name).join(", ");
-      attachmentNote = `[Attached: ${names}]\n`;
     }
-    const fullText = attachmentNote + text;
+    // Send only the user's prose. Images travel as `imageUrls` and reach
+    // the model as `image_url` content parts; the old `[Attached: …]`
+    // textual breadcrumb was redundant for the model and showed up as
+    // ugly chrome in user bubbles + sidebar titles after a refresh.
+    const fullText = text;
 
     setInput("");
     setMessages((prev) => [
@@ -1046,7 +1059,7 @@ export default function AgentChatPage() {
                   ))}
                 </div>
               )}
-              <div className="flex items-end gap-2">
+              <div className="flex items-center gap-2">
                 <label
                   className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
                     !selectedAgent || sending
