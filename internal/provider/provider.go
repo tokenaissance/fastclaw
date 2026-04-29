@@ -38,9 +38,15 @@ type Message struct {
 // attachments (Content="" + ContentParts=[text, image_url, ...]).
 // Without this fallback, history/preview/title code that gates on
 // `Content != ""` silently drops every multimodal turn.
+//
+// Also strips the legacy "[Attached: <filename>]\n" breadcrumb that
+// older client versions prepended to outgoing chat text. New sends no
+// longer add it, but historical sessions still carry it baked into
+// stored content; without stripping here the prefix shows up in chat
+// bubbles, page titles, and sidebar entries.
 func (m Message) TextContent() string {
 	if m.Content != "" {
-		return m.Content
+		return StripAttachedPrefix(m.Content)
 	}
 	var parts []string
 	for _, p := range m.ContentParts {
@@ -48,7 +54,25 @@ func (m Message) TextContent() string {
 			parts = append(parts, p.Text)
 		}
 	}
-	return strings.Join(parts, "\n")
+	return StripAttachedPrefix(strings.Join(parts, "\n"))
+}
+
+// StripAttachedPrefix removes one or more leading "[Attached: …]" tags
+// (followed by optional whitespace / newline) from a string. Exposed
+// so non-Message callers (e.g. raw store rows in session adapters)
+// can apply the same cleanup.
+func StripAttachedPrefix(s string) string {
+	for {
+		if !strings.HasPrefix(s, "[Attached:") {
+			break
+		}
+		end := strings.IndexByte(s, ']')
+		if end < 0 {
+			break
+		}
+		s = strings.TrimLeft(s[end+1:], " \t\r\n")
+	}
+	return s
 }
 
 // ContentPart represents a part of multimodal content.

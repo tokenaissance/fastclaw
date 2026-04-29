@@ -157,7 +157,7 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 // multimodal turns as empty.
 func userText(m store.SessionMessage) string {
 	if m.Content != "" {
-		return m.Content
+		return provider.StripAttachedPrefix(m.Content)
 	}
 	if m.ContentParts == nil {
 		return ""
@@ -176,7 +176,7 @@ func userText(m store.SessionMessage) string {
 			out = append(out, p.Text)
 		}
 	}
-	return strings.Join(out, "\n")
+	return provider.StripAttachedPrefix(strings.Join(out, "\n"))
 }
 
 // userImage returns the first image_url URL from a stored user turn's

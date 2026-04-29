@@ -361,6 +361,7 @@ func (m *Manager) ListWebSessions() []WebSession {
 				}
 				text = strings.Join(parts, "\n")
 			}
+			text = provider.StripAttachedPrefix(text)
 			for _, p := range msg.ContentParts {
 				if p.Type == "image_url" && p.ImageURL != nil && p.ImageURL.URL != "" {
 					img = p.ImageURL.URL
