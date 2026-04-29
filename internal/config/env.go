@@ -1,121 +1,101 @@
 package config
 
 import (
-	"fmt"
-	"log/slog"
 	"os"
-	"path/filepath"
 	"strconv"
-
-	"github.com/BurntSushi/toml"
 )
 
-// EnvConfig holds infrastructure/runtime configuration loaded from env.toml.
-// This is NOT user-facing business config (providers, models, agents) — those
-// live in the database (per user). EnvConfig is set once by the operator.
+// EnvConfig is the bootstrap configuration: storage DSN, gateway port,
+// sandbox backend. Read at process start from FASTCLAW_* environment
+// variables — there is no config file. Everything user-facing
+// (providers, channels, agents) lives in the database.
+//
+// Set these as `FASTCLAW_<UPPER_SNAKE_CASE>` (or the explicit name in
+// the `env:` tag below) at the process / container level. systemd unit,
+// docker-compose, k8s deployment env are the canonical places.
 type EnvConfig struct {
-	Gateway  EnvGateway  `toml:"gateway"`
-	Storage  EnvStorage  `toml:"storage"`
-	Sandbox  EnvSandbox  `toml:"sandbox"`
-	Log      EnvLog      `toml:"log"`
+	Gateway EnvGateway
+	Storage EnvStorage
+	Sandbox EnvSandbox
+	Log     EnvLog
 }
 
 type EnvGateway struct {
-	Port  int    `toml:"port"`    // default 18953
-	Mode  string `toml:"mode"`    // "local" or "cloud"
-	Bind  string `toml:"bind"`    // "loopback" or "all"
-	Token string `toml:"token"`   // admin/gateway auth token
+	Port int    // FASTCLAW_PORT       — default 18953
+	Bind string // FASTCLAW_BIND       — "loopback" (default) or "all"
 }
 
 type EnvStorage struct {
-	Type        string `toml:"type"`         // "file", "postgres", "sqlite"
-	DSN         string `toml:"dsn"`          // database connection string
-	AutoMigrate bool   `toml:"auto_migrate"` // auto-create tables
+	Type        string // FASTCLAW_STORAGE_TYPE  — "sqlite" (default) or "postgres"
+	DSN         string // FASTCLAW_STORAGE_DSN   — empty = sqlite at $FASTCLAW_HOME/fastclaw.db
+	AutoMigrate bool   // FASTCLAW_STORAGE_AUTO_MIGRATE — default true
 }
 
 type EnvSandbox struct {
-	Enabled bool   `toml:"enabled"`
-	Backend string `toml:"backend"`  // "docker" or "e2b"
-	Image   string `toml:"image"`    // docker image
-	E2BKey  string `toml:"e2b_key"`  // E2B API key
+	Enabled bool   // FASTCLAW_SANDBOX_ENABLED
+	Backend string // FASTCLAW_SANDBOX_BACKEND  — "docker" or "e2b"
+	Image   string // FASTCLAW_SANDBOX_IMAGE
+	E2BKey  string // E2B_API_KEY
 }
 
 type EnvLog struct {
-	Level string `toml:"level"` // "debug", "info", "warn", "error"
+	Level string // FASTCLAW_LOG_LEVEL — "debug" / "info" / "warn" / "error"
 }
 
-// LoadEnv reads env.toml from these locations (first found wins):
-//  1. ./env.toml (current working directory)
-//  2. ~/.fastclaw/env.toml
-//  3. /etc/fastclaw/env.toml
-//
-// Environment variables override file values:
-//
-//	FASTCLAW_PORT, FASTCLAW_MODE, FASTCLAW_AUTH_TOKEN,
-//	FASTCLAW_STORAGE_TYPE, FASTCLAW_STORAGE_DSN,
-//	FASTCLAW_SANDBOX_BACKEND, E2B_API_KEY
+// LoadEnv reads the bootstrap configuration from FASTCLAW_* environment
+// variables. There is no config file: deployment-time settings are part
+// of the deployment manifest (systemd / docker-compose / k8s env).
 func LoadEnv() *EnvConfig {
-	// No zero-config defaults — fastclaw.json (written by the onboard
-	// wizard) is the source of truth for storage / sandbox / gateway
-	// fields. EnvConfig only carries values the operator explicitly set
-	// in env.toml or FASTCLAW_* env vars; ApplyToConfig then overlays
-	// them on top of the JSON so deployment-specific overrides win.
-	// Defaults for the truly-empty case (no JSON, no TOML, no env vars)
-	// live where they belong — port at the CLI flag, storage at
-	// store.New's zero-value fallback to sqlite.
-	cfg := &EnvConfig{}
-
-	// Try loading from file
-	for _, path := range envSearchPaths() {
-		if _, err := os.Stat(path); err == nil {
-			if _, err := toml.DecodeFile(path, cfg); err != nil {
-				slog.Warn("failed to parse env.toml", "path", path, "error", err)
-			} else {
-				slog.Info("loaded env.toml", "path", path)
-			}
-			break
-		}
+	cfg := &EnvConfig{
+		// Defaults — used when the env var isn't set. AutoMigrate=true
+		// makes a fresh sqlite install boot without manual schema steps.
+		Storage: EnvStorage{AutoMigrate: true},
 	}
 
-	// Environment variables override
 	if v := os.Getenv("FASTCLAW_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
 			cfg.Gateway.Port = p
 		}
 	}
-	if v := os.Getenv("FASTCLAW_MODE"); v != "" {
-		cfg.Gateway.Mode = v
-	}
 	if v := os.Getenv("FASTCLAW_BIND"); v != "" {
 		cfg.Gateway.Bind = v
 	}
-	if v := os.Getenv("FASTCLAW_AUTH_TOKEN"); v != "" {
-		cfg.Gateway.Token = v
-	}
+
 	if v := os.Getenv("FASTCLAW_STORAGE_TYPE"); v != "" {
 		cfg.Storage.Type = v
 	}
 	if v := os.Getenv("FASTCLAW_STORAGE_DSN"); v != "" {
 		cfg.Storage.DSN = v
 	}
+	if v := os.Getenv("FASTCLAW_STORAGE_AUTO_MIGRATE"); v != "" {
+		cfg.Storage.AutoMigrate = v == "true" || v == "1"
+	}
+
+	if v := os.Getenv("FASTCLAW_SANDBOX_ENABLED"); v != "" {
+		cfg.Sandbox.Enabled = v == "true" || v == "1"
+	}
 	if v := os.Getenv("FASTCLAW_SANDBOX_BACKEND"); v != "" {
 		cfg.Sandbox.Backend = v
+		// Setting a backend implies the operator wants sandbox on; this
+		// mirrors the previous LoadEnv behavior.
 		cfg.Sandbox.Enabled = true
 	}
-	if v := os.Getenv("E2B_API_KEY"); v != "" && cfg.Sandbox.E2BKey == "" {
+	if v := os.Getenv("FASTCLAW_SANDBOX_IMAGE"); v != "" {
+		cfg.Sandbox.Image = v
+	}
+	if v := os.Getenv("E2B_API_KEY"); v != "" {
 		cfg.Sandbox.E2BKey = v
 	}
 
+	if v := os.Getenv("FASTCLAW_LOG_LEVEL"); v != "" {
+		cfg.Log.Level = v
+	}
 	return cfg
 }
 
-// applyObjectStoreEnv reads FASTCLAW_OBJECT_STORE_* env vars into the
-// Config.ObjectStore block. Called from ApplyToConfig — kept as a
-// separate helper so gateway.New doesn't have to know the env-var
-// name convention.
+// applyObjectStoreEnv reads FASTCLAW_OBJECT_STORE_* env vars into cfg.
 func applyObjectStoreEnv(cfg *Config) {
 	read := func(key string) string { return os.Getenv("FASTCLAW_OBJECT_STORE_" + key) }
-
 	if v := read("TYPE"); v != "" {
 		cfg.ObjectStore.Type = v
 	}
@@ -151,20 +131,15 @@ func applyObjectStoreEnv(cfg *Config) {
 	}
 }
 
-// ApplyToConfig merges EnvConfig values into a legacy Config struct.
-// This bridges the gap while we migrate away from fastclaw.json.
+// ApplyToConfig overlays env-derived values onto a runtime Config. Used
+// by gateway boot to layer FASTCLAW_OBJECT_STORE_* on top of the DB-
+// stored object-store namespace.
 func (e *EnvConfig) ApplyToConfig(cfg *Config) {
 	if e.Gateway.Port > 0 {
 		cfg.Gateway.Port = e.Gateway.Port
 	}
-	if e.Gateway.Mode != "" {
-		cfg.Gateway.Mode = e.Gateway.Mode
-	}
 	if e.Gateway.Bind != "" {
 		cfg.Gateway.Bind = e.Gateway.Bind
-	}
-	if e.Gateway.Token != "" {
-		cfg.Gateway.Auth.Token = e.Gateway.Token
 	}
 	if e.Storage.Type != "" {
 		cfg.Storage.Type = e.Storage.Type
@@ -172,9 +147,6 @@ func (e *EnvConfig) ApplyToConfig(cfg *Config) {
 	if e.Storage.DSN != "" {
 		cfg.Storage.DSN = e.Storage.DSN
 	}
-	// Env can turn AutoMigrate on but not off — disabling is a fastclaw.json
-	// concern. Unconditional assignment used to clobber the JSON value with
-	// the (now removed) zero-config default.
 	if e.Storage.AutoMigrate {
 		cfg.Storage.AutoMigrate = true
 	}
@@ -190,46 +162,5 @@ func (e *EnvConfig) ApplyToConfig(cfg *Config) {
 			cfg.Sandbox.E2BKey = e.Sandbox.E2BKey
 		}
 	}
-	// Object-store vars are read directly from the env (not mirrored in
-	// EnvConfig) — they came later and the EnvConfig struct is already
-	// doing too much indirection.
 	applyObjectStoreEnv(cfg)
-}
-
-// GenerateToken creates a random hex token.
-func (e *EnvConfig) GenerateTokenIfEmpty() {
-	if e.Gateway.Token == "" {
-		b := make([]byte, 32)
-		if _, err := os.ReadFile("/dev/urandom"); err == nil {
-			// fallback handled below
-		}
-		fmt.Sprintf("%x", b) // just a placeholder
-		// Use crypto/rand in production
-		e.Gateway.Token = fmt.Sprintf("fc_%x", b)
-	}
-}
-
-func envSearchPaths() []string {
-	paths := []string{"env.toml"}
-
-	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(home, ".fastclaw", "env.toml"))
-	}
-
-	paths = append(paths, "/etc/fastclaw/env.toml")
-	return paths
-}
-
-// EnvTOMLExists reports whether an env.toml file is present in any of
-// the search locations LoadEnv consults. The setup status check uses
-// this so operator-provisioned deployments (env.toml carrying the
-// gateway token + storage DSN) don't drop into the onboarding wizard
-// just because no per-user fastclaw.json has been written yet.
-func EnvTOMLExists() bool {
-	for _, path := range envSearchPaths() {
-		if _, err := os.Stat(path); err == nil {
-			return true
-		}
-	}
-	return false
 }

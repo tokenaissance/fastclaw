@@ -27,8 +27,10 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=go-builder /fastclaw /usr/local/bin/fastclaw
 
-# Default data directory
-ENV HOME=/data
+# Default data directory. Override at runtime with FASTCLAW_HOME, but the
+# default value here lets `docker run fastclaw/fastclaw` work with no env.
+ENV FASTCLAW_HOME=/data/.fastclaw \
+    HOME=/data
 RUN mkdir -p /data/.fastclaw /data/.fastclaw/skills
 VOLUME /data/.fastclaw
 

@@ -35,8 +35,12 @@ export interface ProviderInfo {
 
 export interface AgentDetail {
   id: string;
+  name?: string;
+  description?: string;
+  avatarUrl?: string;       // /api/agents/{id}/files/avatar.png — may 404
+  userId?: string;
   model: string;
-  workspace: string;
+  workspace?: string;
   maxTokens?: number;
   temperature?: number;
   maxToolIterations?: number;
@@ -179,7 +183,10 @@ export function getAuthToken(): string {
   return authToken;
 }
 
-// Wrapper around fetch that injects Authorization header when a token is set.
+// Wrapper around fetch that injects Authorization header when a token is set
+// and always includes the cookie session for username/password logins. Cookie
+// is the primary credential for the web UI; the bearer is only used by
+// programmatic clients that put the token into localStorage manually.
 export async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   const token = getAuthToken();
   const headers: Record<string, string> = {
@@ -188,7 +195,279 @@ export async function apiFetch(url: string, init?: RequestInit): Promise<Respons
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
   }
-  return fetch(url, { ...init, headers });
+  return fetch(url, { credentials: "same-origin", ...init, headers });
+}
+
+// Login + logout + me
+
+export interface MeResponse {
+  ok: boolean;
+  user?: {
+    id: string;
+    username: string;
+    email: string;
+    role: string;
+    displayName?: string;
+    status: string;
+  };
+  authMethod?: string;
+  actAsUserId?: string;
+  readOnly?: boolean;
+  error?: string;
+}
+
+export async function login(loginField: string, password: string): Promise<MeResponse> {
+  const res = await fetch("/api/login", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login: loginField, password }),
+  });
+  return res.json();
+}
+
+export async function logout(): Promise<void> {
+  await apiFetch("/api/logout", { method: "POST" });
+  setAuthToken("");
+}
+
+export async function getMe(): Promise<MeResponse> {
+  const res = await apiFetch("/api/me");
+  return res.json();
+}
+
+// Onboard
+
+export interface OnboardRequest {
+  username: string;
+  email: string;
+  password: string;
+  displayName?: string;
+  provider?: string;
+  apiBase?: string;
+  apiKey?: string;
+  apiType?: string;
+  authType?: string;
+  model?: string;
+  agentName?: string;
+}
+
+export async function onboard(req: OnboardRequest): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch("/api/onboard", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+// Admin
+
+export async function adminListUsers() {
+  const res = await apiFetch("/api/admin/users");
+  return res.json();
+}
+
+export async function adminCreateUser(req: {
+  username: string;
+  email: string;
+  password: string;
+  displayName?: string;
+  role?: string;
+}) {
+  const res = await apiFetch("/api/admin/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function adminUpdateUser(id: string, req: { displayName?: string; role?: string; status?: string }) {
+  const res = await apiFetch(`/api/admin/users/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function adminDeleteUser(id: string) {
+  const res = await apiFetch(`/api/admin/users/${id}`, { method: "DELETE" });
+  return res.json();
+}
+
+export async function adminResetPassword(id: string, password: string) {
+  const res = await apiFetch(`/api/admin/users/${id}/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  return res.json();
+}
+
+// Apikeys (per-user)
+
+export async function listApikeys() {
+  const res = await apiFetch("/api/apikeys");
+  return res.json();
+}
+
+export async function createApikey(req: { name: string; agentIds?: string[] }) {
+  const res = await apiFetch("/api/apikeys", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function deleteApikey(id: string) {
+  const res = await apiFetch(`/api/apikeys/${id}`, { method: "DELETE" });
+  return res.json();
+}
+
+export async function rotateApikey(id: string) {
+  const res = await apiFetch(`/api/apikeys/${id}/rotate`, { method: "POST" });
+  return res.json();
+}
+
+export async function setApikeyAgents(id: string, agentIds: string[]) {
+  const res = await apiFetch(`/api/apikeys/${id}/agents`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agentIds }),
+  });
+  return res.json();
+}
+
+// Scoped providers + channels
+
+export type ScopeName = "system" | "user" | "agent";
+
+export interface ProviderRow {
+  id: string;
+  scope: ScopeName;
+  scopeId: string;
+  name: string;
+  apiBase?: string;
+  apiKey?: string;       // masked on read
+  apiType?: string;
+  authType?: string;
+  models?: ModelEntry[];
+  updatedAt?: string;
+}
+
+export interface ChannelRow {
+  id: string;
+  scope: ScopeName;
+  scopeId: string;
+  type: string;
+  enabled: boolean;
+  botToken?: string;     // masked on read
+  appToken?: string;
+  credentialKey?: string;
+  updatedAt?: string;
+}
+
+export async function listProviders(scope?: ScopeName, scopeId?: string) {
+  const params = new URLSearchParams();
+  if (scope) params.set("scope", scope);
+  if (scopeId) params.set("scopeId", scopeId);
+  const qs = params.toString();
+  const url = "/api/providers" + (qs ? `?${qs}` : "");
+  const res = await apiFetch(url);
+  return res.json();
+}
+
+export async function createProvider(req: {
+  scope: ScopeName;
+  scopeId: string;
+  name: string;
+  apiBase?: string;
+  apiKey?: string;
+  apiType?: string;
+  authType?: string;
+  models?: ModelEntry[];
+}) {
+  const res = await apiFetch("/api/providers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function updateProvider(id: string, req: Partial<ProviderRow>) {
+  const res = await apiFetch(`/api/providers/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function deleteProvider(id: string) {
+  const res = await apiFetch(`/api/providers/${id}`, { method: "DELETE" });
+  return res.json();
+}
+
+// testStoredProvider hits the saved provider row server-side using its
+// own apiKey, so the Edit dialog can verify a model id without forcing
+// the user to re-paste the secret. The backend never returns unmasked
+// keys to the browser, so this is the only way to test from edit mode.
+export async function testStoredProvider(
+  providerId: string,
+  model: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await apiFetch(`/api/providers/${providerId}/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  return res.json();
+}
+
+export async function listScopedChannels(scope?: ScopeName, scopeId?: string) {
+  const params = new URLSearchParams();
+  if (scope) params.set("scope", scope);
+  if (scopeId) params.set("scopeId", scopeId);
+  const qs = params.toString();
+  const url = "/api/scoped-channels" + (qs ? `?${qs}` : "");
+  const res = await apiFetch(url);
+  return res.json();
+}
+
+export async function createScopedChannel(req: {
+  scope: ScopeName;
+  scopeId: string;
+  type: string;
+  enabled: boolean;
+  botToken?: string;
+  appToken?: string;
+  credentialKey?: string;
+}) {
+  const res = await apiFetch("/api/scoped-channels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function updateScopedChannel(id: string, req: Partial<ChannelRow>) {
+  const res = await apiFetch(`/api/scoped-channels/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function deleteScopedChannel(id: string) {
+  const res = await apiFetch(`/api/scoped-channels/${id}`, { method: "DELETE" });
+  return res.json();
 }
 
 // Status
@@ -207,9 +486,9 @@ export async function testProvider(config: { apiBase: string; apiKey: string; mo
   return res.json();
 }
 
-// Config
+// Config — persisted system_settings block (super_admin only).
 export async function saveConfig(config: Record<string, unknown>) {
-  const res = await apiFetch("/api/save-config", {
+  const res = await apiFetch("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
@@ -262,12 +541,21 @@ export interface ChatHistoryMessage {
 
 export async function getChatHistory(agentId: string, sessionId: string): Promise<ChatHistoryMessage[]> {
   const res = await apiFetch(`/api/chat/history?agentId=${encodeURIComponent(agentId)}&sessionId=${encodeURIComponent(sessionId)}`);
-  return res.json();
+  if (!res.ok) return [];
+  const data = await res.json();
+  // Backend wraps in { history: [...] }; older shape was a raw array.
+  if (Array.isArray(data?.history)) return data.history;
+  return Array.isArray(data) ? data : [];
 }
 
 export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string; thumbnailUrl?: string }[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
-  return res.json();
+  if (!res.ok) return [];
+  const data = await res.json();
+  // Backend wraps the list in { sessions: [...] }. Tolerate raw array
+  // shape too in case an older deployment is still around.
+  if (Array.isArray(data?.sessions)) return data.sessions;
+  return Array.isArray(data) ? data : [];
 }
 
 export async function renameChatSession(agentId: string, sessionId: string, title: string) {
@@ -333,7 +621,12 @@ export async function sendChatStream(
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
+  // Reader loop exits on either an explicit {type:"done"} event from the
+  // server or a clean stream end (done flag from getReader). We tear down
+  // early on "done" so any trailing bytes that may have been queued behind
+  // the final flush don't get re-parsed and surfaced as spurious errors.
+  let finished = false;
+  while (!finished) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -346,9 +639,13 @@ export async function sendChatStream(
       try {
         const evt = JSON.parse(line.slice(6)) as ChatStreamEvent;
         onEvent(evt);
-      } catch { /* skip */ }
+        if (evt.type === "done") {
+          finished = true;
+        }
+      } catch { /* skip malformed frames */ }
     }
   }
+  try { await reader.cancel(); } catch { /* ignore */ }
 }
 
 export interface UploadedFile {
@@ -377,12 +674,15 @@ export async function uploadAgentFiles(
 export async function getAgents(): Promise<AgentDetail[]> {
   const res = await apiFetch("/api/agents");
   if (!res.ok) {
-    // 401 etc. return a JSON error envelope, not an array — throw so callers
-    // can fall back to [] instead of crashing on .map of a non-array.
+    // 401 etc. return a JSON error envelope — throw so callers fall back
+    // to [] instead of crashing on .map of a non-array.
     throw new Error(`getAgents failed: ${res.status}`);
   }
   const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  // Backend returns { agents: [...] }. Tolerate raw array too in case an
+  // older handler is still around.
+  if (Array.isArray(data?.agents)) return data.agents as AgentDetail[];
+  return Array.isArray(data) ? (data as AgentDetail[]) : [];
 }
 
 export async function createAgent(agent: Partial<AgentDetail>) {
@@ -404,6 +704,8 @@ export interface AgentSkillsConfig {
 // config is really { disabled, alwaysLoad } — use an explicit payload
 // type so the two shapes don't collide in the type system.
 export interface AgentUpdatePayload {
+  name?: string;
+  description?: string;
   model?: string;
   soul?: string;
   skills?: AgentSkillsConfig;

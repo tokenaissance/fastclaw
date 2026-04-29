@@ -25,7 +25,7 @@ func providerListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all credential providers",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cm, err := provider.NewCredentialManager("")
+			cm, err := provider.NewCredentialManagerForUser("_cli", "")
 			if err != nil {
 				return err
 			}
@@ -74,7 +74,7 @@ func providerCreateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			cm, err := provider.NewCredentialManager("")
+			cm, err := provider.NewCredentialManagerForUser("_cli", "")
 			if err != nil {
 				return err
 			}
@@ -118,7 +118,7 @@ func providerDeleteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			cm, err := provider.NewCredentialManager("")
+			cm, err := provider.NewCredentialManagerForUser("_cli", "")
 			if err != nil {
 				return err
 			}

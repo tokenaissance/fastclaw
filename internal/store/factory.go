@@ -8,29 +8,17 @@ import (
 	"path/filepath"
 )
 
-// New creates a Store based on the storage config.
-//
-// Defaults to SQLite at ~/.fastclaw/fastclaw.db when called with a
-// nil/empty config — that's the zero-config dev path. "file" is still
-// supported for back-compat with old single-user installations but is
-// no longer the default.
+// New creates a Store. The database is mandatory; sqlite is the default
+// for zero-config installs and stores its file under ~/.fastclaw/fastclaw.db.
+// Postgres is the production target — pass a DSN.
 func New(cfg *StorageConfig, homeDir string) (Store, error) {
 	if cfg == nil || cfg.Type == "" {
 		cfg = &StorageConfig{Type: StorageSQLite, AutoMigrate: true}
 	}
-	if cfg.Type == StorageFile {
-		slog.Info("using file-based storage", "dir", homeDir)
-		return NewFileStore(homeDir), nil
-	}
-
 	switch cfg.Type {
 	case StoragePostgres, StorageSQLite:
 		dsn := cfg.DSN
 		if cfg.Type == StorageSQLite && dsn == "" {
-			// Default location lives next to the rest of FastClaw state
-			// so a single rm -rf ~/.fastclaw blows away everything for
-			// dev resets. WAL journal lets reads happen during writes —
-			// matters for the gateway + sandbox sharing the DB.
 			if err := os.MkdirAll(homeDir, 0o755); err != nil {
 				return nil, fmt.Errorf("create %s: %w", homeDir, err)
 			}
@@ -49,9 +37,8 @@ func New(cfg *StorageConfig, homeDir string) (Store, error) {
 			}
 		}
 		return db, nil
-
 	default:
-		return nil, fmt.Errorf("unsupported storage type: %s", cfg.Type)
+		return nil, fmt.Errorf("unsupported storage type: %s (only sqlite/postgres supported)", cfg.Type)
 	}
 }
 

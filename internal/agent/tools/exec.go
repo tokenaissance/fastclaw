@@ -89,14 +89,20 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 			},
 		},
 		"required": []string{"command"},
-	}, makeExecToolFull(sbCfg, envProvider, skillDirs))
+	}, makeExecToolFull(r, sbCfg, envProvider, skillDirs))
 }
 
 func makeExecTool(sbCfg *SandboxConfig) ToolFunc {
-	return makeExecToolFull(sbCfg, nil, nil)
+	return makeExecToolFull(nil, sbCfg, nil, nil)
 }
 
-func makeExecToolFull(sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) ToolFunc {
+// makeExecToolFull captures the registry pointer so it can consult the
+// runtime `sandboxRequired` flag at call time — that's the contract
+// SetSandboxRequired publishes when sandbox is configured at any layer
+// up the stack, even if it was off at agent construction. Without this,
+// a `pool.Get()` failure during bindSession would silently leak to the
+// host shell.
+func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args execArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -132,8 +138,11 @@ func makeExecToolFull(sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillD
 			command = fmt.Sprintf("(cat <<'__FCSTDIN__'\n%s\n__FCSTDIN__\n) | %s", args.Stdin, args.Command)
 		}
 
-		// Use sandbox if enabled or forced
-		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled)
+		// Use sandbox if enabled or forced. The registry's
+		// sandboxRequired flag covers the case where the runtime decided
+		// sandbox is mandatory after construction (sibling agent wanted
+		// it, or admin flipped settings.sandbox.enabled mid-process).
+		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled) || (r != nil && r.sandboxRequired)
 		if useSandbox && sbCfg != nil && sbCfg.Pool != nil {
 			sb := sbCfg.Pool.Get(sbCfg.AgentID, sbCfg.Image, sbCfg.Workspace, sbCfg.Policy)
 			out, err := sb.Exec(execCtx, command, "/workspace")

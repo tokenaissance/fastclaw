@@ -1,11 +1,18 @@
 ##
-## FastClaw Cloud — Single-machine deployment
+## FastClaw — single-machine deployment with Postgres.
 ##
-## Usage:
-##   1. Copy .env.example to .env, fill in your values
-##   2. docker compose up -d
-##   3. Create users:  docker compose exec fastclaw fastclaw user add alice --name Alice
-##   4. Open http://localhost:18953
+## Quick start:
+##   docker compose up -d
+##   open http://localhost:18953        # walks the onboard wizard:
+##                                       # super-admin account + first
+##                                       # provider + first agent
+##
+## Or initialize from CLI without opening the web UI:
+##   docker compose exec fastclaw fastclaw admin create-user \
+##     --username alice --email alice@example.com --password 'hunter2' \
+##     --role super_admin
+##
+## All runtime config goes through FASTCLAW_* env vars — no config file.
 ##
 services:
   fastclaw:
@@ -19,7 +26,20 @@ services:
     volumes:
       - fastclaw-data:/data/.fastclaw
     environment:
-      - HOME=/data
+      # FASTCLAW_HOME — sqlite db path + sandbox root + skill cache live here
+      FASTCLAW_HOME: /data/.fastclaw
+      # Bind to all interfaces so the host port mapping works
+      FASTCLAW_BIND: all
+      FASTCLAW_PORT: "18953"
+      # Postgres backend (sqlite would also work; use it by clearing
+      # these two and removing the postgres service below)
+      FASTCLAW_STORAGE_TYPE: postgres
+      FASTCLAW_STORAGE_DSN: "postgres://fastclaw:${POSTGRES_PASSWORD:-fastclaw-secret}@postgres:5432/fastclaw?sslmode=disable"
+      FASTCLAW_STORAGE_AUTO_MIGRATE: "true"
+      # Sandbox (optional; uncomment to enable)
+      # FASTCLAW_SANDBOX_ENABLED: "true"
+      # FASTCLAW_SANDBOX_BACKEND: docker
+      # FASTCLAW_SANDBOX_IMAGE: python:3.12-slim
     depends_on:
       postgres:
         condition: service_healthy

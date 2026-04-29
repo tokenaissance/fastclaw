@@ -202,7 +202,7 @@ func makeReadFile(r *Registry) ToolFunc {
 		// regardless of which pod answered the request.
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, name); err == nil {
+			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name); err == nil {
 				return string(data), nil
 			}
 			// Store miss falls through to the filesystem below — e.g. a
@@ -257,7 +257,7 @@ func makeWriteFile(r *Registry) ToolFunc {
 		// systemFileStore when available.
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, name, []byte(args.Content)); err != nil {
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			// Keep a filesystem mirror so the agent runtime (context
@@ -405,7 +405,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, name); err == nil {
+			if data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name); err == nil {
 				return string(data), nil
 			}
 			// Identity files don't live in the sandbox FS — the executor
@@ -447,7 +447,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, name, []byte(args.Content)); err != nil {
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil

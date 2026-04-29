@@ -16,16 +16,57 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
-// globalSkillsDirPath returns ~/.fastclaw/skills — the shared skills
-// directory that every agent reads as loader "Layer 2". Kept local to
-// the gateway because it's only needed here; handlers resolve the same
-// path independently via config.HomeDir().
+// loadAgentSkillEntries collects every agent-scope skills.entries row
+// owned by this user. Mirrors the same logic in the HTTP layer; kept
+// here so the runtime gateway never imports the setup handlers package.
+func loadAgentSkillEntries(ctx context.Context, st store.Store, userID string) (map[string]map[string]config.SkillEntryCfg, error) {
+	if st == nil {
+		return nil, nil
+	}
+	agents, err := st.ListAgents(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]config.SkillEntryCfg{}
+	for _, ar := range agents {
+		rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, ar.ID, "skills.entries")
+		if err != nil || rec == nil || len(rec.Data) == 0 {
+			continue
+		}
+		blob, _ := json.Marshal(rec.Data)
+		var entries map[string]config.SkillEntryCfg
+		if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
+			out[ar.ID] = entries
+		}
+	}
+	return out, nil
+}
+
+// ensureAgentHome idempotently creates the agent's local FS layout. Only
+// `skills/` (FS-materialized SKILL.md bundles) and `memory/` (compaction
+// dumps history JSONL here for audit / recovery) live on disk; identity
+// files, session messages, and MEMORY.md are all in the DB.
+func ensureAgentHome(rc config.ResolvedAgent) {
+	if rc.Home == "" {
+		return
+	}
+	for _, dir := range []string{
+		rc.Home,
+		filepath.Join(rc.Home, "skills"),
+		filepath.Join(rc.Home, "memory", "logs"),
+	} {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+}
+
+// globalSkillsDirPath returns ~/.fastclaw/skills.
 func globalSkillsDirPath() (string, error) {
 	home, err := config.HomeDir()
 	if err != nil {
@@ -35,13 +76,16 @@ func globalSkillsDirPath() (string, error) {
 }
 
 // attachSandboxToAgents wires a sandbox Executor (E2B or Docker) to every
-// agent's tool registry when any agent's SandboxCfg says Enabled. Returns
-// the LifecyclePool so callers can attach it to a UserSpace for later
-// eviction; returns nil when no agent wants a sandbox.
+// agent in the manager, when any of the resolved agents has sandbox Enabled.
 //
-// This is shared between the lazy loadUserSpace path and the eager local
-// space bootstrap in gateway.New — previously only the former had it, so
-// admin exec calls fell back to the pod's host shell.
+// Docker sandbox uses ~/.fastclaw as workspaceRoot so its internal
+// <root>/workspaces/<agent>/sessions/<sid>/ layout aligns with
+// workspace.LocalFS — files written by the sandbox and files written by
+// workspace.Store land in the same path.
+//
+// Path-only fallback (sandbox disabled): each agent's file tools are
+// restricted to its own workspace dir, agent-by-agent — agents are the
+// atomic unit, so we don't lump them under any per-user namespace.
 func attachSandboxToAgents(
 	userID string,
 	resolved []config.ResolvedAgent,
@@ -66,10 +110,10 @@ func attachSandboxToAgents(
 				pool = sandbox.NewE2BExecutorPool(apiKey, template, 30*time.Minute)
 				slog.Info("sandbox executor pool created",
 					"user", userID, "backend", "e2b", "template", template)
-			default: // "docker" or empty
-				userDir, _ := config.UserDir(userID)
+			default:
+				home, _ := config.HomeDir()
 				policy := &sandbox.Policy{NetMode: rc.Sandbox.Network}
-				pool = sandbox.NewDockerExecutorPool(rc.Sandbox.Image, userDir, policy)
+				pool = sandbox.NewDockerExecutorPool(rc.Sandbox.Image, home, policy)
 				slog.Info("sandbox executor pool created",
 					"user", userID, "backend", "docker", "network", rc.Sandbox.Network)
 			}
@@ -89,145 +133,219 @@ func attachSandboxToAgents(
 		pool = lp
 		slog.Info("sandbox lifecycle pool enabled",
 			"user", userID, "idleTTL", idle, "hydrate", ws != nil)
-		// Sandbox executors are now created per-(agent, session) on the
-		// first tool call of a chat, not eagerly here. The agent loop
-		// pulls a session-scoped executor from the pool at the start of
-		// each turn (see Agent.bindSession), so all we do here is hand
-		// every agent a reference to the pool.
 		for _, ag := range agentMgr.All() {
 			ag.SetSandboxPool(pool)
 		}
 		return pool
 	}
-	// No sandbox backend → path-only restriction on file tools so agents
-	// can't escape their own workspace dir.
-	userDir, err := config.UserDir(userID)
-	if err == nil {
-		for _, ag := range agentMgr.All() {
-			ag.ToolRegistry().SetSandboxRoot(userDir)
+	for _, rc := range resolved {
+		if rc.Workspace == "" {
+			continue
 		}
-		slog.Info("path sandbox enabled", "user", userID)
+		_ = os.MkdirAll(rc.Workspace, 0o755)
+		if ag := agentMgr.AgentByID(rc.ID); ag != nil {
+			ag.ToolRegistry().SetSandboxRoot(rc.Workspace)
+		}
 	}
+	slog.Info("path sandbox enabled", "user", userID)
 	return nil
 }
 
-// loadConfigStoreFirst returns a user's config with store as source of
-// truth and fastclaw.json as fallback. Mirrors handlers.loadUserConfig so
-// reads stay symmetric with writes (saveUserConfig writes only to store
-// once one is wired). Returns an empty Config if nothing exists in either
-// place — callers downstream apply env overlay + ApplyDefaults.
-func loadConfigStoreFirst(userID string, st store.Store) (*config.Config, error) {
-	if st != nil {
-		if gc, gerr := st.GetConfig(context.Background()); gerr == nil && gc != nil && len(gc.Data) > 0 {
-			blob, merr := json.Marshal(gc.Data)
-			if merr == nil {
-				var stored config.Config
-				if uerr := json.Unmarshal(blob, &stored); uerr == nil {
-					return &stored, nil
-				}
-			}
-		}
+// assembleConfig reads the namespaced settings rows and the scope-merged
+// providers/channels for an (account, agent) and projects them into a
+// runtime config.Config. Pass userID="" / agentID="" to skip those layers
+// (agent boot uses the user-only view; system-only is for super_admin
+// dashboards).
+//
+// Each setting namespace is its own configs row. assembleConfig
+// reads them all in parallel-conceptually-but-serially-for-simplicity;
+// the per-namespace cost is one indexed point lookup.
+func assembleConfig(ctx context.Context, st store.Store, userID, agentID string) (*config.Config, error) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{},
+		Channels:  map[string]config.ChannelConfig{},
 	}
-	cfg, err := config.LoadForUser(userID)
-	if err == nil {
+	if st == nil {
 		return cfg, nil
 	}
-	if os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") {
-		return &config.Config{}, nil
+	if err := scope.SettingInto(ctx, st, NSAgentDefaults, userID, agentID, "", &cfg.Agents.Defaults); err != nil {
+		return nil, err
 	}
-	return nil, err
-}
-
-// UserSpace holds the per-user state that can be multiplexed inside one
-// gateway process. Channels, cron, webhook and plugins remain global (bound
-// to the local admin user); the HTTP API multiplexes across user spaces.
-type UserSpace struct {
-	UserID       string
-	Config       *config.Config
-	Provider     provider.Provider
-	Agents       *agent.Manager
-	SandboxPool  sandbox.ExecutorPool // nil in local mode / when sandbox is disabled
-}
-
-// loadUserSpace reads a user's config and instantiates their agent manager.
-// The shared message bus is reused so that cross-user plumbing (typing
-// indicators, outbound routing) stays in one place.
-func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store) (*UserSpace, error) {
-	cfg, err := loadConfigStoreFirst(userID, st)
+	if err := scope.SettingInto(ctx, st, NSSandbox, userID, agentID, "", &cfg.Sandbox); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSObjectStore, userID, agentID, "", &cfg.ObjectStore); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSHooks, userID, agentID, "", &cfg.Hooks); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSPlugins, userID, agentID, "", &cfg.Plugins); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSTaskQueue, userID, agentID, "", &cfg.TaskQueue); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSToolProviders, userID, agentID, "", &cfg.ToolProviders); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSToolCategories, userID, agentID, "", &cfg.Tools); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSSkillsInstall, userID, agentID, "", &cfg.Skills.Install); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSSkillsEntries, userID, agentID, "", &cfg.Skills.Entries); err != nil {
+		return nil, err
+	}
+	// Per-agent skill env overrides used to live in a single user-scope
+	// row keyed by agentID; they now persist as one scope=agent row each
+	// at name=skills.entries (same namespace, narrower scope). Collect
+	// every agent owned by this user — the agent runtime still wants
+	// the keyed-by-agent map shape via cfg.Skills.AgentEntries.
+	if userID != "" {
+		entries, err := loadAgentSkillEntries(ctx, st, userID)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) > 0 {
+			cfg.Skills.AgentEntries = entries
+		}
+	}
+	if err := scope.SettingInto(ctx, st, NSMemory, userID, agentID, "", &cfg.Memory); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSPrivacy, userID, agentID, "", &cfg.Privacy); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSSkillsLearner, userID, agentID, "", &cfg.SkillsLearner); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSHeartbeat, userID, agentID, "", &cfg.Heartbeat); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSTeams, userID, agentID, "", &cfg.Teams); err != nil {
+		return nil, err
+	}
+	if err := scope.SettingInto(ctx, st, NSBindings, userID, agentID, "", &cfg.Bindings); err != nil {
+		return nil, err
+	}
+	provs, err := scope.Providers(ctx, st, userID, agentID)
 	if err != nil {
-		return nil, fmt.Errorf("load config for user %q: %w", userID, err)
+		return nil, err
 	}
-	// ALWAYS apply env overlay so infra fields (storage DSN, object store
-	// credentials, sandbox backend / API key, ...) take effect even when a
-	// per-user fastclaw.json happens to exist. This mirrors main.go's
-	// startup path; previously env was applied only in the file-missing
-	// branch, which made FASTCLAW_SANDBOX_BACKEND / E2B_API_KEY silently
-	// no-op for admin users that had any on-disk config.
-	config.LoadEnv().ApplyToConfig(cfg)
+	for k, v := range provs {
+		cfg.Providers[k] = v
+	}
+	chs, err := scope.Channels(ctx, st, userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range chs {
+		cfg.Channels[k] = v
+	}
+	return cfg, nil
+}
 
-	// Per-user spaces (apikey-bound) have their own configs partition that
-	// is usually empty — we land here with a zero-value Config and a 0 in
-	// every defaults field. Without this call the resolved agent ends up
-	// with MaxToolIterations=0 and the very first chat turn aborts with
-	// "max tool iterations reached max=0". gateway.New() already does this
-	// for the bootstrap cfg; we mirror it for every user space load so the
-	// behavior matches between admin and apikey callers.
+// UserSpace holds the per-user runtime: their config snapshot, LLM
+// provider, agent manager, and sandbox pool. Lazy-loaded on first auth.
+type UserSpace struct {
+	UserID      string
+	Config      *config.Config
+	Provider    provider.Provider
+	Agents      *agent.Manager
+	SandboxPool sandbox.ExecutorPool
+}
+
+// loadUserSpace builds a UserSpace by:
+//  1. snapshotting the system config (system_settings + system providers/
+//     channels)
+//  2. layering the user's own providers + channels rows on top
+//  3. listing the user's agent rows from the DB
+//  4. building an agent.Manager that owns those agents
+func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store) (*UserSpace, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("loadUserSpace: userID required")
+	}
+	if st == nil {
+		return nil, fmt.Errorf("loadUserSpace: store required")
+	}
+	cfg, err := assembleConfig(ctx, st, userID, "")
+	if err != nil {
+		return nil, fmt.Errorf("assemble config: %w", err)
+	}
+	config.LoadEnv().ApplyToConfig(cfg)
 	config.ApplyDefaults(cfg)
 
 	prov := newProviderFromConfig(cfg)
 
-	// Pull agent IDs from the DB store so pods that didn't handle the
-	// original create request still see the agent on startup. For each
-	// resolved agent we also make sure the home dir layout exists on this
-	// pod's filesystem (idempotent MkdirAll).
-	var storeAgents []config.AgentEntry
-	if st != nil {
-		if records, lerr := st.ListAgents(context.Background()); lerr == nil {
-			for _, ar := range records {
-				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
+	// Pull the user's agents from the DB. ResolveAgents merges in the
+	// system+user defaults; per-agent overrides come from the configs
+	// table via the agent-scope `agents.defaults` row that the create /
+	// update agent handlers write to.
+	agentRecords, err := st.ListAgents(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list agents: %w", err)
+	}
+	entries := make([]config.AgentEntry, 0, len(agentRecords))
+	for _, ar := range agentRecords {
+		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID})
+	}
+	resolved := config.ResolveAgents(cfg, entries)
+	for _, rc := range resolved {
+		// Layer the agent-scope agents.defaults on top of the
+		// system→user merge that ResolveAgents already applied. We
+		// read the agent-scope row directly (not via SettingInto
+		// system+user, which would re-merge those layers and clobber
+		// the user-scoped Model already in cfg.Agents.Defaults).
+		var agentOverride config.AgentDefaults
+		if rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, rc.ID, "agents.defaults"); err == nil && rec != nil {
+			blob, _ := json.Marshal(rec.Data)
+			_ = json.Unmarshal(blob, &agentOverride)
+			if agentOverride.Model != "" {
+				rc.Model = agentOverride.Model
+			}
+			if agentOverride.MaxTokens > 0 {
+				rc.MaxTokens = agentOverride.MaxTokens
+			}
+			if agentOverride.Temperature > 0 {
+				rc.Temperature = agentOverride.Temperature
+			}
+			if agentOverride.MaxToolIterations > 0 {
+				rc.MaxToolIterations = agentOverride.MaxToolIterations
+			}
+			if agentOverride.Thinking != "" {
+				rc.Thinking = agentOverride.Thinking
+			}
+			if agentOverride.PolicyPreset != "" {
+				rc.PolicyPreset = agentOverride.PolicyPreset
 			}
 		}
-	}
-	resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgents)
-	for _, rc := range resolved {
 		ensureAgentHome(rc)
-		// Pull skills that other pods have installed for this agent onto
-		// local disk so SkillsLoader (which scans the filesystem) sees
-		// them. No-op without an object store; cheap "skip if same size"
-		// inside the hydrator keeps re-runs fast.
 		if ws != nil {
 			if err := skills.HydrateSkillsDown(
-				context.Background(), ws, rc.ID, filepath.Join(rc.Home, "skills"),
+				ctx, ws, rc.ID, filepath.Join(rc.Home, "skills"),
 			); err != nil {
 				slog.Warn("skill hydrate failed", "agent", rc.ID, "error", err)
 			}
 		}
 	}
-	// Global skills (platform-wide, owned by no single agent) follow the
-	// same pattern — hydrate them into ~/.fastclaw/skills/ so any agent
-	// on this pod can load them. Bundled skills (embedded in the binary,
-	// re-extracted at every startup by agent.InstallBundledSkills) are
-	// protected via keepLocal so an empty OSS listing never wipes them.
 	if ws != nil {
-		globalSkillsDir, gerr := globalSkillsDirPath()
-		if gerr == nil {
+		if dir, gerr := globalSkillsDirPath(); gerr == nil {
 			if err := skills.HydrateSkillsDown(
-				context.Background(), ws, skills.GlobalSkillOwner, globalSkillsDir,
+				ctx, ws, skills.GlobalSkillOwner, dir,
 				agent.BundledSkillNames()...,
 			); err != nil {
 				slog.Warn("global skill hydrate failed", "error", err)
 			}
 		}
 	}
+
 	managerOpts := []agent.ManagerOption{
 		agent.WithUserID(userID),
 		agent.WithGlobalSkillsCfg(cfg.Skills),
-	}
-	if st != nil {
-		managerOpts = append(managerOpts,
-			agent.WithSessionStore(session.NewStoreAdapter(st)),
-			agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
-		)
+		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
+		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
 	}
 	if ws != nil {
 		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
@@ -237,15 +355,9 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 		return nil, fmt.Errorf("create agent manager for user %q: %w", userID, err)
 	}
 
-	// SetOwnerUserID is now performed inside agent.NewManager via
-	// WithUserID; the loop here was the only previous wiring point and
-	// would double-tag if we kept it.
-	_ = userID
 	registerAgentToolChains(cfg, agentMgr.All())
 
-	var pool sandbox.ExecutorPool
-
-	pool = attachSandboxToAgents(userID, resolved, agentMgr, ws)
+	pool := attachSandboxToAgents(userID, resolved, agentMgr, ws)
 
 	slog.Info("loaded user space", "user", userID, "agents", agentMgr.Names())
 
@@ -258,16 +370,10 @@ func loadUserSpace(userID string, mb *bus.MessageBus, st store.Store, ws workspa
 	}, nil
 }
 
-// newProviderFromConfig picks an LLM provider for the user's default
-// model. Strict resolution — no silent fallbacks:
-//
-//   - Default model must be "<provider-key>/<model-id>".
-//   - cfg.Providers[<provider-key>] must exist and have a non-empty APIKey.
-//
-// If either condition fails, returns nil and logs a clear reason. The
-// agent loop will surface the missing-provider state as an error on the
-// first chat turn instead of silently calling api.openai.com with an
-// empty key.
+// newProviderFromConfig picks an LLM provider for the resolved default
+// model. Returns nil (with a clear log line) when nothing matches; the
+// agent loop surfaces the missing-provider state as an error on the
+// first turn rather than silently making bogus calls.
 func newProviderFromConfig(cfg *config.Config) provider.Provider {
 	defaultModel := cfg.Agents.Defaults.Model
 	parts := strings.SplitN(defaultModel, "/", 2)
@@ -290,9 +396,7 @@ func newProviderFromConfig(cfg *config.Config) provider.Provider {
 		return nil
 	}
 	slog.Info("provider selected",
-		"key", key,
-		"apiBase", p.APIBase,
-		"apiType", p.APIType,
+		"key", key, "apiBase", p.APIBase, "apiType", p.APIType,
 		"defaultModel", defaultModel,
 	)
 	return provider.NewProvider(p.APIKey, p.APIBase, p.APIType)
@@ -306,18 +410,16 @@ func providerKeyList(m map[string]config.ProviderConfig) []string {
 	return keys
 }
 
-// userSpaceRegistry is a thread-safe lazy-loaded map of user spaces owned by
-// the gateway. The "local" user is preloaded at gateway startup and is NEVER
-// evicted; other users are loaded on first request and evicted after an idle
-// period to free memory when they stop chatting.
+// userSpaceRegistry is a thread-safe lazy-loaded map of user spaces. There
+// are no preloaded / pinned spaces; every user is loaded on first auth and
+// evicted after idleTTL of inactivity.
 type userSpaceRegistry struct {
 	mu        sync.RWMutex
 	spaces    map[string]*userSpaceEntry
 	bus       *bus.MessageBus
-	store     store.Store     // optional DB store for sessions/memory
-	workspace workspace.Store // optional blob store for generated artifacts
-	idleTTL   time.Duration   // how long before an idle user is evicted (0 = never)
-	pinned    map[string]bool // user IDs that must never be evicted (e.g. "local")
+	store     store.Store
+	workspace workspace.Store
+	idleTTL   time.Duration
 }
 
 type userSpaceEntry struct {
@@ -325,28 +427,16 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
-func newUserSpaceRegistry(mb *bus.MessageBus, st ...store.Store) *userSpaceRegistry {
-	reg := &userSpaceRegistry{
-		spaces:  make(map[string]*userSpaceEntry),
-		bus:     mb,
-		idleTTL: 30 * time.Minute,
-		pinned:  make(map[string]bool),
+func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store) *userSpaceRegistry {
+	return &userSpaceRegistry{
+		spaces:    make(map[string]*userSpaceEntry),
+		bus:       mb,
+		store:     st,
+		workspace: ws,
+		idleTTL:   30 * time.Minute,
 	}
-	if len(st) > 0 && st[0] != nil {
-		reg.store = st[0]
-	}
-	return reg
 }
 
-// put stores a preloaded user space that is pinned (never evicted).
-func (r *userSpaceRegistry) put(space *UserSpace) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.spaces[space.UserID] = &userSpaceEntry{space: space, lastUsed: time.Now()}
-	r.pinned[space.UserID] = true
-}
-
-// get returns a user space if already loaded, refreshing its last-used time.
 func (r *userSpaceRegistry) get(userID string) (*UserSpace, bool) {
 	r.mu.RLock()
 	e, ok := r.spaces[userID]
@@ -354,28 +444,23 @@ func (r *userSpaceRegistry) get(userID string) (*UserSpace, bool) {
 	if !ok {
 		return nil, false
 	}
-	// Touch under write lock (cheap: just a time assignment).
 	r.mu.Lock()
 	e.lastUsed = time.Now()
 	r.mu.Unlock()
 	return e.space, true
 }
 
-// getOrLoad returns the user space for a given user, loading it on first
-// access and refreshing the idle timer on subsequent accesses.
-func (r *userSpaceRegistry) getOrLoad(userID string) (*UserSpace, error) {
+func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*UserSpace, error) {
 	if sp, ok := r.get(userID); ok {
 		return sp, nil
 	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if e, ok := r.spaces[userID]; ok {
 		e.lastUsed = time.Now()
 		return e.space, nil
 	}
-
-	sp, err := loadUserSpace(userID, r.bus, r.store, r.workspace)
+	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +468,15 @@ func (r *userSpaceRegistry) getOrLoad(userID string) (*UserSpace, error) {
 	return sp, nil
 }
 
-// all returns a snapshot of all loaded user spaces.
+// invalidate drops a user's space so the next access reloads it. Used after
+// admin mutations (creating an agent, rotating a provider, etc.) so the
+// in-memory copy doesn't lag behind the DB.
+func (r *userSpaceRegistry) invalidate(userID string) {
+	r.mu.Lock()
+	delete(r.spaces, userID)
+	r.mu.Unlock()
+}
+
 func (r *userSpaceRegistry) all() []*UserSpace {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -394,9 +487,6 @@ func (r *userSpaceRegistry) all() []*UserSpace {
 	return out
 }
 
-// evictIdle removes user spaces that have been idle longer than idleTTL.
-// Pinned spaces (e.g. "local") are never evicted. Call periodically from a
-// background goroutine.
 func (r *userSpaceRegistry) evictIdle() int {
 	if r.idleTTL <= 0 {
 		return 0
@@ -406,9 +496,6 @@ func (r *userSpaceRegistry) evictIdle() int {
 	cutoff := time.Now().Add(-r.idleTTL)
 	evicted := 0
 	for uid, e := range r.spaces {
-		if r.pinned[uid] {
-			continue
-		}
 		if e.lastUsed.Before(cutoff) {
 			delete(r.spaces, uid)
 			evicted++
@@ -419,8 +506,6 @@ func (r *userSpaceRegistry) evictIdle() int {
 	return evicted
 }
 
-// startEvictor runs a background loop that periodically evicts idle user
-// spaces. Stops when ctx is cancelled.
 func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
 	if r.idleTTL <= 0 {
 		return

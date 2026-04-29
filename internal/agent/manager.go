@@ -106,7 +106,7 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 
 	m.uid = m.opts.userID
 	if m.uid == "" {
-		m.uid = config.DefaultUserID
+		return nil, fmt.Errorf("agent.NewManager: WithUserID is required")
 	}
 	for _, rc := range resolved {
 		ag := m.buildAgent(rc, prov, mb)
@@ -156,6 +156,10 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// store as memory so write_file from the agent ends up in
 		// the same rows the admin UI's Customize page reads.
 		ag.registry.SetSystemFileStore(m.opts.memoryStore, rc.ID)
+		// Tag identity-file writes with the chatter so write_file on
+		// SOUL.md / USER.md / MEMORY.md lands in the per-user override
+		// row, not the shared template the Customize page edits.
+		ag.registry.SetOwnerUserID(m.uid)
 	}
 	if m.opts.workspaceStore != nil {
 		ag.registry.SetWorkspaceStore(m.opts.workspaceStore, rc.ID)

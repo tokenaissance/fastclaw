@@ -292,7 +292,7 @@ func (cb *ContextBuilder) loadFile(name string) string {
 	// Per-agent only — store row first, FS as legacy fallback for
 	// installs that predate the store-primary refactor.
 	if cb.store != nil {
-		data, err := cb.store.GetWorkspaceFile(cb.ctx(), cb.agentID, name)
+		data, err := cb.store.GetWorkspaceFile(cb.ctx(), cb.agentID, cb.userID, name)
 		if err == nil && len(data) > 0 {
 			return strings.TrimSpace(string(data))
 		}

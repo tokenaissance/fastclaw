@@ -47,17 +47,20 @@ type StoreInterface interface {
 	UpdateCronJobRun(ctx context.Context, jobID string, lastRun, nextRun time.Time) error
 }
 
-// StoreJob mirrors store.CronJobRecord to avoid import cycle.
+// StoreJob mirrors store.CronJobRecord to avoid import cycle. The fired
+// job carries OwnerUserID resolved by the adapter (= agents.owner_user_id
+// for the row's agent_id) so processInbound can route into the right
+// user space.
 type StoreJob struct {
-	ID       string
-	UserID   string // owning fastclaw user
-	AgentID  string
-	Name     string
-	Type     string
-	Schedule string
-	Message  string
-	Channel  string
-	ChatID   string
+	ID          string
+	AgentID     string
+	OwnerUserID string
+	Name        string
+	Type        string
+	Schedule    string
+	Message     string
+	Channel     string
+	ChatID      string
 }
 
 // Scheduler manages cron job execution.
@@ -77,6 +80,19 @@ func NewScheduler(jobs []Job, mb *bus.MessageBus) *Scheduler {
 	return &Scheduler{
 		jobs:       jobs,
 		bus:        mb,
+		instanceID: "default",
+	}
+}
+
+// NewSchedulerFromStore returns a scheduler that polls the DB for due
+// jobs on every tick — no in-memory job list. Each fired job carries its
+// owning user_id (StoreJob.UserID) so processInbound can route into the
+// right user space.
+func NewSchedulerFromStore(st StoreInterface, mb *bus.MessageBus) *Scheduler {
+	return &Scheduler{
+		jobs:       nil,
+		bus:        mb,
+		store:      st,
 		instanceID: "default",
 	}
 }
@@ -169,7 +185,7 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 			Channel:     j.Channel,
 			ChatID:      j.ChatID,
 			UserID:      "cron",
-			OwnerUserID: j.UserID,
+			OwnerUserID: j.OwnerUserID,
 			Text:        text,
 			PeerKind:    "dm",
 		}

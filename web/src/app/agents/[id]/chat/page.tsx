@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
+import { getAgents, getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -255,6 +255,7 @@ export default function AgentChatPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [selectedAgent] = useState(() => getAgentIdFromURL());
+  const [agentName, setAgentName] = useState<string>("");
   const [sessionId, setSessionId] = useState<string>(() => searchParams.get("session") || generateSessionId());
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -282,6 +283,26 @@ export default function AgentChatPage() {
   useEffect(() => {
     getSkills().then(setSkills).catch(() => setSkills([]));
   }, []);
+
+  // Resolve the agent's display name once. The chat title and any
+  // future header bits should show "Chat with My Helper", not the
+  // opaque agt_xxx id.
+  useEffect(() => {
+    if (!selectedAgent) return;
+    let aborted = false;
+    getAgents()
+      .then((list) => {
+        if (aborted) return;
+        const me = list.find((a) => a.id === selectedAgent);
+        setAgentName(me?.name || me?.id || selectedAgent);
+      })
+      .catch(() => {
+        if (!aborted) setAgentName(selectedAgent);
+      });
+    return () => {
+      aborted = true;
+    };
+  }, [selectedAgent]);
 
   // Detect whether the caret is inside a /token and, if so, what's been
   // typed after the slash. Cheap enough to run every keystroke.
@@ -407,11 +428,11 @@ export default function AgentChatPage() {
     () => (
       <ChatHeaderTitle
         title={sessionTitle}
-        fallback={`Chat with ${selectedAgent}`}
+        fallback={`Chat with ${agentName || selectedAgent}`}
         onSave={handleRenameTitle}
       />
     ),
-    [sessionTitle, selectedAgent, handleRenameTitle],
+    [sessionTitle, agentName, selectedAgent, handleRenameTitle],
   );
   usePageHeader(headerSlot, [headerSlot]);
 
@@ -738,15 +759,45 @@ export default function AgentChatPage() {
       // brief "Stopped" line so they see the cancellation took effect,
       // not a generic failure message.
       const isAbort = err instanceof DOMException && err.name === "AbortError";
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `e-${Date.now()}`,
-          role: "agent",
-          content: isAbort ? "(Stopped)" : "Failed to get a response. Is the gateway running?",
-          timestamp: Date.now(),
-        },
-      ]);
+      // Surface the underlying error in DevTools so future "Failed to
+      // get a response" reports come with a concrete cause (network,
+      // parse, post-turn fetch, …) rather than the generic message.
+      if (typeof console !== "undefined") {
+        console.error("[chat] handleSend error", err);
+      }
+      // Keyboard-stack abort + post-stream tear-down can both throw an
+      // AbortError after a successful turn (the SSE reader is
+      // released on `done`, then a stray reader.cancel() races with a
+      // late server EOF and surfaces as one). Both look identical to
+      // user-pressed-Stop here, so we additionally suppress the
+      // toast when at least one agent reply already landed for this
+      // turn — the user just got their answer; we shouldn't tack on
+      // a confusing failure bubble.
+      if (isAbort) {
+        setMessages((prev) => [
+          ...prev,
+          { id: `e-${Date.now()}`, role: "agent", content: "(Stopped)", timestamp: Date.now() },
+        ]);
+      } else {
+        setMessages((prev) => {
+          const lastUser = [...prev].reverse().findIndex((m) => m.role === "user");
+          if (lastUser >= 0) {
+            const replyAfter = prev
+              .slice(prev.length - lastUser)
+              .some((m) => m.role === "agent" || m.role === "tool-group");
+            if (replyAfter) return prev; // turn already produced output
+          }
+          return [
+            ...prev,
+            {
+              id: `e-${Date.now()}`,
+              role: "agent",
+              content: "Failed to get a response. Is the gateway running?",
+              timestamp: Date.now(),
+            },
+          ];
+        });
+      }
     } finally {
       abortRef.current = null;
       setSending(false);
@@ -861,7 +912,7 @@ export default function AgentChatPage() {
                   <Bot className="h-8 w-8 text-muted-foreground" />
                 </div>
                 <p className="text-lg font-medium mb-1">
-                  Chat with {selectedAgent || "your agent"}
+                  Chat with {agentName || selectedAgent || "your agent"}
                 </p>
                 <p className="text-sm text-muted-foreground">
                   Send a message to start a conversation
@@ -964,7 +1015,17 @@ export default function AgentChatPage() {
                         </div>
                       )}
                       {msg.content && (
-                        <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
+                        <div
+                          className={`text-[15px] leading-relaxed prose prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 ${
+                            // User bubble always sits on bg-primary, so prose
+                            // must always invert to stay readable — without
+                            // this the default prose-gray text renders dark
+                            // on the orange bubble in light mode.
+                            msg.role === "user"
+                              ? "prose-invert"
+                              : "dark:prose-invert"
+                          }`}
+                        >
                           {renderContentWithDataImages(
                             msg.content,
                             surfacedSrcs,
@@ -1086,7 +1147,7 @@ export default function AgentChatPage() {
                   onBlur={() => setTimeout(() => setSlashOpen(false), 120)}
                   placeholder={
                     selectedAgent
-                      ? `Message ${selectedAgent}... ("/" to pick a skill)`
+                      ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
                       : "Select an agent first"
                   }
                   disabled={!selectedAgent || sending}

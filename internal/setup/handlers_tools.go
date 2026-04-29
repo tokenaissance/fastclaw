@@ -123,10 +123,7 @@ func (s *Server) handleGetTools(w http.ResponseWriter, r *http.Request) {
 // get their own settings via a separate path (not wired yet). After save,
 // running agents are hot-reloaded so chains pick up new keys immediately.
 func (s *Server) handleSaveTools(w http.ResponseWriter, r *http.Request) {
-	if config.UserIDFromContext(r.Context()) != config.DefaultUserID {
-		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "tool settings are admin-managed"})
-		return
-	}
+	// requireSuperAdmin middleware already gates this route; no further check needed.
 	var req struct {
 		ToolProviders map[string]config.ToolProviderCfg `json:"toolProviders"`
 		Tools         map[string]config.ToolCategoryCfg `json:"tools"`
@@ -151,11 +148,9 @@ func (s *Server) handleSaveTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Nudge every running agent to re-read the config on the next turn. A
-	// full agent reload would also reset chat state, so we keep it light.
-	if s.agentProvider != nil {
-		_ = s.agentProvider.ReloadAgents()
-	}
+	// Nudge the resolver to drop the caller's cached user space; next
+	// access reloads it from the DB with the new tool/provider config.
+	s.invalidateUser(s.effectiveUserID(r))
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 

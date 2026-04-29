@@ -7,6 +7,7 @@ import { Save, Check, Loader2, RotateCcw } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
+import { useAgentName } from "@/hooks/use-agent-name";
 
 const CUSTOMIZE_FILES = [
   { name: "SOUL.md", label: "Soul" },
@@ -27,6 +28,7 @@ type FileState = { content: string; source: FileSource; baseContent?: string };
 
 export default function AgentCustomizePage() {
   const agentId = useAgentIdFromURL();
+  const agentName = useAgentName(agentId);
   const [activeTab, setActiveTab] = useState("SOUL.md");
   const [files, setFiles] = useState<Record<string, FileState>>({});
   const [loading, setLoading] = useState(true);
@@ -128,7 +130,7 @@ export default function AgentCustomizePage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Customize</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Personality, memory, and behavior files for <strong>{agentId}</strong>
+            Personality, memory, and behavior files for <strong>{agentName}</strong>
           </p>
         </div>
         <div className="flex gap-2">

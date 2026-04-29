@@ -38,11 +38,7 @@ func skillListCmd() *cobra.Command {
 				return err
 			}
 
-			cfg, _ := config.Load()
 			var globalCfg config.SkillsCfg
-			if cfg != nil {
-				globalCfg = cfg.Skills
-			}
 
 			loader := agent.NewSkillsLoaderWithGlobal(homeDir, ".", "", config.SkillsConfig{}, globalCfg)
 			loaded := loader.LoadSkills()

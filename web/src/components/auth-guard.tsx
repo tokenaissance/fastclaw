@@ -2,8 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { isLoggedIn, logout } from "@/lib/auth";
-import { apiFetch } from "@/lib/api";
+import { getMe } from "@/lib/api";
 import { LoginScreen } from "./login-screen";
 
 interface AuthGuardProps {
@@ -18,64 +17,45 @@ export function AuthGuard({ children }: AuthGuardProps) {
 
   useEffect(() => {
     let aborted = false;
-
     (async () => {
-      // Step 1: ask whether the system is configured. /api/status is the
-      // unauthenticated public probe — when configured=false there is no
-      // admin token to validate yet, so showing LoginScreen here would be
-      // a dead end (the user has nothing to type). Send them to /onboard
-      // instead, which is what RootPage would do if we let it render.
+      // Decide between three states:
+      //   - users table empty → /onboard
+      //   - users exist, caller has a session → render children
+      //   - users exist, caller has no session → show LoginScreen
       let configured = false;
       try {
-        const res = await fetch("/api/status");
+        const res = await fetch("/api/status", { credentials: "same-origin" });
         if (res.ok) {
           const status = await res.json();
           configured = !!status.configured;
         }
       } catch {
-        // network/server down — fall through to the LoginScreen path so
-        // the existing "Cannot reach server" UX applies.
+        // server down — fall through to LoginScreen
       }
       if (aborted) return;
 
       if (!configured) {
-        // Drop any stale token from a prior install so we don't carry it
-        // into the new onboarding session.
-        logout();
         const onOnboard = pathname === "/onboard" || pathname.startsWith("/onboard/");
         if (!onOnboard) {
           router.replace("/onboard/");
           return;
         }
-        // Already on the onboard route — render children so the wizard
-        // can run. checked stays false → spinner during the redirect.
         setAuthed(true);
         setChecked(true);
         return;
       }
 
-      // Step 2: configured — validate the token by hitting an auth-required
-      // endpoint. Even when a token is present in localStorage it may be
-      // stale (left over from a prior deployment or rotated admin token)
-      // and every subsequent API call would 401.
       try {
-        const probe = isLoggedIn()
-          ? await apiFetch("/api/config")
-          : await fetch("/api/config");
-        if (probe.ok) {
+        const me = await getMe();
+        if (me.ok) {
           setAuthed(true);
-        } else if (probe.status === 401) {
-          logout();
         }
       } catch {
         // network failure — fall through to LoginScreen
       }
       if (!aborted) setChecked(true);
     })();
-
-    return () => {
-      aborted = true;
-    };
+    return () => { aborted = true; };
   }, [router, pathname]);
 
   if (!checked) {
@@ -85,10 +65,8 @@ export function AuthGuard({ children }: AuthGuardProps) {
       </div>
     );
   }
-
   if (!authed) {
     return <LoginScreen onSuccess={() => setAuthed(true)} />;
   }
-
   return <>{children}</>;
 }

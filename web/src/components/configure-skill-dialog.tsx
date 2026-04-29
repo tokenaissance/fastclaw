@@ -17,6 +17,7 @@ import {
   type SkillInfo,
   type SkillEnvSpec,
 } from "@/lib/api";
+import { useAgentName } from "@/hooks/use-agent-name";
 
 // SkillEntryView is what the masked GET /api/config response carries
 // for a single skill entry. apiKey + env values come back as "***" so
@@ -58,6 +59,8 @@ export function ConfigureSkillDialog({
   const [customRows, setCustomRows] = useState<{ name: string; value: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const agentName = useAgentName(agentId || "");
 
   const declaredSpec: SkillEnvSpec[] = skill?.envSpec || [];
   const declaredNames = new Set(declaredSpec.map((s) => s.name));
@@ -126,7 +129,7 @@ export function ConfigureSkillDialog({
           <DialogDescription>
             {agentId ? (
               <>
-                Per-agent override for <code className="font-mono">{agentId}</code>.
+                Per-agent override for <strong>{agentName}</strong>.
                 Falls back to the global value when a field is empty here.
                 Other agents are unaffected.
               </>

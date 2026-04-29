@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
@@ -72,8 +73,9 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 // these up at the highest precedence — they're exclusive to the agent.
 func (s *Server) handleListAgentSkills(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	ident, ok := auth.FromContext(r.Context())
+	if !ok || !ident.CanAccessAgent(id) {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
 		return
 	}
 	homePath, err := config.AgentHomeDir(id)
@@ -162,8 +164,9 @@ func scanSkillsDir(dir string) []map[string]any {
 func (s *Server) handleDeleteAgentSkill(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	name := r.PathValue("name")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	ident, ok := auth.FromContext(r.Context())
+	if !ok || !ident.CanAccessAgent(id) {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
 		return
 	}
 	homePath, err := config.AgentHomeDir(id)
@@ -184,10 +187,8 @@ func (s *Server) handleDeleteAgentSkill(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	// Hot-reload the agent so the removed skill drops out of its context.
-	if s.agentProvider != nil {
-		if ag := s.agentProvider.AgentByID(id); ag != nil {
-			ag.ReloadWorkspaceFiles()
-		}
+	if ag := s.resolveAgent(r, id); ag != nil {
+		ag.ReloadWorkspaceFiles()
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }

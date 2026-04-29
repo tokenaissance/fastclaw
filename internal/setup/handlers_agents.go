@@ -2,662 +2,478 @@ package setup
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
-	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/users"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
-// Agent name is a public identifier used in URLs and bot handles, so it must
-// be URL-safe and globally unique. 3–32 chars, lowercase letters/digits/hyphens,
-// cannot start with a hyphen.
-var agentNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{2,31}$`)
+// agentScopeModel reads the per-agent model override from the configs
+// table — the kind=setting, scope=agent row that supersedes the
+// system/user defaults when set.
+func (s *Server) agentScopeModel(r *http.Request, agentID string) string {
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, store.ScopeAgent, agentID, "agents.defaults")
+	if err != nil || rec == nil {
+		return ""
+	}
+	if v, ok := rec.Data["model"].(string); ok {
+		return v
+	}
+	return ""
+}
 
-const defaultBootstrap = `This is your first conversation with the user. Your SOUL.md, IDENTITY.md, and USER.md are all empty — you have no name, no personality, and no information about the user yet.
+// saveAgentScopeModel upserts (model="") or deletes (model=="") the
+// agent-scope agents.defaults row.
+func (s *Server) saveAgentScopeModel(r *http.Request, agentID, model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return scope.SaveSetting(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", nil)
+	}
+	return scope.SaveSetting(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", map[string]interface{}{"model": model})
+}
 
-On the user's first message (regardless of what it is), do NOT answer it directly. Instead:
+// effectiveUserID returns the resolved user_id for the request: the
+// caller's own id, or — for super_admin in actAs mode — the impersonated
+// user's id.
+func (s *Server) effectiveUserID(r *http.Request) string {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		return ""
+	}
+	return ident.EffectiveUserID()
+}
 
-1. Briefly greet the user and let them know you're a fresh agent that needs a bit of setup.
-2. Ask 2-3 short questions in a warm, conversational tone (not a form):
-   - What should the user call you? (your agent name)
-   - How should you address the user? (their preferred name)
-   - What role / personality do they want you to have?
-
-When the user answers, use the write_file tool to save each piece of information in exactly one file. **Do not repeat the same sentence or phrase across files** — each file has a strictly different purpose:
-
-- ` + "`IDENTITY.md`" + ` — the agent's NAME and ROLE. One or two short lines, no personality or tone words. Example:
-  "# Identity\n\nYour name is {agent_name}. You are a {role — e.g. podcast creation assistant}."
-
-- ` + "`SOUL.md`" + ` — HOW the agent behaves: tone, communication style, quirks, values, what it cares about. **Must NOT** repeat the name or the role from IDENTITY.md. Describes behavior, not identity. Example if the user said "be playful and blunt":
-  "# Soul\n\n- Tone: playful and blunt — skip pleasantries, say what you think.\n- Keep replies short; ask clarifying questions instead of guessing.\n- Prefer concrete examples over abstract advice."
-  If the user only gave a role ("厉害的助理", "啥都能干") without any tone/personality hints, do NOT paraphrase the role into SOUL.md — instead write sensible defaults (e.g. concise, helpful, low-ceremony tone) or briefly ask one follow-up question about how they'd like you to talk.
-
-- ` + "`USER.md`" + ` — facts about the USER only. Example:
-  "# User\n\nPreferred name: {user_name}." (add any other details they share, like role or working language)
-
-After saving all three, overwrite this BOOTSTRAP.md with a single blank line via write_file so the setup instructions stop appearing in future conversations. Then acknowledge the setup and proceed with whatever the user originally asked (if anything actionable).
-
-Keep the exchange short. Don't lecture, don't dump a list of options — ask, listen, write files, move on.
-`
-
-// --- Agent Management ---
+// requireWritable returns true if the caller may mutate, writing a 4xx
+// response and false otherwise.
+func (s *Server) requireWritable(w http.ResponseWriter, r *http.Request) bool {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return false
+	}
+	if ident.ReadOnly() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "read-only"})
+		return false
+	}
+	return true
+}
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.loadUserConfig(r)
+	uid := s.effectiveUserID(r)
+	if uid == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	records, err := s.dataStore.ListAgents(r.Context(), uid)
 	if err != nil {
-		cfg = &config.Config{}
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
 	}
-	caller := callerFrom(r)
-	// In multi-pod / cloud deploys not every agent has a directory on the
-	// pod that's serving this request — the canonical list lives in the
-	// dataStore. Supplement filesystem discovery with store IDs so the
-	// admin UI shows every agent regardless of which pod wrote it.
-	var storeAgents []config.AgentEntry
-	if s.dataStore != nil {
-		if records, lerr := s.dataStore.ListAgents(r.Context()); lerr == nil {
-			for _, ar := range records {
-				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
-			}
-		}
-	}
-	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgents)
-	var agents []map[string]any
-	for _, ra := range resolved {
-		// API-key callers only see agents bound to their key; admins see all.
-		if !s.canAccessAgent(caller, ra.ID) {
-			continue
-		}
-		soul := ""
-		if data, readErr := s.readIdentityFile(r.Context(), ra.ID, "SOUL.md"); readErr == nil {
-			soul = string(data)
-		}
-		owner := ""
-		if s.agentBindings != nil {
-			owner = s.agentBindings.OwnerOf(ra.ID)
-		}
-		agents = append(agents, map[string]any{
-			"id":                ra.ID,
-			"model":             ra.Model,
-			"home":              ra.Home,
-			"workspace":         ra.Workspace,
-			"maxTokens":         ra.MaxTokens,
-			"temperature":       ra.Temperature,
-			"maxToolIterations": ra.MaxToolIterations,
-			"thinking":          ra.Thinking,
-			"soul":              soul,
-			"apiKeyId":          owner, // "" means admin-owned
+	out := make([]map[string]any, 0, len(records))
+	for _, ar := range records {
+		desc, _ := ar.Config["description"].(string)
+		out = append(out, map[string]any{
+			"id":          ar.ID,
+			"name":        ar.Name,
+			"description": desc,
+			"model":       s.agentScopeModel(r, ar.ID),
+			"avatarUrl":   "/api/agents/" + ar.ID + "/files/avatar.png",
+			"createdAt":   ar.CreatedAt,
 		})
 	}
-	if agents == nil {
-		agents = []map[string]any{}
-	}
-	jsonResponse(w, http.StatusOK, agents)
+	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
+}
+
+type createAgentRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Model       string `json:"model,omitempty"`
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
+	if !s.requireWritable(w, r) {
+		return
 	}
+	uid := s.effectiveUserID(r)
+	var req createAgentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if req.ID == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent name is required"})
+	if req.Name == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "name required"})
 		return
 	}
-	if !agentNameRE.MatchString(req.ID) {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent name must be 3–32 chars, lowercase letters, digits or hyphens, and cannot start with a hyphen"})
+	id, err := generateID("agt_")
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-
-	// Duplicate check goes through the Store so multi-pod deployments don't
-	// race on a stat() that another pod's filesystem doesn't reflect. The
-	// FS-only fallback (for store-less wizard mode, which is going away) was
-	// `os.Stat(AgentHomeDir(req.ID))`.
-	if s.dataStore != nil {
-		if existing, err := s.dataStore.GetAgent(r.Context(), req.ID); err == nil && existing != nil {
-			jsonResponse(w, http.StatusConflict, map[string]any{"ok": false, "error": fmt.Sprintf("agent name %q is already taken", req.ID)})
+	rec := &store.AgentRecord{
+		ID:     id,
+		UserID: uid,
+		Name:   req.Name,
+	}
+	if req.Description != "" {
+		// Description lives in the agents.config JSON blob — keeps the
+		// schema stable while still surfacing through GetAgentConfig and
+		// the agents.config namespace settings overlay.
+		rec.Config = map[string]interface{}{"description": req.Description}
+	}
+	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if req.Model != "" {
+		if err := s.saveAgentScopeModel(r, id, req.Model); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
 	}
+	s.invalidateUser(uid)
+	jsonResponse(w, http.StatusCreated, map[string]any{
+		"agent": map[string]any{
+			"id":     rec.ID,
+			"userId": rec.UserID,
+			"name":   rec.Name,
+			"model":  req.Model,
+			"config": rec.Config,
+		},
+	})
+}
 
-	// Identity files go through the Store. With DBStore, this writes to
-	// `workspace_files` rows; with FileStore, it writes to
-	// ~/.fastclaw/agents/<id>/agent/ — and FileStore.SaveWorkspaceFile
-	// MkdirAlls the parent. So neither mode needs us to pre-create dirs.
-	_ = s.writeIdentityFile(r.Context(), req.ID, "SOUL.md", nil) // empty; agent fills during BOOTSTRAP
-	_ = s.writeIdentityFile(r.Context(), req.ID, "BOOTSTRAP.md", []byte(defaultBootstrap))
-
-	// Per-agent overrides (model/skills/providers/...) live in the
-	// `agents.config` column, not workspace_files — see saveAgentFileConfig.
-	_ = s.saveAgentFileConfig(r.Context(), req.ID, &config.AgentFileConfig{Model: req.Model})
-
-	// Record the agent in the Store so other pods can discover it.
-	if s.dataStore != nil {
-		_ = s.dataStore.SaveAgent(r.Context(), &store.AgentRecord{
-			ID:        req.ID,
-			Name:      req.ID,
-			Model:     req.Model,
-			CreatedAt: time.Now().UTC(),
-			UpdatedAt: time.Now().UTC(),
-		})
+// requireAgentOwner returns the agent record if the caller owns it (or is
+// super_admin), otherwise writes a 403/404 and returns nil.
+func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agentID string) *store.AgentRecord {
+	uid := s.effectiveUserID(r)
+	rec, err := s.dataStore.GetAgent(r.Context(), agentID)
+	if err != nil || rec == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return nil
 	}
-
-	// Auto-bind the new agent to the caller's API key. Admin-created agents
-	// stay unbound (admin-owned by default). This is what makes API-key
-	// holders able to create their own agents without seeing others'.
-	caller := callerFrom(r)
-	if caller.Kind == callerAPIKey && s.agentBindings != nil {
-		s.agentBindings.Bind(req.ID, caller.APIKeyID)
-		if err := s.agentBindings.Save(); err != nil {
-			slog.Warn("failed to save agent binding", "agent", req.ID, "apiKey", caller.APIKeyID, "error", err)
-		}
+	ident, _ := auth.FromContext(r.Context())
+	if rec.UserID != uid && ident.Role != users.RoleSuperAdmin {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
+		return nil
 	}
-
-	// Load the new agent into the running gateway so chat requests see it.
-	if s.agentProvider != nil {
-		if err := s.agentProvider.ReloadAgents(); err != nil {
-			slog.Warn("failed to reload agents after create", "id", req.ID, "error", err)
-		}
-	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+	return rec
 }
 
 func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
 	id := r.PathValue("id")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	rec := s.requireAgentOwner(w, r, id)
+	if rec == nil {
 		return
 	}
 	var req struct {
-		Model     string                            `json:"model"`
-		Soul      string                            `json:"soul"`
-		Skills    *config.SkillsConfig              `json:"skills,omitempty"`
-		Providers *map[string]config.ProviderConfig `json:"providers,omitempty"`
+		Name        string  `json:"name,omitempty"`
+		Description *string `json:"description,omitempty"` // ptr so empty-string clears it
+		Model       string  `json:"model,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-
-	// Update home files directly.
-	homePath, _ := config.AgentHomeDir(id)
-	if _, err := os.Stat(homePath); err != nil {
-		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "agent not found"})
+	if req.Name != "" {
+		rec.Name = req.Name
+	}
+	if req.Description != nil {
+		if rec.Config == nil {
+			rec.Config = map[string]interface{}{}
+		}
+		if *req.Description == "" {
+			delete(rec.Config, "description")
+		} else {
+			rec.Config["description"] = *req.Description
+		}
+	}
+	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-
-	if req.Soul != "" {
-		_ = s.writeIdentityFile(r.Context(), id, "SOUL.md", []byte(req.Soul))
-	}
-
-	// Model / skills / providers live in `agents.config`. Read-modify-write
-	// so updating one field doesn't clobber the others (prior implementation
-	// overwrote the whole row when only `model` changed, silently dropping
-	// skills / tools / MCP config).
-	if req.Model != "" || req.Skills != nil || req.Providers != nil {
-		existing, _ := s.loadAgentFileConfig(r.Context(), id)
-		agentCfg := *existing // dereference, may be zero-value
-		if req.Model != "" {
-			agentCfg.Model = req.Model
-		}
-		if req.Skills != nil {
-			agentCfg.Skills = *req.Skills
-		}
-		if req.Providers != nil {
-			// Whole-map replace (incl. empty-map to clear all per-agent
-			// providers). Callers that want surgical update should merge
-			// on the client side and PUT the full map.
-			agentCfg.Providers = *req.Providers
-		}
-		_ = s.saveAgentFileConfig(r.Context(), id, &agentCfg)
-	}
-
-	if s.agentProvider != nil {
-		if err := s.agentProvider.ReloadAgents(); err != nil {
-			slog.Warn("failed to reload agents after update", "id", id, "error", err)
+	// Per-agent model override is its own configs row now. Empty string
+	// means "no change" (matches the original column-write semantics);
+	// to clear an existing override the caller must explicitly hit the
+	// scoped settings endpoint with an empty value.
+	if req.Model != "" {
+		if err := s.saveAgentScopeModel(r, rec.ID, req.Model); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
 		}
 	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+	s.invalidateUser(rec.UserID)
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"agent": map[string]any{
+			"id":     rec.ID,
+			"userId": rec.UserID,
+			"name":   rec.Name,
+			"model":  s.agentScopeModel(r, rec.ID),
+			"config": rec.Config,
+		},
+	})
 }
 
-// handleGetAgentConfig returns the raw agent.json contents for a single
-// agent. Used by the admin UI's per-agent model / skills pages, which need
-// current per-agent overrides (not the merged resolved config).
 func (s *Server) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	rec := s.requireAgentOwner(w, r, id)
+	if rec == nil {
 		return
 	}
-	homePath, _ := config.AgentHomeDir(id)
-	if _, err := os.Stat(homePath); err != nil {
-		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "agent not found"})
-		return
+	cfg := config.AgentFileConfig{}
+	if len(rec.Config) > 0 {
+		blob, _ := json.Marshal(rec.Config)
+		_ = json.Unmarshal(blob, &cfg)
 	}
-	cfg, _ := s.loadAgentFileConfig(r.Context(), id)
 	jsonResponse(w, http.StatusOK, cfg)
 }
 
-// systemFileNames is the allowlist of agent metadata files that the admin UI
-// can read and write through the system-files endpoints. Keeping it closed
-// ensures arbitrary paths can't be written into the agent home directory.
-var systemFileNames = map[string]bool{
-	"SOUL.md":      true,
-	"IDENTITY.md":  true,
-	"USER.md":      true,
-	"BOOTSTRAP.md": true,
-	"MEMORY.md":    true,
-	"HEARTBEAT.md": true,
-	"AGENTS.md":    true,
-	"TOOLS.md":     true,
+func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	rec := s.requireAgentOwner(w, r, id)
+	if rec == nil {
+		return
+	}
+	if err := s.dataStore.DeleteAgent(r.Context(), id); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	s.invalidateUser(rec.UserID)
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleGetAgentSystemFile reads one of the agent's identity/metadata files
-// (SOUL.md, IDENTITY.md, ...) and reports its source. The runtime treats DB
-// rows as overrides on top of an FS base shipped with the agent definition,
-// so the UI needs to distinguish:
-//
-//   - source="db":      a non-empty DB override exists; baseContent (if any)
-//                       is the FS file the user could revert to.
-//   - source="fs":      no DB override; content comes from the FS base.
-//   - source="default": nothing on disk or in DB; tab is empty.
-//
-// Reading both sources independently here (instead of going through
-// readIdentityFile which already does fallback) is what lets the UI render
-// "Edited" / "From repo" badges and a meaningful Revert action.
+// Agent identity / memory files — all live in agent_files, agent-scoped.
+// Filename allowlist gates which files the admin UI can edit through this
+// endpoint; agent-runtime tool calls go through the workspace store
+// instead.
+var agentSystemFileAllowlist = map[string]bool{
+	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
+	"BOOTSTRAP.md": true, "TOOLS.md": true, "MEMORY.md": true,
+	"HEARTBEAT.md": true, "USER.md": true, "agent.json": true,
+}
+
 func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	name := r.PathValue("name")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	if !agentSystemFileAllowlist[name] {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	if !systemFileNames[name] {
-		http.Error(w, "unknown system file", http.StatusBadRequest)
-		return
-	}
-
-	var dbContent, fsContent string
-
-	if s.dataStore != nil {
-		if data, err := s.dataStore.GetWorkspaceFile(r.Context(), id, name); err == nil {
-			dbContent = string(data)
-		} else if !isStoreNotFound(err) {
-			http.Error(w, "read file", http.StatusInternalServerError)
+	data, err := s.dataStore.GetAgentFile(r.Context(), id, "", name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			jsonResponse(w, http.StatusOK, map[string]any{"content": ""})
 			return
 		}
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
 	}
-
-	if homePath, herr := config.AgentHomeDir(id); herr == nil {
-		if data, ferr := os.ReadFile(filepath.Join(homePath, name)); ferr == nil {
-			fsContent = string(data)
-		}
-	}
-
-	resp := map[string]any{}
-	switch {
-	case dbContent != "":
-		resp["content"] = dbContent
-		resp["source"] = "db"
-		if fsContent != "" {
-			resp["baseContent"] = fsContent
-		}
-	case fsContent != "":
-		resp["content"] = fsContent
-		resp["source"] = "fs"
-	default:
-		resp["content"] = ""
-		resp["source"] = "default"
-	}
-	jsonResponse(w, http.StatusOK, resp)
+	jsonResponse(w, http.StatusOK, map[string]any{"content": string(data)})
 }
 
-// handlePutAgentSystemFile writes content to one of the agent's metadata files.
-// Agent is reloaded so the new content takes effect for the next chat turn.
 func (s *Server) handlePutAgentSystemFile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	name := r.PathValue("name")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	if !agentSystemFileAllowlist[name] {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	if !systemFileNames[name] {
-		http.Error(w, "unknown system file", http.StatusBadRequest)
-		return
-	}
-	var req struct {
+	var body struct {
 		Content string `json:"content"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.writeIdentityFile(r.Context(), id, name, []byte(req.Content)); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+	if err := s.dataStore.SaveAgentFile(r.Context(), id, "", name, []byte(body.Content)); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if s.agentProvider != nil {
-		if err := s.agentProvider.ReloadAgents(); err != nil {
-			slog.Warn("failed to reload agents after system-file write", "id", id, "file", name, "error", err)
-		}
-	}
+	s.invalidateUser(s.effectiveUserID(r))
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleDeleteAgentSystemFile removes the DB override row for a system file,
-// reverting the agent to whatever FS base ships with its definition. If no
-// FS base exists, the tab simply becomes empty.
 func (s *Server) handleDeleteAgentSystemFile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	name := r.PathValue("name")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	if !agentSystemFileAllowlist[name] {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	if !systemFileNames[name] {
-		http.Error(w, "unknown system file", http.StatusBadRequest)
+	if err := s.dataStore.DeleteAgentFile(r.Context(), id, "", name); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.deleteIdentityFile(r.Context(), id, name); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-	if s.agentProvider != nil {
-		if err := s.agentProvider.ReloadAgents(); err != nil {
-			slog.Warn("failed to reload agents after system-file revert", "id", id, "file", name, "error", err)
-		}
-	}
+	s.invalidateUser(s.effectiveUserID(r))
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleAgentFileList returns the list of objects currently in the agent's
-// workspace. Used by the chat UI to show a "produced files" panel under
-// the final reply bubble — the frontend diffs a pre-turn snapshot against
-// the post-turn list to find files the turn just created or updated.
-// Identity files (SOUL.md, USER.md, …) are excluded — those live in the
-// system store, not the workspace, and shouldn't be offered as downloads.
+// Workspace files — list / get / upload of agent-produced artifacts.
+// Backed by the workspace.Store blob backend, whose layout is
+//
+//   workspaces/<agent_id>/<session_id>/<path>
+//
+// The HTTP file endpoints below operate at the agent-root level
+// (sessionID="") — that's where uploads land and where ListByAgent
+// returns objects across every session of that agent. The agent runtime
+// passes its own sessionID for in-chat tool calls; those land under the
+// session sub-prefix automatically.
+
 func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
-		return
-	}
 	if s.workspaceStore == nil {
-		// Legacy filesystem-only setups can't list through the store API;
-		// returning an empty list is fine — the UI just hides the panel.
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"files": []any{}})
+		jsonResponse(w, http.StatusOK, map[string]any{"files": []any{}})
 		return
 	}
-	// Admin browse: list everything under the agent regardless of session
-	// (sessionID=""). Paths come back with "sessions/<id>/" prefixes for
-	// session-scoped artifacts; the UI groups by that prefix.
-	objs, err := s.workspaceStore.List(r.Context(), id, "")
+	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+		return
+	}
+	objects, err := s.workspaceStore.List(r.Context(), id, "")
 	if err != nil {
-		http.Error(w, "list workspace: "+err.Error(), http.StatusInternalServerError)
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	type fileItem struct {
-		Path    string `json:"path"`
-		Size    int64  `json:"size"`
-		ModTime int64  `json:"modTime"`
+	files := make([]map[string]any, 0, len(objects))
+	for _, o := range objects {
+		files = append(files, map[string]any{
+			"name": o.Path,
+			"size": o.Size,
+			"mod":  o.ModTime,
+		})
 	}
-	files := make([]fileItem, 0, len(objs))
-	for _, o := range objs {
-		files = append(files, fileItem{Path: o.Path, Size: o.Size, ModTime: o.ModTime.UnixMilli()})
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"files": files})
+	jsonResponse(w, http.StatusOK, map[string]any{"files": files})
 }
 
-// handleAgentFile serves a file from the agent's workspace directory for
-// inline preview or download. The path is sanitized and must resolve inside
-// the workspace root — any attempt to escape is rejected with 403.
-// Add ?download=1 to force a download (Content-Disposition: attachment).
-// Goes through workspaceStore when configured — in S3 mode that's a
-// 302 redirect to a signed URL, letting the browser fetch directly from S3
-// without streaming the blob through the gateway pod. Falls back to direct
-// filesystem for backward-compat paths that predate the store abstraction.
 func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	relPath := r.PathValue("path")
-	if relPath == "" {
-		http.Error(w, "missing path", http.StatusBadRequest)
+	rel := r.PathValue("path")
+	if rel == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "path required"})
 		return
 	}
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	if rec := s.requireAgentOwner(w, r, id); rec == nil {
 		return
 	}
-
-	// When a WorkspaceStore is wired in, that is the canonical read path.
 	if s.workspaceStore != nil {
-		s.serveFileFromWorkspaceStore(w, r, id, relPath)
+		s.serveFileFromWorkspaceStore(w, r, id, rel)
 		return
 	}
-
-	// Legacy filesystem path (still used when no store is configured —
-	// mostly embedded tests and very old setups).
-	workRoot, err := config.AgentWorkspaceDir(id)
+	// Workspace store not configured — fall back to direct FS read.
+	// The local FS layout mirrors the workspace store's:
+	// ~/.fastclaw/workspaces/<agent_id>/<path>.
+	home, err := config.HomeDir()
 	if err != nil {
-		http.Error(w, "resolve workspace", http.StatusInternalServerError)
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	absRoot, err := filepath.Abs(workRoot)
-	if err != nil {
-		http.Error(w, "invalid workspace", http.StatusInternalServerError)
+	root := filepath.Join(home, "workspaces", id)
+	abs := filepath.Join(root, filepath.Clean("/"+rel))
+	if !strings.HasPrefix(abs, root+string(os.PathSeparator)) && abs != root {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "path escape"})
 		return
 	}
-	absFull, err := filepath.Abs(filepath.Join(absRoot, relPath))
-	if err != nil {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-	if absFull != absRoot && !strings.HasPrefix(absFull, absRoot+string(filepath.Separator)) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	info, err := os.Stat(absFull)
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	if info.IsDir() {
-		http.Error(w, "is a directory", http.StatusBadRequest)
-		return
-	}
-
-	if r.URL.Query().Get("download") == "1" {
-		filename := filepath.Base(absFull)
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filename))
-	}
-
-	// http.ServeFile handles Range requests, If-Modified-Since, and content type.
-	http.ServeFile(w, r, absFull)
+	http.ServeFile(w, r, abs)
 }
 
-// serveFileFromWorkspaceStore streams or redirects to the blob store. If the
-// backend can sign URLs (S3), redirect — the browser fetches straight from
-// the bucket, sparing the gateway pod bandwidth. Otherwise stream the body.
 func (s *Server) serveFileFromWorkspaceStore(w http.ResponseWriter, r *http.Request, agentID, path string) {
-	ctx := r.Context()
-	// Path may be agent-shared (e.g. "skills/foo/main.py") or session-
-	// scoped (e.g. "sessions/<sid>/report.png"). Either way the path the
-	// admin sees in List() is fully qualified relative to the agent root,
-	// so an empty sessionID lets resolvePath / scopePrefix reconstruct
-	// the correct on-disk / S3 location verbatim.
-	if url, err := s.workspaceStore.SignedURL(ctx, agentID, "", path, 10*time.Minute); err == nil {
-		http.Redirect(w, r, url, http.StatusFound)
-		return
-	}
-	info, err := s.workspaceStore.Stat(ctx, agentID, "", path)
+	rc, err := s.workspaceStore.Get(r.Context(), agentID, "", path)
 	if err != nil {
-		if err == workspace.ErrNotFound {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	rc, err := s.workspaceStore.Get(ctx, agentID, "", path)
-	if err != nil {
-		if err == workspace.ErrNotFound {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
 	defer rc.Close()
-	if info.ContentType != "" {
-		w.Header().Set("Content-Type", info.ContentType)
-	}
-	if info.Size > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size))
-	}
-	if r.URL.Query().Get("download") == "1" {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filepath.Base(path)))
-	}
-	_, _ = io.Copy(w, rc)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	io.Copy(w, rc)
 }
 
-// handleAgentFileUpload accepts a multipart/form-data POST and stores the
-// file(s) in the agent's workspace under a session-scoped path so the chat
-// UI can attach files to a turn. Frontend passes ?sessionId=<sid> so the
-// upload lands in the same dir the docker sandbox bind-mounts as
-// /workspace — the model can then `read_file <name>` immediately.
-//
-// Form fields:
-//   - file: one or more files (multipart File parts)
-//
-// Path layout in the workspace store:
-//   - sessions/<sid>/<basename>  when sessionId is provided (the normal case)
-//   - <basename>                 when not (admin one-off uploads)
-//
-// Returns {"files": [{"path": "...", "size": ...}]}.
 func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
+	if !s.requireWritable(w, r) {
 		return
 	}
+	id := r.PathValue("id")
 	if s.workspaceStore == nil {
-		http.Error(w, "workspace store not configured", http.StatusServiceUnavailable)
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no workspace store"})
 		return
 	}
-	sessionID := r.URL.Query().Get("sessionId")
-
-	// 50MB cap per request. Bigger uploads should go straight to object
-	// storage via a signed URL — the gateway pod isn't a CDN.
-	if err := r.ParseMultipartForm(50 << 20); err != nil {
-		http.Error(w, "parse multipart: "+err.Error(), http.StatusBadRequest)
+	if rec := s.requireAgentOwner(w, r, id); rec == nil {
 		return
 	}
-
-	files := r.MultipartForm.File["file"]
-	if len(files) == 0 {
-		http.Error(w, "no files", http.StatusBadRequest)
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-
-	type uploaded struct {
-		Path string `json:"path"`
-		Size int64  `json:"size"`
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
 	}
-	results := make([]uploaded, 0, len(files))
-
-	for _, fh := range files {
-		// Take only the basename — multipart filenames can contain path
-		// segments on some clients, and we never want a "../" escape.
-		base := filepath.Base(fh.Filename)
-		if base == "" || base == "." || base == "/" {
-			http.Error(w, "invalid filename", http.StatusBadRequest)
-			return
-		}
-		var key string
-		if sessionID != "" {
-			key = "sessions/" + sessionID + "/" + base
-		} else {
-			key = base
-		}
-
-		f, err := fh.Open()
-		if err != nil {
-			http.Error(w, "open upload: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		// Pass through to the workspace store with sessionID="" so the
-		// path we build above lands at the agent root verbatim — the
-		// store's resolvePath joins agentID + "" + key, giving us
-		// workspaces/<agent>/sessions/<sid>/<base> on local FS, which
-		// is exactly the dir the docker bind-mount sees as /workspace.
-		err = s.workspaceStore.Put(r.Context(), id, "", key, f, fh.Size, fh.Header.Get("Content-Type"))
-		f.Close()
-		if err != nil {
-			http.Error(w, "store: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		results = append(results, uploaded{Path: key, Size: fh.Size})
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
 	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "files": results})
+	if err := s.workspaceStore.Put(r.Context(), id, "", header.Filename, strings.NewReader(string(data)), int64(len(data)), ""); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "name": header.Filename})
 }
 
-func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if !s.canAccessAgent(callerFrom(r), id) {
-		forbid(w, id)
-		return
+func defaultIfEmpty(v, fallback string) string {
+	if v == "" {
+		return fallback
 	}
-	homePath, _ := config.AgentHomeDir(id)
-
-	// Remove the entire agent home (~/.fastclaw/agents/{id}).
-	parent := filepath.Dir(homePath)
-	if err := os.RemoveAll(parent); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	// Remove the workspace (user-facing content) too.
-	if workPath, err := config.AgentWorkspaceDir(id); err == nil {
-		os.RemoveAll(workPath)
-	}
-
-	// Drop the ownership record — no point keeping a binding to an agent
-	// that no longer exists.
-	if s.agentBindings != nil {
-		s.agentBindings.Unbind(id)
-		_ = s.agentBindings.Save()
-	}
-
-	// Clean up Store rows too, otherwise other pods would keep seeing the
-	// agent in ListAgents and try (and fail) to serve it.
-	if s.dataStore != nil {
-		if err := s.dataStore.DeleteAgent(r.Context(), id); err != nil {
-			slog.Warn("store delete agent failed", "id", id, "error", err)
-		}
-	}
-
-	if s.agentProvider != nil {
-		if err := s.agentProvider.ReloadAgents(); err != nil {
-			slog.Warn("failed to reload agents after delete", "id", id, "error", err)
-		}
-	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+	return v
 }
+
+// invalidateUser drops the user's lazy-loaded UserSpace so the next
+// access reloads it from the DB. The gateway implements InvalidateUser
+// behind the api.UserResolver interface.
+func (s *Server) invalidateUser(userID string) {
+	if userID == "" || s.userResolver == nil {
+		return
+	}
+	if r, ok := s.userResolver.(interface{ InvalidateUser(string) }); ok {
+		r.InvalidateUser(userID)
+	}
+	slog.Debug("invalidated user space", "user", userID)
+}
+
+// requireOwnerOrSuperAdmin guards endpoints that mutate another user's
+// resources.
+func (s *Server) requireOwnerOrSuperAdmin(w http.ResponseWriter, r *http.Request, ownerID string) bool {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return false
+	}
+	if ident.UserID == ownerID || ident.Role == users.RoleSuperAdmin {
+		return true
+	}
+	jsonResponse(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	return false
+}
+
+var _ workspace.Store = (workspace.Store)(nil)

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -9,228 +10,184 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// chatKey returns the serialization key for a chat.
 func chatKey(channel, chatID string) string {
 	return channel + ":" + chatID
 }
 
+// processInbound consumes the message bus and routes each message to the
+// correct user's agent. Identity resolution order:
+//   1. msg.OwnerUserID set explicitly (cron, webhook with user_id)
+//   2. lookup the receiving channel's row in the channels table — its
+//      (scope, scope_id) tells us which user owns this conversation
+// If neither yields a user_id the message is dropped, never silently
+// routed to a default identity.
 func (g *Gateway) processInbound(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case msg := <-g.bus.Inbound:
-			// When the message targets a specific user (e.g. from a cron job
-			// in cloud mode), resolve that user's agent manager for routing.
-			if msg.OwnerUserID != "" && msg.OwnerUserID != config.DefaultUserID {
-				g.routeToUserSpace(ctx, msg)
+			ownerID := msg.OwnerUserID
+			if ownerID == "" {
+				ownerID = g.resolveChannelOwner(ctx, msg)
+			}
+			if ownerID == "" {
+				slog.Warn("dropping inbound: cannot resolve owner",
+					"channel", msg.Channel, "chat_id", msg.ChatID, "account", msg.AccountID)
 				continue
 			}
+			msg.OwnerUserID = ownerID
 
-			// For DMs, use existing binding-based routing
 			if msg.PeerKind != "group" {
 				g.routeDM(ctx, msg)
 				continue
 			}
-
-			// Deduplicate group messages (multiple bots receive the same message)
 			if g.isDuplicate(msg) {
 				slog.Info("dropping duplicate group message",
-					"channel", msg.Channel,
-					"chat_id", msg.ChatID,
-					"message_id", msg.MessageID,
-				)
+					"channel", msg.Channel, "chat_id", msg.ChatID, "message_id", msg.MessageID)
 				continue
 			}
-
-			// Group message handling
-			slog.Info("group message accepted", "message_id", msg.MessageID, "account", msg.AccountID, "chat_id", msg.ChatID, "is_bot", msg.IsBotMessage)
+			slog.Info("group message accepted",
+				"message_id", msg.MessageID, "account", msg.AccountID,
+				"chat_id", msg.ChatID, "is_bot", msg.IsBotMessage, "owner", ownerID)
 			g.routeGroup(ctx, msg)
 		}
 	}
 }
 
-// routeDM handles direct message routing (existing behavior).
+// resolveChannelOwner looks up the channels table for the inbound's
+// receiving channel and returns the owning user_id, or "" if not found
+// or scope==system (system channels have no individual owner).
+func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessage) string {
+	if g.store == nil {
+		return ""
+	}
+	rec, err := g.store.LookupChannelByCredential(ctx, msg.Channel, msg.AccountID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("channel lookup failed", "channel", msg.Channel, "error", err)
+		}
+		return ""
+	}
+	switch rec.Scope {
+	case "user":
+		return rec.ScopeID
+	case "agent":
+		// agent-scoped channel — find the agent's owner
+		if rec.ScopeID == "" {
+			return ""
+		}
+		// We don't know the user yet; ListAllAgents + filter is
+		// fine since channel-scope lookups are infrequent.
+		all, err := g.store.ListAllAgents(ctx)
+		if err != nil {
+			return ""
+		}
+		for _, ar := range all {
+			if ar.ID == rec.ScopeID {
+				return ar.UserID
+			}
+		}
+	}
+	return ""
+}
+
 func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
-	ag := g.matchAgent(msg)
-	if ag == nil {
-		slog.Warn("no agent matched for DM, dropping",
-			"channel", msg.Channel,
-			"account", msg.AccountID,
-			"chat_id", msg.ChatID,
-		)
+	space, err := g.users.getOrLoad(ctx, msg.OwnerUserID)
+	if err != nil {
+		slog.Warn("user space load failed", "user", msg.OwnerUserID, "error", err)
 		return
 	}
-
+	ag := g.matchAgent(space, msg)
+	if ag == nil {
+		slog.Warn("no agent matched for DM, dropping",
+			"user", msg.OwnerUserID, "channel", msg.Channel,
+			"account", msg.AccountID, "chat_id", msg.ChatID)
+		return
+	}
 	slog.Info("routing DM",
-		"channel", msg.Channel,
-		"account", msg.AccountID,
-		"chat_id", msg.ChatID,
-		"agent", ag.Name(),
-	)
-
+		"user", msg.OwnerUserID, "channel", msg.Channel,
+		"chat_id", msg.ChatID, "agent", ag.Name())
 	g.taskQueue.Submit(ag.Name(), chatKey(msg.Channel, msg.ChatID), msg, msg.AccountID)
 }
 
-// routeGroup handles group message routing with mention-based and team-aware logic.
 func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
-	// Find all agents bound to this group chat
-	boundAgents := g.agentsBoundToMessage(msg)
-
-	if len(boundAgents) == 0 {
-		slog.Warn("no agents bound for group message, dropping",
-			"channel", msg.Channel,
-			"chat_id", msg.ChatID,
-		)
+	space, err := g.users.getOrLoad(ctx, msg.OwnerUserID)
+	if err != nil {
+		slog.Warn("user space load failed", "user", msg.OwnerUserID, "error", err)
 		return
 	}
-
-	// If message is from a bot, inject into all agents for awareness,
-	// and also trigger any @mentioned agent to respond.
+	boundAgents := g.agentsBoundToMessage(space, msg)
+	if len(boundAgents) == 0 {
+		slog.Warn("no agents bound for group message, dropping",
+			"user", msg.OwnerUserID, "chat_id", msg.ChatID)
+		return
+	}
 	if msg.IsBotMessage {
-		slog.Info("processing bot message in group",
-			"sender", msg.SenderName,
-			"chat_id", msg.ChatID,
-			"mentions", msg.Mentions,
-			"agents_count", len(boundAgents),
-		)
-
-		// Inject into all agents for awareness
 		for _, ag := range boundAgents {
 			ag.InjectGroupMessage(ctx, msg)
 		}
-
-		// If this bot message @mentions another agent, trigger that agent to respond
 		if len(msg.Mentions) > 0 {
-			target := g.agentByMention(msg.Mentions, boundAgents)
-			if target != nil {
-				slog.Info("bot message triggers mentioned agent",
-					"sender", msg.SenderName,
-					"target", target.Name(),
-					"chat_id", msg.ChatID,
-				)
-
-				// Build a trigger message with the sender bot's name as context
+			if target := g.agentByMention(space, msg.Mentions, boundAgents); target != nil {
 				triggerMsg := msg
 				triggerMsg.Text = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
-				triggerMsg.IsBotMessage = false // treat as actionable for HandleMessage
-
-				g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(target.Name(), triggerMsg.Channel))
+				triggerMsg.IsBotMessage = false
+				g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
 			}
 		}
 		return
 	}
-
-	// If message has @mentions, only route to the mentioned agent
 	if len(msg.Mentions) > 0 {
-		target := g.agentByMention(msg.Mentions, boundAgents)
-		if target != nil {
-			slog.Info("routing group message by @mention",
-				"chat_id", msg.ChatID,
-				"agent", target.Name(),
-				"mentions", msg.Mentions,
-			)
-
-			// Inject into other agents for awareness (without triggering reply)
+		if target := g.agentByMention(space, msg.Mentions, boundAgents); target != nil {
 			for _, ag := range boundAgents {
 				if ag.Name() != target.Name() {
 					ag.InjectGroupMessage(ctx, msg)
 				}
 			}
-
-			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(target.Name(), msg.Channel))
+			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
 			return
 		}
-		// Mentioned username doesn't match any agent — fall through to default behavior
 	}
-
-	// No @mention: use team groupBehavior
-	behavior, defaultAgentID := g.groupBehaviorFor(boundAgents)
-
+	behavior, defaultAgentID := groupBehaviorFor(space, boundAgents)
 	switch behavior {
 	case "default-agent":
-		target := g.agents.AgentByID(defaultAgentID)
+		target := space.Agents.AgentByID(defaultAgentID)
 		if target == nil {
-			// Fallback: use first bound agent
 			target = boundAgents[0]
 		}
-
-		slog.Info("routing group message to default agent",
-			"chat_id", msg.ChatID,
-			"agent", target.Name(),
-		)
-
-		// Inject into other agents for awareness
 		for _, ag := range boundAgents {
 			if ag.Name() != target.Name() {
 				ag.InjectGroupMessage(ctx, msg)
 			}
 		}
-
-		g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(target.Name(), msg.Channel))
-
-	default: // "mention-only"
-		// No @mention and behavior is mention-only: inject into all agents for awareness, but no reply
-		slog.Info("group message without mention (mention-only mode), injecting for awareness",
-			"chat_id", msg.ChatID,
-			"agents_count", len(boundAgents),
-		)
+		g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+	default:
 		for _, ag := range boundAgents {
 			ag.InjectGroupMessage(ctx, msg)
 		}
 	}
 }
 
-// routeToUserSpace dispatches a message to a non-local user's agent manager.
-// Used when cron jobs or webhooks target a specific user in cloud mode.
-func (g *Gateway) routeToUserSpace(ctx context.Context, msg bus.InboundMessage) {
-	space, err := g.users.getOrLoad(msg.OwnerUserID)
-	if err != nil {
-		slog.Warn("failed to load user space for routing",
-			"user", msg.OwnerUserID, "error", err)
-		return
+func (g *Gateway) matchAgent(space *UserSpace, msg bus.InboundMessage) *agent.Agent {
+	if space == nil {
+		return nil
 	}
-	mgr := space.Agents
-
-	// Find agent: try binding-level agentID in channel (cron sets it),
-	// then default or first.
-	var ag *agent.Agent
-	if def := mgr.DefaultAgent(); def != nil {
-		ag = def
-	} else if all := mgr.All(); len(all) > 0 {
-		ag = all[0]
+	bindings := space.Config.Bindings
+	if len(bindings) == 0 {
+		return space.Agents.DefaultAgent()
 	}
-	if ag == nil {
-		slog.Warn("user has no agents", "user", msg.OwnerUserID)
-		return
-	}
-	slog.Info("routing to user space",
-		"user", msg.OwnerUserID, "agent", ag.Name(), "channel", msg.Channel)
-	g.taskQueue.Submit(ag.Name(), chatKey(msg.Channel, msg.ChatID), msg, msg.AccountID)
-}
-
-// matchAgent evaluates bindings top-to-bottom and returns the first matching agent.
-// Falls back to the default agent if no bindings are defined.
-func (g *Gateway) matchAgent(msg bus.InboundMessage) *agent.Agent {
-	if len(g.bindings) == 0 {
-		return g.agents.DefaultAgent()
-	}
-
-	for _, b := range g.bindings {
+	for _, b := range bindings {
 		if !matchBinding(b.Match, msg) {
 			continue
 		}
-		ag := g.agents.AgentByID(b.AgentID)
-		if ag != nil {
+		if ag := space.Agents.AgentByID(b.AgentID); ag != nil {
 			return ag
 		}
-		slog.Warn("binding references unknown agent", "agentId", b.AgentID)
 	}
-
-	// No binding matched — fall back to default
-	return g.agents.DefaultAgent()
+	return space.Agents.DefaultAgent()
 }
 
 func matchBinding(m config.Match, msg bus.InboundMessage) bool {
@@ -251,39 +208,36 @@ func matchBinding(m config.Match, msg bus.InboundMessage) bool {
 	return true
 }
 
-// agentsBoundToMessage returns all agents whose bindings match this message.
-func (g *Gateway) agentsBoundToMessage(msg bus.InboundMessage) []*agent.Agent {
-	if len(g.bindings) == 0 {
-		if def := g.agents.DefaultAgent(); def != nil {
+func (g *Gateway) agentsBoundToMessage(space *UserSpace, msg bus.InboundMessage) []*agent.Agent {
+	if space == nil {
+		return nil
+	}
+	bindings := space.Config.Bindings
+	if len(bindings) == 0 {
+		if def := space.Agents.DefaultAgent(); def != nil {
 			return []*agent.Agent{def}
 		}
 		return nil
 	}
-
 	seen := make(map[string]bool)
-	var result []*agent.Agent
-	for _, b := range g.bindings {
-		if !matchBinding(b.Match, msg) {
+	var out []*agent.Agent
+	for _, b := range bindings {
+		if !matchBinding(b.Match, msg) || seen[b.AgentID] {
 			continue
 		}
-		if seen[b.AgentID] {
-			continue
-		}
-		ag := g.agents.AgentByID(b.AgentID)
-		if ag != nil {
+		if ag := space.Agents.AgentByID(b.AgentID); ag != nil {
 			seen[b.AgentID] = true
-			result = append(result, ag)
+			out = append(out, ag)
 		}
 	}
-	return result
+	return out
 }
 
-// agentByMention finds the agent whose bot username matches one of the @mentions.
-func (g *Gateway) agentByMention(mentions []string, candidates []*agent.Agent) *agent.Agent {
+func (g *Gateway) agentByMention(space *UserSpace, mentions []string, candidates []*agent.Agent) *agent.Agent {
+	usernames := buildBotUsernames(space.Config.Bindings, g.chanMgr)
 	for _, mention := range mentions {
 		for _, ag := range candidates {
-			botUsername, ok := g.botUsernames[ag.Name()]
-			if ok && botUsername == mention {
+			if u, ok := usernames[ag.Name()]; ok && u == mention {
 				return ag
 			}
 		}
@@ -291,32 +245,81 @@ func (g *Gateway) agentByMention(mentions []string, candidates []*agent.Agent) *
 	return nil
 }
 
-// gatewaySubAgentSpawner implements tools.SubAgentSpawner.
+// groupBehaviorFor returns the team's groupBehavior + defaultAgent for the
+// given candidate agents, or ("mention-only", "") when there's no team.
+func groupBehaviorFor(space *UserSpace, agents []*agent.Agent) (string, string) {
+	if space == nil {
+		return "mention-only", ""
+	}
+	for _, team := range space.Config.Teams {
+		matching := 0
+		for _, ag := range agents {
+			for _, member := range team.Agents {
+				if member == ag.Name() {
+					matching++
+					break
+				}
+			}
+		}
+		if matching == len(agents) && matching > 0 {
+			behavior := team.GroupBehavior
+			if behavior == "" {
+				behavior = "mention-only"
+			}
+			return behavior, team.DefaultAgent
+		}
+	}
+	return "mention-only", ""
+}
+
+func (g *Gateway) accountIDForAgent(space *UserSpace, agentID, channel string) string {
+	for _, b := range space.Config.Bindings {
+		if b.AgentID == agentID && b.Match.Channel == channel && b.Match.AccountID != "" {
+			return b.Match.AccountID
+		}
+	}
+	return ""
+}
+
+// gatewaySubAgentSpawner implements tools.SubAgentSpawner. Sub-agents
+// always run inside the *same* user's agent manager — there's no cross-
+// tenant agent invocation.
 type gatewaySubAgentSpawner struct {
-	agents *agent.Manager
+	gateway *Gateway
+	userID  string
 }
 
 func (s *gatewaySubAgentSpawner) SpawnSubAgent(ctx context.Context, agentID string, msg bus.InboundMessage) string {
-	ag := s.agents.AgentByID(agentID)
+	space, err := s.gateway.users.getOrLoad(ctx, s.userID)
+	if err != nil {
+		return fmt.Sprintf("Error: load user space: %v", err)
+	}
+	ag := space.Agents.AgentByID(agentID)
 	if ag == nil {
 		return fmt.Sprintf("Error: agent %q not found", agentID)
 	}
 	return ag.HandleMessage(ctx, msg)
 }
 
-// Ensure gatewaySubAgentSpawner satisfies the interface.
 var _ tools.SubAgentSpawner = (*gatewaySubAgentSpawner)(nil)
 
-// webhookAgentHandler implements webhook.AgentHandler.
+// webhookAgentHandler routes a webhook payload to the named agent within
+// the resolved user's space.
 type webhookAgentHandler struct {
-	agents *agent.Manager
+	gateway *Gateway
 }
 
 func (h *webhookAgentHandler) HandleMessage(ctx context.Context, agentID string, msg bus.InboundMessage) (string, error) {
-	ag := h.agents.AgentByID(agentID)
-	if ag == nil {
-		return "", fmt.Errorf("agent %q not found", agentID)
+	if msg.OwnerUserID == "" {
+		return "", fmt.Errorf("webhook: owner user_id required")
 	}
-	reply := ag.HandleMessage(ctx, msg)
-	return reply, nil
+	space, err := h.gateway.users.getOrLoad(ctx, msg.OwnerUserID)
+	if err != nil {
+		return "", err
+	}
+	ag := space.Agents.AgentByID(agentID)
+	if ag == nil {
+		return "", fmt.Errorf("agent %q not found for user %q", agentID, msg.OwnerUserID)
+	}
+	return ag.HandleMessage(ctx, msg), nil
 }

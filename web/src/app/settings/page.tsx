@@ -14,7 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Database, Save, Check, Container } from "lucide-react";
+import { Save, Check, Container } from "lucide-react";
 import { getConfig, updateConfig, type ConfigResponse } from "@/lib/api";
 
 export default function SettingsPage() {
@@ -23,8 +23,6 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const [storageType, setStorageType] = useState("file");
-  const [dsn, setDsn] = useState("");
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [sandboxBackend, setSandboxBackend] = useState("docker");
   const [sandboxImage, setSandboxImage] = useState("");
@@ -35,8 +33,6 @@ export default function SettingsPage() {
     getConfig()
       .then((cfg) => {
         setConfig(cfg);
-        setStorageType(cfg.storage?.type || "file");
-        setDsn(cfg.storage?.dsn || "");
         setSandboxEnabled(cfg.sandbox?.enabled || false);
         setSandboxBackend(cfg.sandbox?.backend || "docker");
         setSandboxImage(cfg.sandbox?.image || "");
@@ -48,8 +44,9 @@ export default function SettingsPage() {
 
   const handleSave = async () => {
     setSaving(true);
+    // storage is read-only here — it's bootstrap config from FASTCLAW_*,
+    // not a DB-editable namespace. Don't round-trip it.
     await updateConfig({
-      storage: { type: storageType, dsn },
       sandbox: {
         enabled: sandboxEnabled,
         backend: sandboxBackend,
@@ -99,45 +96,6 @@ export default function SettingsPage() {
             </>
           )}
         </Button>
-      </div>
-
-      {/* Storage Config */}
-      <div className="rounded-lg border border-border bg-card">
-        <div className="p-5 pb-3">
-          <div className="flex items-center gap-2 mb-1">
-            <Database className="h-4 w-4 text-blue-500" />
-            <h3 className="font-medium">Storage</h3>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            Configure data persistence backend
-          </p>
-        </div>
-        <div className="px-5 pb-5 space-y-4">
-          <div className="space-y-2">
-            <Label>Storage Type</Label>
-            <Select value={storageType} onValueChange={(v) => v && setStorageType(v)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="file">File System</SelectItem>
-                <SelectItem value="sqlite">SQLite</SelectItem>
-                <SelectItem value="postgres">PostgreSQL</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          {storageType !== "file" && (
-            <div className="space-y-2">
-              <Label>Connection String (DSN)</Label>
-              <Input
-                value={dsn}
-                onChange={(e) => setDsn(e.target.value)}
-                placeholder={storageType === "sqlite" ? "./data.db" : "postgres://user:pass@host:5432/fastclaw"}
-                className="font-mono text-sm"
-              />
-            </div>
-          )}
-        </div>
       </div>
 
       {/* Sandbox Config */}

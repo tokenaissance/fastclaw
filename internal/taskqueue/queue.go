@@ -22,17 +22,18 @@ const (
 
 // Task represents a unit of work to be processed.
 type Task struct {
-	ID        string
-	AgentID   string
-	ChatKey   string // channel:chatID — serialization key
-	Message   bus.InboundMessage
-	AccountID string
-	Status    TaskStatus
-	CreatedAt time.Time
-	StartedAt *time.Time
-	DoneAt    *time.Time
-	Result    string
-	Error     error
+	ID          string
+	AgentID     string
+	OwnerUserID string // owner of the agent (for user-space lookup)
+	ChatKey     string // channel:chatID — serialization key
+	Message     bus.InboundMessage
+	AccountID   string
+	Status      TaskStatus
+	CreatedAt   time.Time
+	StartedAt   *time.Time
+	DoneAt      *time.Time
+	Result      string
+	Error       error
 }
 
 // TaskHandler processes a task and returns a result or error.
@@ -97,13 +98,14 @@ func (q *Queue) Submit(agentID, chatKey string, msg bus.InboundMessage, accountI
 	taskID := fmt.Sprintf("task-%d-%d", time.Now().UnixMilli(), q.seq)
 
 	task := &Task{
-		ID:        taskID,
-		AgentID:   agentID,
-		ChatKey:   chatKey,
-		Message:   msg,
-		AccountID: accountID,
-		Status:    TaskPending,
-		CreatedAt: time.Now(),
+		ID:          taskID,
+		AgentID:     agentID,
+		OwnerUserID: msg.OwnerUserID,
+		ChatKey:     chatKey,
+		Message:     msg,
+		AccountID:   accountID,
+		Status:      TaskPending,
+		CreatedAt:   time.Now(),
 	}
 	q.tasks[taskID] = task
 

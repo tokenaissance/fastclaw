@@ -10,17 +10,21 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// StoreAdapter adapts store.Store to the SessionStore interface.
+// StoreAdapter adapts store.Store to the SessionStore interface for one
+// owning user. Each UserSpace creates its own adapter so the user_id
+// scoping is implicit at the call site instead of getting plumbed through
+// every agent loop call.
 type StoreAdapter struct {
-	st store.Store
+	st     store.Store
+	userID string
 }
 
-func NewStoreAdapter(st store.Store) *StoreAdapter {
-	return &StoreAdapter{st: st}
+func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {
+	return &StoreAdapter{st: st, userID: userID}
 }
 
 func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
-	rec, err := a.st.GetSession(ctx, agentID, sessionKey)
+	rec, err := a.st.GetSession(ctx, a.userID, agentID, sessionKey)
 	if err != nil || rec == nil {
 		return nil, err
 	}
@@ -84,11 +88,11 @@ func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey stri
 			rec.Messages[i].ContentParts = m.ContentParts
 		}
 	}
-	return a.st.SaveSession(ctx, agentID, sessionKey, rec)
+	return a.st.SaveSession(ctx, a.userID, agentID, sessionKey, rec)
 }
 
 func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error) {
-	metas, err := a.st.ListSessions(ctx, agentID)
+	metas, err := a.st.ListSessions(ctx, a.userID, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +104,7 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 		sessionId := strings.TrimPrefix(m.Key, "web_")
 		preview := ""
 		thumb := ""
-		rec, err := a.st.GetSession(ctx, agentID, m.Key)
+		rec, err := a.st.GetSession(ctx, a.userID, agentID, m.Key)
 		if err == nil && rec != nil {
 			for _, msg := range rec.Messages {
 				if msg.Role != "user" {
@@ -203,9 +207,9 @@ func userImage(m store.SessionMessage) string {
 }
 
 func (a *StoreAdapter) DeleteSession(ctx context.Context, agentID, sessionKey string) error {
-	return a.st.DeleteSession(ctx, agentID, sessionKey)
+	return a.st.DeleteSession(ctx, a.userID, agentID, sessionKey)
 }
 
 func (a *StoreAdapter) RenameSession(ctx context.Context, agentID, sessionKey, title string) error {
-	return a.st.RenameSession(ctx, agentID, sessionKey, title)
+	return a.st.RenameSession(ctx, a.userID, agentID, sessionKey, title)
 }

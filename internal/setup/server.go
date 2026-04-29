@@ -12,6 +12,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -21,7 +22,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
-// AgentHandle is a minimal interface for interacting with an agent from the web UI.
+// AgentHandle is the surface the web UI uses to talk to a running agent.
 type AgentHandle interface {
 	Name() string
 	HandleWebChat(ctx context.Context, sessionId, text string) string
@@ -30,44 +31,39 @@ type AgentHandle interface {
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
 	RenameWebChatSession(sessionId, title string) error
-	// ReloadWorkspaceFiles re-scans the agent's home (SOUL.md, skills, ...) so
-	// changes made by admin tools take effect on the next turn without a
-	// process restart.
 	ReloadWorkspaceFiles()
 }
 
-// AgentProvider gives the server access to the running agents.
+// AgentProvider is implemented by gateway.UserSpace's agent manager — used
+// by handlers that legitimately need to enumerate the *current caller's*
+// agents (resolved through the user resolver, not from a global pool).
 type AgentProvider interface {
 	AllAgents() []AgentHandle
 	AgentByID(id string) AgentHandle
-	// ReloadAgents syncs the in-memory agent manager with the filesystem.
-	// Called after the HTTP API creates / updates / deletes agent files so
-	// chat requests can immediately see the new state.
 	ReloadAgents() error
 }
 
-// Server serves the setup wizard UI and handles config API endpoints.
+// Server hosts the web UI + admin API. Multi-user is unconditional —
+// every request must resolve to a real users.id via the auth.Resolver.
 type Server struct {
-	port          int
-	bind          string // "loopback" or "all"
-	gatewayCfg    *config.GatewayCfg
-	onConfig      func(*config.Config) // called after config is saved
-	agentProvider AgentProvider
-	userResolver  api.UserResolver // for per-user agent routing
-	taskQueue     *taskqueue.Queue
-	apiServer     *api.Server
-	authToken     string                 // gateway admin token (for auth middleware)
-	userRegistry  *users.Registry        // api key registry
-	agentBindings *users.AgentBindings   // agent → api key ownership (nil = no bindings file)
-	dataStore     store.Store            // DB or file store for per-user config
-	workspaceStore workspace.Store       // blob store for agent-generated artifacts
-	usage         usage.Meter            // per-tenant resource counters
-	startedAt     time.Time
+	port           int
+	bind           string
+	gatewayCfg     *config.GatewayCfg
+	userResolver   api.UserResolver
+	taskQueue      *taskqueue.Queue
+	apiServer      *api.Server
+	authResolver   *auth.Resolver
+	accounts       *users.Accounts
+	apikeys        *users.APIKeys
+	dataStore      store.Store
+	workspaceStore workspace.Store
+	usage          usage.Meter
+	startedAt      time.Time
 }
 
 // NewServer creates a setup wizard server on the given port.
-func NewServer(port int, onConfig func(*config.Config)) *Server {
-	return &Server{port: port, bind: "loopback", onConfig: onConfig, startedAt: time.Now()}
+func NewServer(port int) *Server {
+	return &Server{port: port, bind: "loopback", startedAt: time.Now()}
 }
 
 // SetGatewayConfig sets the gateway configuration for bind address and HTTP endpoints.
@@ -81,11 +77,6 @@ func (s *Server) SetGatewayConfig(cfg *config.GatewayCfg) {
 	}
 }
 
-// SetAgentProvider sets the agent provider for chat and status endpoints.
-func (s *Server) SetAgentProvider(ap AgentProvider) {
-	s.agentProvider = ap
-}
-
 // SetTaskQueue sets the task queue for the tasks API endpoint.
 func (s *Server) SetTaskQueue(tq *taskqueue.Queue) {
 	s.taskQueue = tq
@@ -96,152 +87,65 @@ func (s *Server) SetAPIServer(apiSrv *api.Server) {
 	s.apiServer = apiSrv
 }
 
-// SetUserResolver sets the resolver for per-user agent routing in the web UI.
+// SetUserResolver sets the per-user agent routing resolver.
 func (s *Server) SetUserResolver(resolver api.UserResolver) {
 	s.userResolver = resolver
 }
 
-// SetStore sets the storage backend for per-user config persistence.
-// When set, cloud user configs are stored in the database instead of
-// the filesystem. The local user always bootstraps from filesystem.
+// SetStore sets the storage backend.
 func (s *Server) SetStore(st store.Store) {
 	s.dataStore = st
+	if st != nil {
+		s.accounts, _ = users.NewAccounts(st)
+		s.apikeys, _ = users.NewAPIKeys(st)
+	}
 }
 
-// SetWorkspaceStore installs the blob store used for agent-generated
-// artifacts (PDFs, images, audio, ...). Handlers that serve these files
-// (download/preview) and the write_file tool route through it. Nil falls
-// back to direct filesystem access.
+// SetWorkspaceStore installs the blob store used for agent-generated artifacts.
 func (s *Server) SetWorkspaceStore(ws workspace.Store) {
 	s.workspaceStore = ws
 }
 
-// SetUsageMeter installs the per-tenant resource counter read by the
-// /api/admin/usage endpoint.
+// SetUsageMeter installs the per-tenant resource counter.
 func (s *Server) SetUsageMeter(m usage.Meter) {
 	s.usage = m
 }
 
-// SetAuth configures authentication for the /api/* endpoints. In local mode
-// (token="" and registry=nil) all requests are treated as the local user.
-// In cloud mode, the bearer token is resolved to a user ID.
-func (s *Server) SetAuth(token string, registry *users.Registry) {
-	s.authToken = token
-	s.userRegistry = registry
+// SetAuth installs the auth resolver. Required.
+func (s *Server) SetAuth(resolver *auth.Resolver) {
+	s.authResolver = resolver
 }
 
-// SetAgentBindings installs the agent → api key ownership registry. Without
-// this, every agent is implicitly admin-owned and api-key callers can't
-// create or list any agent (safe default for misconfigured setups).
-func (s *Server) SetAgentBindings(b *users.AgentBindings) {
-	s.agentBindings = b
-}
-
-// userAuth is middleware that resolves the bearer token to a user ID and
-// injects it into the request context. In local mode (no token configured),
-// it passes through as the default user.
-func (s *Server) userAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// No auth configured → local mode, default user.
-		if s.authToken == "" && s.userRegistry == nil {
-			r = r.WithContext(config.WithUserID(r.Context(), config.DefaultUserID))
-			next(w, r)
-			return
+// authMiddleware wraps the auth.Resolver's Middleware. Required for every
+// authenticated route.
+func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	if s.authResolver == nil {
+		return func(w http.ResponseWriter, r *http.Request) {
+			jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "auth not configured"})
 		}
-
-		// Token can come from the Authorization header (normal API calls) or
-		// a ?token= query param — the latter is needed for <img>, <iframe>,
-		// and anchor downloads where we can't set custom headers.
-		var token string
-		if auth := r.Header.Get("Authorization"); auth != "" {
-			token = strings.TrimPrefix(auth, "Bearer ")
-			if token == auth {
-				jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid auth header"})
-				return
-			}
-		} else if qt := r.URL.Query().Get("token"); qt != "" {
-			token = qt
-		} else {
-			jsonResponse(w, http.StatusUnauthorized, map[string]any{
-				"ok": false, "error": "token required",
-			})
-			return
-		}
-
-		// Try cloud user registry first.
-		if s.userRegistry != nil {
-			if uid, ok := s.userRegistry.LookupByToken(token); ok {
-				r = r.WithContext(config.WithUserID(r.Context(), uid))
-				next(w, r)
-				return
-			}
-		}
-		// Try admin token → local user.
-		if s.authToken != "" && token == s.authToken {
-			r = r.WithContext(config.WithUserID(r.Context(), config.DefaultUserID))
-			next(w, r)
-			return
-		}
-
-		jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid token"})
 	}
+	return s.authResolver.Middleware(next)
 }
 
-// optionalUserAuth is a permissive middleware for bootstrap endpoints (like
-// /api/status) that the login / onboarding UI must call before it has a
-// token. It resolves the user when a valid bearer token is present, but falls
-// through unauthenticated when the header is missing or the token is unknown
-// — the handler then only returns non-sensitive public fields.
-func (s *Server) optionalUserAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// No auth configured → local mode, default user.
-		if s.authToken == "" && s.userRegistry == nil {
-			r = r.WithContext(config.WithUserID(r.Context(), config.DefaultUserID))
-			next(w, r)
-			return
-		}
-
-		var token string
-		if auth := r.Header.Get("Authorization"); auth != "" {
-			if t := strings.TrimPrefix(auth, "Bearer "); t != auth {
-				token = t
-			}
-		} else if qt := r.URL.Query().Get("token"); qt != "" {
-			token = qt
-		}
-
-		if token != "" {
-			if s.userRegistry != nil {
-				if uid, ok := s.userRegistry.LookupByToken(token); ok {
-					r = r.WithContext(config.WithUserID(r.Context(), uid))
-					next(w, r)
-					return
-				}
-			}
-			if s.authToken != "" && token == s.authToken {
-				r = r.WithContext(config.WithUserID(r.Context(), config.DefaultUserID))
-				next(w, r)
-				return
-			}
-		}
-
-		// No / invalid token — still serve the endpoint, but leave the
-		// request context without a resolved user ID. The handler must
-		// gate user-specific details on UserIDFromContext.
-		next(w, r)
+// optionalAuth is the bootstrap-friendly variant for endpoints reachable
+// before login (status, login, onboard).
+func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
+	if s.authResolver == nil {
+		return next
 	}
+	return s.authResolver.Optional(next)
 }
 
-// Run starts the HTTP server and blocks until the context is canceled
-// or the setup is completed.
+// requireSuperAdmin gates handlers behind a super_admin role check.
+func (s *Server) requireSuperAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.authMiddleware(auth.RequireSuperAdmin(next))
+}
+
+// Run starts the HTTP server and blocks until the context is canceled.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 
-	// Unauthenticated health probes for K8s / load balancers. The auth
-	// middleware returns 401 without a bearer token, which would make
-	// every probe fail and trigger pod restarts. /healthz is the
-	// conventional name; /livez and /readyz mirror Kubernetes' own
-	// control-plane endpoints.
+	// Health probes (unauthenticated).
 	healthz := func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -250,116 +154,119 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /livez", healthz)
 	mux.HandleFunc("GET /readyz", healthz)
 
-	// API routes — all wrapped with user auth so cloud users get their own
-	// config/agents/sessions when they access the web UI with a bearer token.
-	ua := s.userAuth
-	// /api/status is the bootstrap endpoint the login / onboarding UI calls
-	// before it has a token — it must answer unauthenticated so the client
-	// can decide between showing the login form (configured) and the
-	// onboarding wizard (not configured). The handler itself hides
-	// user-scoped details when no user is resolved.
-	mux.HandleFunc("GET /api/status", s.optionalUserAuth(s.handleStatus))
-	mux.HandleFunc("GET /api/config", ua(s.handleGetConfig))
-	mux.HandleFunc("POST /api/config", ua(s.handleUpdateConfig))
-	// test-provider / save-config must reach the onboarding wizard before
-	// the user has a token — gate on "is the system already configured?"
-	// inside the handler instead (admin-only once configured).
-	mux.HandleFunc("POST /api/test-provider", s.optionalUserAuth(s.handleTestProvider))
-	mux.HandleFunc("POST /api/save-config", s.optionalUserAuth(s.handleSaveConfig))
-	mux.HandleFunc("POST /api/chat", ua(s.handleChat))
-	mux.HandleFunc("POST /api/chat/stream", ua(s.handleChatStream))
-	mux.HandleFunc("GET /api/chat/history", ua(s.handleChatHistory))
-	mux.HandleFunc("GET /api/chat/sessions", ua(s.handleChatSessions))
-	mux.HandleFunc("PUT /api/chat/sessions/{key}", ua(s.handleRenameSession))
-	mux.HandleFunc("DELETE /api/chat/sessions/{key}", ua(s.handleDeleteSession))
+	auth := s.authMiddleware
+	opt := s.optionalAuth
+	admin := s.requireSuperAdmin
 
-	// Agent management
-	mux.HandleFunc("GET /api/agents", ua(s.handleListAgents))
-	mux.HandleFunc("POST /api/agents", ua(s.handleCreateAgent))
-	mux.HandleFunc("PUT /api/agents/{id}", ua(s.handleUpdateAgent))
-	mux.HandleFunc("GET /api/agents/{id}/config", ua(s.handleGetAgentConfig))
-	mux.HandleFunc("DELETE /api/agents/{id}", ua(s.handleDeleteAgent))
+	// Bootstrap / login.
+	mux.HandleFunc("GET /api/status", opt(s.handleStatus))
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("POST /api/logout", auth(s.handleLogout))
+	mux.HandleFunc("GET /api/me", auth(s.handleMe))
+	mux.HandleFunc("POST /api/test-provider", opt(s.handleTestProvider))
+	mux.HandleFunc("POST /api/onboard", s.handleOnboard)
 
-	// Serve agent workspace files (for inline preview / download in chat).
-	// Sandbox-checked to stay inside the agent's workspace root.
-	mux.HandleFunc("GET /api/agents/{id}/files", ua(s.handleAgentFileList))
-	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", ua(s.handleAgentFile))
-	mux.HandleFunc("POST /api/agents/{id}/files", ua(s.handleAgentFileUpload))
+	// Per-user config (system_settings + scoped providers/channels).
+	mux.HandleFunc("GET /api/config", auth(s.handleGetConfig))
+	mux.HandleFunc("POST /api/config", auth(s.handleUpdateConfig))
 
-	// Agent identity/metadata files (SOUL.md, IDENTITY.md, ...) in the home dir.
-	// Used by the admin UI Files editor; names are allowlisted.
-	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", ua(s.handleGetAgentSystemFile))
-	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", ua(s.handlePutAgentSystemFile))
-	mux.HandleFunc("DELETE /api/agents/{id}/system-files/{name}", ua(s.handleDeleteAgentSystemFile))
+	// Chat
+	mux.HandleFunc("POST /api/chat", auth(s.handleChat))
+	mux.HandleFunc("POST /api/chat/stream", auth(s.handleChatStream))
+	mux.HandleFunc("GET /api/chat/history", auth(s.handleChatHistory))
+	mux.HandleFunc("GET /api/chat/sessions", auth(s.handleChatSessions))
+	mux.HandleFunc("PUT /api/chat/sessions/{key}", auth(s.handleRenameSession))
+	mux.HandleFunc("DELETE /api/chat/sessions/{key}", auth(s.handleDeleteSession))
 
-	// Skills (global, not per-user)
+	// Agents
+	mux.HandleFunc("GET /api/agents", auth(s.handleListAgents))
+	mux.HandleFunc("POST /api/agents", auth(s.handleCreateAgent))
+	mux.HandleFunc("PUT /api/agents/{id}", auth(s.handleUpdateAgent))
+	mux.HandleFunc("GET /api/agents/{id}/config", auth(s.handleGetAgentConfig))
+	mux.HandleFunc("DELETE /api/agents/{id}", auth(s.handleDeleteAgent))
+
+	mux.HandleFunc("GET /api/agents/{id}/files", auth(s.handleAgentFileList))
+	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
+	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
+
+	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", auth(s.handleGetAgentSystemFile))
+	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", auth(s.handlePutAgentSystemFile))
+	mux.HandleFunc("DELETE /api/agents/{id}/system-files/{name}", auth(s.handleDeleteAgentSystemFile))
+
+	// Skills
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)
-	mux.HandleFunc("GET /api/skills/search", ua(s.handleSearchSkills))
-	mux.HandleFunc("POST /api/skills/install", ua(s.handleInstallSkill))
-	mux.HandleFunc("DELETE /api/skills/{name}", s.handleDeleteSkill)
+	mux.HandleFunc("GET /api/skills/search", auth(s.handleSearchSkills))
+	mux.HandleFunc("POST /api/skills/install", auth(s.handleInstallSkill))
+	mux.HandleFunc("DELETE /api/skills/{name}", admin(s.handleDeleteSkill))
+	mux.HandleFunc("GET /api/agents/{id}/skills", auth(s.handleListAgentSkills))
+	mux.HandleFunc("DELETE /api/agents/{id}/skills/{name}", auth(s.handleDeleteAgentSkill))
 
-	// Per-agent skills: installs land in the agent's own home/skills/ dir
-	// and are exclusive to that agent (skills loader Layer 1).
-	mux.HandleFunc("GET /api/agents/{id}/skills", ua(s.handleListAgentSkills))
-	mux.HandleFunc("DELETE /api/agents/{id}/skills/{name}", ua(s.handleDeleteAgentSkill))
+	// Plugins (super_admin only).
+	mux.HandleFunc("GET /api/plugins", admin(s.handleListPlugins))
+	mux.HandleFunc("PUT /api/plugins/{id}", admin(s.handleUpdatePlugin))
 
-	// Plugins (global, not per-user)
-	mux.HandleFunc("GET /api/plugins", s.handleListPlugins)
-	mux.HandleFunc("PUT /api/plugins/{id}", s.handleUpdatePlugin)
+	// Tools (super_admin only).
+	mux.HandleFunc("GET /api/tools", admin(s.handleGetTools))
+	mux.HandleFunc("PUT /api/tools", admin(s.handleSaveTools))
 
-	// Agent ↔ API key bindings (admin only). Controls which API key can
-	// read/write an agent; unbound agents are admin-only.
-	mux.HandleFunc("GET /api/agent-bindings", ua(s.handleListBindings))
-	mux.HandleFunc("POST /api/agents/{id}/binding", ua(s.handleBindAgent))
+	// Channels (read-only list of registered channel adapters at runtime)
+	mux.HandleFunc("GET /api/channels", auth(s.handleListChannels))
 
-	// Usage counters (admin only). Drives billing / quota dashboards.
-	mux.HandleFunc("GET /api/admin/usage", ua(s.handleGetUsage))
+	// Scoped CRUD: providers + channels at system / user / agent scope.
+	mux.HandleFunc("GET /api/providers", auth(s.handleListProviders))
+	mux.HandleFunc("POST /api/providers", auth(s.handleCreateProvider))
+	mux.HandleFunc("PUT /api/providers/{id}", auth(s.handleUpdateProvider))
+	mux.HandleFunc("DELETE /api/providers/{id}", auth(s.handleDeleteProvider))
+	mux.HandleFunc("POST /api/providers/{id}/test", auth(s.handleTestStoredProvider))
+	mux.HandleFunc("GET /api/scoped-channels", auth(s.handleListScopedChannels))
+	mux.HandleFunc("POST /api/scoped-channels", auth(s.handleCreateScopedChannel))
+	mux.HandleFunc("PUT /api/scoped-channels/{id}", auth(s.handleUpdateScopedChannel))
+	mux.HandleFunc("DELETE /api/scoped-channels/{id}", auth(s.handleDeleteScopedChannel))
 
-	// Tool providers: admin-managed API keys/endpoints + per-category primary/
-	// fallback chains. Agents pick up changes on next start.
-	mux.HandleFunc("GET /api/tools", ua(s.handleGetTools))
-	mux.HandleFunc("PUT /api/tools", ua(s.handleSaveTools))
+	// Cron jobs (per-user)
+	mux.HandleFunc("GET /api/cron", auth(s.handleListCronJobs))
+	mux.HandleFunc("POST /api/cron", auth(s.handleCreateCronJob))
+	mux.HandleFunc("PUT /api/cron/{id}", auth(s.handleUpdateCronJob))
+	mux.HandleFunc("DELETE /api/cron/{id}", auth(s.handleDeleteCronJob))
 
 	// Tasks
-	mux.HandleFunc("GET /api/tasks", ua(s.handleListTasks))
+	mux.HandleFunc("GET /api/tasks", auth(s.handleListTasks))
 
-	// Channels (local user only)
-	mux.HandleFunc("GET /api/channels", s.handleListChannels)
+	// Apikeys (per-user, with agent multi-select).
+	mux.HandleFunc("GET /api/apikeys", auth(s.handleListAPIKeys))
+	mux.HandleFunc("POST /api/apikeys", auth(s.handleCreateAPIKey))
+	mux.HandleFunc("DELETE /api/apikeys/{id}", auth(s.handleDeleteAPIKey))
+	mux.HandleFunc("POST /api/apikeys/{id}/rotate", auth(s.handleRotateAPIKey))
+	mux.HandleFunc("PUT /api/apikeys/{id}/agents", auth(s.handleSetAPIKeyAgents))
 
-	// Cron jobs
-	mux.HandleFunc("GET /api/cron", ua(s.handleListCronJobs))
-	mux.HandleFunc("POST /api/cron", ua(s.handleCreateCronJob))
-	mux.HandleFunc("PUT /api/cron/{id}", ua(s.handleUpdateCronJob))
-	mux.HandleFunc("DELETE /api/cron/{id}", ua(s.handleDeleteCronJob))
+	// Admin: user management (super_admin only).
+	mux.HandleFunc("GET /api/admin/users", admin(s.handleAdminListUsers))
+	mux.HandleFunc("POST /api/admin/users", admin(s.handleAdminCreateUser))
+	mux.HandleFunc("PUT /api/admin/users/{id}", admin(s.handleAdminUpdateUser))
+	mux.HandleFunc("DELETE /api/admin/users/{id}", admin(s.handleAdminDeleteUser))
+	mux.HandleFunc("POST /api/admin/users/{id}/password", admin(s.handleAdminResetPassword))
+	mux.HandleFunc("GET /api/admin/usage", admin(s.handleGetUsage))
 
-	// OpenAI-compatible API and WebSocket gateway
+	// OpenAI-compatible API and WebSocket gateway.
 	if s.apiServer != nil {
 		s.apiServer.RegisterRoutes(mux)
-		s.apiServer.RegisterAdminRoutes(mux)
 	}
 
-	// Static files from embedded web/out
+	// Static UI files.
 	webRoot, err := fs.Sub(webFS, "web")
 	if err != nil {
 		return fmt.Errorf("setup: embed sub: %w", err)
 	}
-
-	// Serve static files with SPA fallback
 	mux.Handle("/", spaHandler{fs: webRoot})
 
-	// Determine bind address
 	var addr string
 	if s.bind == "all" {
 		addr = fmt.Sprintf("0.0.0.0:%d", s.port)
 	} else {
 		addr = fmt.Sprintf("127.0.0.1:%d", s.port)
 	}
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
+	srv := &http.Server{Addr: addr, Handler: mux}
 
-	// Graceful shutdown on context cancel
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -371,7 +278,6 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("setup: listen %s: %w", addr, err)
 	}
-
 	slog.Info("web UI running", "url", fmt.Sprintf("http://localhost:%d", s.port))
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
@@ -379,29 +285,21 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// spaHandler serves static files, falling back to the directory's index.html
-// for paths that don't match a file (to support client-side routing).
+// spaHandler serves the embedded Next.js UI with SPA-style fallback.
 type spaHandler struct {
 	fs fs.FS
 }
 
 func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
-
-	// Strip trailing slash (except root) to normalize
 	if path != "/" && strings.HasSuffix(path, "/") {
 		path = strings.TrimSuffix(path, "/")
 	}
-
-	// fs.FS paths don't have leading slash
 	fsPath := strings.TrimPrefix(path, "/")
 	if fsPath == "" {
 		fsPath = "."
 	}
-
-	// Try to open the file directly (static assets like .js, .css, .ico)
-	f, err := h.fs.Open(fsPath)
-	if err == nil {
+	if f, err := h.fs.Open(fsPath); err == nil {
 		stat, statErr := f.Stat()
 		f.Close()
 		if statErr == nil && !stat.IsDir() {
@@ -409,37 +307,22 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
-	// For route paths (/onboard, /overview, /chat), look for index.html in that dir
 	var indexPath string
 	if fsPath == "." {
 		indexPath = "index.html"
 	} else {
 		indexPath = fsPath + "/index.html"
 	}
-	f, err = h.fs.Open(indexPath)
-	if err == nil {
+	if f, err := h.fs.Open(indexPath); err == nil {
 		f.Close()
 		http.ServeFileFS(w, r, h.fs, indexPath)
 		return
 	}
-
-	// Dynamic agent routes: /agents/{id}/... → fall back to /agents/default/...
-	// The client-side JS reads the actual agent ID from the URL.
-	//
-	// Covers two shapes:
-	//  1. Page HTML:      /agents/clawbot/chat/       → agents/default/chat/index.html
-	//  2. RSC payload:    /agents/clawbot/chat/index.txt, /agents/clawbot/chat/__next.*.txt
-	//     Next.js fetches these on client-side nav between server components.
-	//     Without this fallback Next gets a 404/HTML, aborts the soft nav, and
-	//     does a full page reload — which remounts the sidebar (visible flash).
 	if strings.HasPrefix(fsPath, "agents/") {
-		parts := strings.SplitN(fsPath, "/", 3) // ["agents", "{id}", "rest..."]
+		parts := strings.SplitN(fsPath, "/", 3)
 		if len(parts) >= 3 && parts[1] != "default" {
-			// Try exact file match under agents/default/ first (for RSC .txt, .html, etc.)
 			directFallback := "agents/default/" + parts[2]
-			f, err = h.fs.Open(directFallback)
-			if err == nil {
+			if f, err := h.fs.Open(directFallback); err == nil {
 				stat, statErr := f.Stat()
 				f.Close()
 				if statErr == nil && !stat.IsDir() {
@@ -447,26 +330,19 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			// Then the directory's index.html
 			dirFallback := "agents/default/" + parts[2] + "/index.html"
-			f, err = h.fs.Open(dirFallback)
-			if err == nil {
+			if f, err := h.fs.Open(dirFallback); err == nil {
 				f.Close()
 				http.ServeFileFS(w, r, h.fs, dirFallback)
 				return
 			}
 		}
 	}
-
-	// Try path.html
 	htmlPath := fsPath + ".html"
-	f, err = h.fs.Open(htmlPath)
-	if err == nil {
+	if f, err := h.fs.Open(htmlPath); err == nil {
 		f.Close()
 		http.ServeFileFS(w, r, h.fs, htmlPath)
 		return
 	}
-
-	// Fall back to index.html for client-side routing
 	http.ServeFileFS(w, r, h.fs, "index.html")
 }

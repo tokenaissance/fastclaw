@@ -93,7 +93,6 @@ func makeCreateCronJob(st store.Store, userID, agentID, channel, chatID string) 
 		now := time.Now()
 		job := &store.CronJobRecord{
 			ID:        id,
-			
 			AgentID:   agentID,
 			Name:      args.Name,
 			Type:      jobType,
@@ -117,17 +116,11 @@ func makeCreateCronJob(st store.Store, userID, agentID, channel, chatID string) 
 
 func makeListCronJobs(st store.Store, userID, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
-		jobs, err := st.ListCronJobs(ctx)
+		jobs, err := st.ListCronJobsByAgent(ctx, agentID)
 		if err != nil {
 			return "", fmt.Errorf("list cron jobs: %w", err)
 		}
-
-		var filtered []store.CronJobRecord
-		for _, j := range jobs {
-			if j.AgentID == agentID {
-				filtered = append(filtered, j)
-			}
-		}
+		filtered := jobs
 
 		if len(filtered) == 0 {
 			return "No cron jobs found for this agent.", nil

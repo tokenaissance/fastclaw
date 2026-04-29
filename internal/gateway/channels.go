@@ -1,39 +1,42 @@
 package gateway
 
 import (
+	"encoding/json"
+
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// registerChannels creates channel instances from config, one per account.
-func registerChannels(cfg *config.Config, mb *bus.MessageBus, chanMgr *channels.Manager) error {
-	for name, chCfg := range cfg.Channels {
-		if !chCfg.Enabled {
-			continue
-		}
-
-		switch name {
-		case "telegram":
-			if err := registerTelegramChannels(chCfg, mb, chanMgr); err != nil {
-				return err
-			}
-		case "discord":
-			if err := registerDiscordChannels(chCfg, mb, chanMgr); err != nil {
-				return err
-			}
-		case "slack":
-			if err := registerSlackChannels(chCfg, mb, chanMgr); err != nil {
-				return err
-			}
-		}
+// registerChannelInstance starts a channel adapter for one kind="channel"
+// row in configs. The row's credential_key is what processInbound
+// reverse-looks up via Store.LookupChannelByCredential to find the owner —
+// keep it stable (e.g. tail of bot token, app id).
+func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr *channels.Manager) error {
+	cc := decodeChannelConfig(rec)
+	switch rec.Name {
+	case "telegram":
+		return registerTelegramChannels(cc, mb, chanMgr)
+	case "discord":
+		return registerDiscordChannels(cc, mb, chanMgr)
+	case "slack":
+		return registerSlackChannels(cc, mb, chanMgr)
 	}
 	return nil
 }
 
+func decodeChannelConfig(rec store.ConfigRecord) config.ChannelConfig {
+	cc := config.ChannelConfig{Enabled: rec.Enabled}
+	if blob, err := json.Marshal(rec.Data); err == nil && len(blob) > 0 {
+		_ = json.Unmarshal(blob, &cc)
+	}
+	cc.Enabled = rec.Enabled
+	return cc
+}
+
 func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager) error {
 	if len(chCfg.Accounts) == 0 {
-		// No accounts defined — use the channel-level botToken as the default account
 		tg, err := channels.NewTelegram(chCfg.BotToken, "", mb)
 		if err != nil {
 			return err
@@ -41,12 +44,10 @@ func registerTelegramChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, ch
 		chanMgr.Register(tg)
 		return nil
 	}
-
-	// One instance per account
 	for accountID, acct := range chCfg.Accounts {
 		token := acct.BotToken
 		if token == "" {
-			token = chCfg.BotToken // fall back to parent
+			token = chCfg.BotToken
 		}
 		tg, err := channels.NewTelegram(token, accountID, mb)
 		if err != nil {
@@ -66,7 +67,6 @@ func registerDiscordChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, cha
 		chanMgr.Register(dc)
 		return nil
 	}
-
 	for accountID, acct := range chCfg.Accounts {
 		token := acct.BotToken
 		if token == "" {
@@ -90,7 +90,6 @@ func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanM
 		chanMgr.Register(sl)
 		return nil
 	}
-
 	for accountID, acct := range chCfg.Accounts {
 		botToken := acct.BotToken
 		if botToken == "" {
@@ -105,8 +104,8 @@ func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanM
 	return nil
 }
 
-// buildBotUsernames creates agentID -> botUsername mapping by looking at bindings
-// and resolving the bot username from the channel manager.
+// buildBotUsernames creates agentID -> botUsername mapping by looking at
+// bindings and resolving the bot username from the channel manager.
 func buildBotUsernames(bindings []config.Binding, chanMgr *channels.Manager) map[string]string {
 	m := make(map[string]string)
 	for _, b := range bindings {

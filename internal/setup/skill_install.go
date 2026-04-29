@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
@@ -49,14 +50,12 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For per-agent installs, validate access against the canonical source
-	// (store + filesystem) and let resolveInstallTarget lazy-create the
-	// home/skills dir if this pod hasn't seen the agent yet. Without this
-	// step, multi-pod deployments 403 on the non-creating pod because its
-	// emptyDir doesn't contain agents/<id>/.
-	if req.Agent != "" && !s.canAccessAgent(callerFrom(r), req.Agent) {
-		forbid(w, req.Agent)
-		return
+	if req.Agent != "" {
+		ident, ok := auth.FromContext(r.Context())
+		if !ok || !ident.CanAccessAgent(req.Agent) {
+			jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
+			return
+		}
 	}
 	targetDir, err := resolveInstallTarget(r, req.Agent)
 	if err != nil {
@@ -85,9 +84,8 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Hot-reload the target agent so the new skill is visible on the next turn.
-	if req.Agent != "" && s.agentProvider != nil {
-		if ag := s.agentProvider.AgentByID(req.Agent); ag != nil {
+	if req.Agent != "" {
+		if ag := s.resolveAgent(r, req.Agent); ag != nil {
 			ag.ReloadWorkspaceFiles()
 		}
 	}
@@ -109,10 +107,8 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 // the admin-only rule for global installs.
 func resolveInstallTarget(r *http.Request, agentID string) (string, error) {
 	if agentID != "" {
-		// Access has already been checked by the caller against the
-		// authoritative agent source (DB store + bindings). The home dir
-		// may legitimately not exist yet on this pod (emptyDir in
-		// multi-pod deploys) — just create it.
+		// agents.id is globally unique, so the home dir doesn't need a
+		// user namespace — owner check happens upstream of this call.
 		homePath, err := config.AgentHomeDir(agentID)
 		if err != nil {
 			return "", fmt.Errorf("resolve agent home: %w", err)
@@ -123,10 +119,9 @@ func resolveInstallTarget(r *http.Request, agentID string) (string, error) {
 		}
 		return dir, nil
 	}
-	// Global install — admin/local user only.
-	if config.UserIDFromContext(r.Context()) != config.DefaultUserID {
-		return "", fmt.Errorf("global skills are admin-managed; pass an 'agent' id to install into one agent only")
-	}
+	// Global install — super_admin only. Caller has already been
+	// validated by the route's RequireSuperAdmin middleware when this
+	// path is reached for global installs.
 	home, err := config.HomeDir()
 	if err != nil {
 		return "", err

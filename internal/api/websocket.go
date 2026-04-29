@@ -7,7 +7,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 )
 
 var upgrader = websocket.Upgrader{
@@ -89,18 +89,12 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			userID, err := s.resolveUserID(params.Auth.Token)
+			ident, err := s.authResolver.ResolveBearer(r.Context(), params.Auth.Token)
 			if err != nil {
-				// Allow anonymous connect only when no token is configured
-				// anywhere (purely local, no auth).
-				if s.token == "" && s.registry == nil {
-					userID = config.DefaultUserID
-				} else {
-					s.wsRespondError(conn, frame.ID, "authentication failed")
-					continue
-				}
+				s.wsRespondError(conn, frame.ID, "authentication failed")
+				continue
 			}
-			wsUserID = userID
+			wsUserID = ident.UserID
 			authenticated = true
 			s.wsRespondOK(conn, frame.ID, json.RawMessage(`{}`))
 
@@ -115,7 +109,8 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				s.wsRespondError(conn, frame.ID, "user space unavailable: "+err.Error())
 				continue
 			}
-			payload, _ := json.Marshal(map[string]any{"agents": buildAgentList(space)})
+			ident := auth.Identity{UserID: wsUserID, AuthMethod: "apikey"}
+			payload, _ := json.Marshal(map[string]any{"agents": buildAgentList(space, ident)})
 			s.wsRespondOK(conn, frame.ID, payload)
 
 		default:

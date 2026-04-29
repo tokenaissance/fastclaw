@@ -17,26 +17,76 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { ChevronsUpDownIcon, PlusIcon } from "lucide-react";
+import { Bot, ChevronsUpDownIcon, PlusIcon } from "lucide-react";
 
-function AgentAvatar({ size = 32 }: { size?: number }) {
+// AgentAvatar shows the agent's uploaded /api/agents/{id}/files/avatar.png
+// when available, falls back to the FastClaw logo for the platform header
+// (no agent), and falls back to a Bot icon when an agent has no custom
+// avatar yet (the image 404s).
+function AgentAvatar({
+  agentId,
+  size = 32,
+}: {
+  agentId?: string | null;
+  size?: number;
+}) {
+  const [failed, setFailed] = React.useState(false);
+  React.useEffect(() => {
+    setFailed(false);
+  }, [agentId]);
+
+  if (!agentId) {
+    return (
+      <img
+        src="/logo.png"
+        alt="FastClaw"
+        width={size}
+        height={size}
+        className="rounded-lg"
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+  if (failed) {
+    return (
+      <div
+        className="flex shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-purple-600"
+        style={{ width: size, height: size }}
+      >
+        <Bot className="text-white" style={{ width: size * 0.55, height: size * 0.55 }} />
+      </div>
+    );
+  }
   return (
+    // eslint-disable-next-line @next/next/no-img-element
     <img
-      src="/logo.png"
-      alt="FastClaw"
+      src={`/api/agents/${agentId}/files/avatar.png`}
+      alt=""
       width={size}
       height={size}
-      className="rounded-lg"
+      className="shrink-0 rounded-lg object-cover"
       style={{ width: size, height: size }}
+      onError={() => setFailed(true)}
     />
   );
 }
 
 export interface AgentSwitcherItem {
   id: string;
+  name?: string;
   model?: string;
 }
 
+// AgentSwitcher renders the sidebar header.
+//
+//   activeAgentId set     → show that agent's display name + id, dropdown
+//                           lists every agent for quick switching
+//   activeAgentId unset   → show "FastClaw" (platform brand). The dropdown
+//                           still lists agents so users can jump in from
+//                           any non-agent page.
+//
+// We never auto-promote the first agent into the header — the header on
+// admin pages (Agents list, API Keys, Settings, …) stays neutral.
 export function AgentSwitcher({
   agents,
   activeAgentId,
@@ -49,8 +99,9 @@ export function AgentSwitcher({
   const { isMobile } = useSidebar();
   const router = useRouter();
 
-  const active =
-    agents.find((a) => a.id === activeAgentId) ?? agents[0] ?? null;
+  const active = activeAgentId
+    ? agents.find((a) => a.id === activeAgentId) ?? null
+    : null;
 
   const goto = React.useCallback(
     (id: string) => {
@@ -60,25 +111,7 @@ export function AgentSwitcher({
     [onSelect, router],
   );
 
-  if (!active) {
-    return (
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            size="lg"
-            onClick={() => router.push("/agents/")}
-          >
-            <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-              <PlusIcon className="size-4" />
-            </div>
-            <div className="grid flex-1 text-left text-sm leading-tight">
-              <span className="truncate font-medium">No agents</span>
-            </div>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    );
-  }
+  const headerLabel = active ? active.name || active.id : "FastClaw";
 
   return (
     <SidebarMenu>
@@ -92,9 +125,9 @@ export function AgentSwitcher({
               />
             }
           >
-            <AgentAvatar size={32} />
+            <AgentAvatar agentId={active?.id} size={32} />
             <div className="grid flex-1 text-left text-sm leading-tight">
-              <span className="truncate font-medium">{active.id}</span>
+              <span className="truncate font-medium">{headerLabel}</span>
             </div>
             <ChevronsUpDownIcon className="ml-auto" />
           </DropdownMenuTrigger>
@@ -104,22 +137,26 @@ export function AgentSwitcher({
             side={isMobile ? "bottom" : "right"}
             sideOffset={4}
           >
-            <DropdownMenuGroup>
-              <DropdownMenuLabel className="text-xs text-muted-foreground">
-                Agents
-              </DropdownMenuLabel>
-              {agents.map((a) => (
-                <DropdownMenuItem
-                  key={a.id}
-                  onClick={() => goto(a.id)}
-                  className="gap-2 p-2"
-                >
-                  <AgentAvatar size={24} />
-                  <span className="flex-1 truncate">{a.id}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuGroup>
-            <DropdownMenuSeparator />
+            {agents.length > 0 && (
+              <>
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                    Agents
+                  </DropdownMenuLabel>
+                  {agents.map((a) => (
+                    <DropdownMenuItem
+                      key={a.id}
+                      onClick={() => goto(a.id)}
+                      className="gap-2 p-2"
+                    >
+                      <AgentAvatar agentId={a.id} size={24} />
+                      <span className="flex-1 truncate">{a.name || a.id}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+              </>
+            )}
             <DropdownMenuGroup>
               <DropdownMenuItem
                 className="gap-2 p-2"

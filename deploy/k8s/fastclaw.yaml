@@ -1,18 +1,27 @@
 # FastClaw — single-file K8s deployment.
 #
 # ┌─ ONE-SHOT DEPLOY ──────────────────────────────────────────────────────┐
-# │  1. 改 `fastclaw-secrets` 下 4 个值                                    │
+# │  1. 改 `fastclaw-secrets` 里的 3 个值(DSN + 对象存储 AK/SK)          │
 # │  2. 在 `fastclaw-config` 里**选一个** object-store provider 块,       │
 # │     把旁边其他块保留注释                                                │
 # │  3. 改 Ingress 域名(不需要公网就删掉整段 Ingress)                    │
 # │  4. kubectl apply -f fastclaw.yaml                                    │
+# │  5. 创建超管:                                                         │
+# │     kubectl -n fastclaw exec deploy/fastclaw -- \                     │
+# │       fastclaw admin create-user --username alice \                   │
+# │         --email alice@example.com --password 'hunter2' \              │
+# │         --role super_admin                                            │
+# │     之后浏览器走 /login,无需 admin token。                            │
 # └────────────────────────────────────────────────────────────────────────┘
 #
 # 外部前提:
-#   - 阿里云 RDS PostgreSQL(或任何 PG 16+),`pg_trgm` 扩展启用
+#   - 阿里云 RDS PostgreSQL(或任何 PG 16+)
 #   - 一个对象存储 bucket(AWS S3 / R2 / B2 / OSS / MinIO 任选)
 #   - 镜像:ghcr.io/fastclaw-ai/fastclaw:dev(GitHub Action 自动推送,公开)
 #   - 可选:cert-manager + ClusterIssuer(要 HTTPS 的话)
+#
+# 配置完全通过 FASTCLAW_* 环境变量驱动 — 没有配置文件。
+# 所有用户 / agent / provider / channel 数据都在 Postgres 里。
 
 ---
 apiVersion: v1
@@ -28,9 +37,6 @@ metadata:
   namespace: fastclaw
 type: Opaque
 stringData:
-  # 管理员 token。生成:openssl rand -hex 32
-  AUTH_TOKEN: "REPLACE_WITH_RANDOM_64_HEX"
-
   # Postgres DSN。阿里云 RDS 建议 sslmode=require。
   STORAGE_DSN: "postgres://fastclaw:PASS@rm-xxxxx.pg.rds.aliyuncs.com:5432/fastclaw?sslmode=require"
 
@@ -61,10 +67,10 @@ metadata:
   name: fastclaw-config
   namespace: fastclaw
 data:
-  FASTCLAW_MODE: "cloud"
   FASTCLAW_PORT: "18953"
   FASTCLAW_BIND: "all"
   FASTCLAW_STORAGE_TYPE: "postgres"
+  FASTCLAW_STORAGE_AUTO_MIGRATE: "true"
 
   # ─── Provider 1: 阿里云 OSS(默认示例) ───
   FASTCLAW_OBJECT_STORE_TYPE: "aliyun-oss"
@@ -131,7 +137,7 @@ spec:
           envFrom:
             - configMapRef: { name: fastclaw-config }
           env:
-            - { name: FASTCLAW_AUTH_TOKEN,              valueFrom: { secretKeyRef: { name: fastclaw-secrets, key: AUTH_TOKEN } } }
+            - { name: FASTCLAW_HOME,                    value: "/data/.fastclaw" }
             - { name: FASTCLAW_STORAGE_DSN,             valueFrom: { secretKeyRef: { name: fastclaw-secrets, key: STORAGE_DSN } } }
             - { name: FASTCLAW_OBJECT_STORE_ACCESSKEY,  valueFrom: { secretKeyRef: { name: fastclaw-secrets, key: OBJECT_STORE_ACCESSKEY } } }
             - { name: FASTCLAW_OBJECT_STORE_SECRETKEY,  valueFrom: { secretKeyRef: { name: fastclaw-secrets, key: OBJECT_STORE_SECRETKEY } } }

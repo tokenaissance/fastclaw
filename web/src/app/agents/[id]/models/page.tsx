@@ -30,6 +30,7 @@ import {
   type ProviderData,
 } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
+import { useAgentName } from "@/hooks/use-agent-name";
 
 const PROVIDER_PRESETS: Record<string, { apiBase: string; apiType: string }> = {
   openrouter: { apiBase: "https://openrouter.ai/api/v1", apiType: "openai-chat" },
@@ -103,6 +104,7 @@ function providersMapFrom(list: ProviderEntry[]): Record<string, ProviderData> {
 
 export default function AgentModelsPage() {
   const agentId = useAgentIdFromURL();
+  const agentName = useAgentName(agentId);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -314,7 +316,7 @@ export default function AgentModelsPage() {
           <h2 className="text-2xl font-semibold tracking-tight">Models</h2>
           <p className="text-sm text-muted-foreground mt-1">
             LLM providers and models scoped to{" "}
-            <span className="font-mono">{agentId}</span> — only this agent uses them
+            <strong>{agentName}</strong> — only this agent uses them
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -363,7 +365,7 @@ export default function AgentModelsPage() {
           />
         )}
         <p className="text-xs text-muted-foreground mt-2">
-          Used by <span className="font-mono">{agentId}</span>. Format{" "}
+          Used by <strong>{agentName}</strong>. Format{" "}
           <code className="text-[11px]">provider/modelId</code>.
         </p>
       </div>
@@ -456,7 +458,7 @@ export default function AgentModelsPage() {
           <DialogHeader>
             <DialogTitle>{editingName ? "Edit Provider" : "Add Provider"}</DialogTitle>
             <DialogDescription>
-              Configure an LLM provider that only <span className="font-mono">{agentId}</span>{" "}
+              Configure an LLM provider that only <strong>{agentName}</strong>{" "}
               will use
             </DialogDescription>
           </DialogHeader>

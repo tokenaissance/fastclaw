@@ -1,3 +1,6 @@
+// Package gateway is the runtime orchestrator. It opens the store, hosts
+// per-user UserSpaces (lazy-loaded on first auth), and starts the channel
+// manager / cron scheduler / webhook server / plugin manager.
 package gateway
 
 import (
@@ -18,7 +21,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
-	"github.com/fastclaw-ai/fastclaw/internal/session"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
@@ -30,10 +33,6 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
-// toolProviderRegistry is the process-global registry of built-in tool
-// providers. Populated once at startup; reads from it are concurrency-safe.
-// Keeping it as a package var lets both the Gateway and per-user spaces share
-// it without threading the reference through half a dozen constructors.
 var toolProviderRegistry = func() *toolproviders.Registry {
 	r := toolproviders.NewRegistry()
 	websearch.RegisterAll(r)
@@ -42,102 +41,28 @@ var toolProviderRegistry = func() *toolproviders.Registry {
 	return r
 }()
 
-// ToolProviderRegistry exposes the registry for callers (e.g. admin API
-// handlers) that want to list available providers.
+// ToolProviderRegistry exposes the registry for callers that want to list
+// available providers (admin API).
 func ToolProviderRegistry() *toolproviders.Registry { return toolProviderRegistry }
 
-// defaultStr returns v when non-empty, otherwise fallback. Single helper
-// so slog labels stay tidy.
-func defaultStr(v, fallback string) string {
-	if v == "" {
-		return fallback
-	}
-	return v
-}
-
-// mergeCloudConfig copies product-level fields from the DB-persisted config
-// into the live env-bootstrapped config. Infra fields (Gateway, Storage,
-// ObjectStore, Sandbox) are left alone — they must come from env / Secret
-// so ops keeps control of the deployment surface even after a UI save.
-func mergeCloudConfig(dst, src *config.Config) {
-	if src == nil {
-		return
-	}
-	if len(src.Providers) > 0 {
-		dst.Providers = src.Providers
-	}
-	if len(src.Channels) > 0 {
-		dst.Channels = src.Channels
-	}
-	if len(src.Bindings) > 0 {
-		dst.Bindings = src.Bindings
-	}
-	if len(src.Teams) > 0 {
-		dst.Teams = src.Teams
-	}
-	if len(src.CronJobs) > 0 {
-		dst.CronJobs = src.CronJobs
-	}
-	if src.Agents.Defaults.Model != "" {
-		dst.Agents.Defaults = src.Agents.Defaults
-	}
-	if len(src.ToolProviders) > 0 {
-		dst.ToolProviders = src.ToolProviders
-	}
-	if len(src.Tools) > 0 {
-		dst.Tools = src.Tools
-	}
-	if src.Heartbeat.IntervalMinutes > 0 {
-		dst.Heartbeat = src.Heartbeat
-	}
-	// Sandbox is technically infra but the onboarding wizard / settings
-	// page persists it through the same store path as product fields, so
-	// pull it back on reload — otherwise toggling sandbox in the UI is
-	// lost across restarts in deployments that don't ship a fastclaw.json.
-	// Only adopt when src actually carries a backend, so an empty stored
-	// row doesn't clobber an env.toml-provided default.
-	if src.Sandbox.Enabled || src.Sandbox.Backend != "" {
-		dst.Sandbox = src.Sandbox
-	}
-	// Skills entries (per-skill apiKey + env, plus per-(agent, skill)
-	// overrides) live in the same store row. Without this overlay, env
-	// values saved through the admin UI vanish on every restart and
-	// agents fall back to "X_KEY not configured". DB wins because the
-	// UI is the canonical place to set these — disk fastclaw.json is
-	// only the fallback for installs that pre-date the store.
-	if len(src.Skills.Entries) > 0 {
-		dst.Skills.Entries = src.Skills.Entries
-	}
-	if len(src.Skills.AgentEntries) > 0 {
-		dst.Skills.AgentEntries = src.Skills.AgentEntries
-	}
-}
-
-// registerAgentToolChains wires every provider-backed tool category onto the
-// given agents. Each agent gets its own Chain that honors its per-agent
-// toolProviders/tools overrides from agent.json — one agent can point
-// web_search at searxng while another uses exa.
+// registerAgentToolChains wires every provider-backed tool category onto
+// the given agents using their merged config view (system + user + agent
+// scopes overlaid by the resolver).
 func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
 	for _, ag := range agents {
-		resolved := cfg.MergedAgentConfigForUser(config.AgentEntry{ID: ag.Name()}, config.DefaultUserID)
+		resolved := cfg.MergedAgentConfig(config.AgentEntry{ID: ag.Name()})
 		if chain := buildToolChainFromResolved(resolved, "web_search"); chain != nil {
 			ag.RegisterWebSearchChain(chain)
-			slog.Info("web_search chain registered", "agent", ag.Name(), "providers", chain.Order)
 		}
 		if chain := buildToolChainFromResolved(resolved, "image_gen"); chain != nil {
 			ag.RegisterImageGenChain(chain)
-			slog.Info("image_gen chain registered", "agent", ag.Name(), "providers", chain.Order)
 		}
 		if chain := buildToolChainFromResolved(resolved, "tts"); chain != nil {
 			ag.RegisterTTSChain(chain)
-			slog.Info("tts chain registered", "agent", ag.Name(), "providers", chain.Order)
 		}
 	}
 }
 
-// buildToolChainFromResolved builds a Chain using the agent's merged view
-// (global defaults + agent.json overrides). Returns nil when the category
-// isn't configured or has no registered providers, which hides the tool.
 func buildToolChainFromResolved(resolved config.ResolvedAgent, category string) *toolproviders.Chain {
 	cat, ok := resolved.Tools[category]
 	if !ok {
@@ -147,7 +72,7 @@ func buildToolChainFromResolved(resolved config.ResolvedAgent, category string) 
 	if len(order) == 0 {
 		return nil
 	}
-	providers := resolved.ToolProviders // captured by closure below
+	providers := resolved.ToolProviders
 	chain := &toolproviders.Chain{
 		Category:     category,
 		Order:        order,
@@ -168,107 +93,66 @@ func buildToolChainFromResolved(resolved config.ResolvedAgent, category string) 
 	return chain
 }
 
-// Gateway is the main orchestrator that starts all services.
-//
-// It owns a registry of per-user spaces. The "local" user is loaded at
-// startup and drives channels, cron, webhooks and plugins (these remain
-// host-global features). In cloud mode, additional users are loaded lazily
-// on first HTTP request and get isolated agents + sessions + memory.
+// Gateway is the runtime orchestrator. It does not load any agents at
+// boot; UserSpaces are constructed lazily when an authenticated request
+// resolves to their owner.
 type Gateway struct {
-	config       *config.Config // local user's config
-	bus          *bus.MessageBus
-	users        *userSpaceRegistry
-	localSpace   *UserSpace // shortcut to users.get(config.DefaultUserID)
-	agents       *agent.Manager // alias for localSpace.Agents (channels/cron/plugins)
-	chanMgr      *channels.Manager
-	bindings     []config.Binding
-	botUsernames map[string]string          // agentID -> bot username
-	teams        map[string]config.TeamEntry // team name -> team config
-	mu           sync.RWMutex
-	dedup        sync.Map                    // dedup key -> dedupEntry
-	heartbeats   []*agent.Heartbeat
-	scheduler    *cron.Scheduler
-	webhookSrv   *webhook.Server
-	pluginMgr    *plugin.Manager
-	taskQueue    *taskqueue.Queue
-	store        store.Store
-	workspace    workspace.Store
-	usage        usage.Meter
+	bus        *bus.MessageBus
+	users      *userSpaceRegistry
+	chanMgr    *channels.Manager
+	scheduler  *cron.Scheduler
+	webhookSrv *webhook.Server
+	pluginMgr  *plugin.Manager
+	taskQueue  *taskqueue.Queue
+	store      store.Store
+	workspace  workspace.Store
+	usage      usage.Meter
+	envCfg     *config.EnvConfig
+	mu         sync.RWMutex
+	dedup      sync.Map
 }
 
-// Workspace returns the durable artifact store (local FS or S3). Handlers
-// and tools use this to read/write agent-generated files.
+// Workspace returns the durable artifact store.
 func (g *Gateway) Workspace() workspace.Store { return g.workspace }
 
-// Usage returns the per-tenant resource meter. Admin endpoints use this to
-// answer "how much did X consume", which is the input side of billing /
-// quota. Always non-nil — defaults to an in-memory meter when nothing
-// durable is configured.
+// Usage returns the per-tenant resource meter.
 func (g *Gateway) Usage() usage.Meter { return g.usage }
 
-// New creates a new Gateway with multi-agent support.
-func New(cfg *config.Config) (*Gateway, error) {
+// Store returns the gateway's storage backend.
+func (g *Gateway) Store() store.Store { return g.store }
+
+// TaskQueue returns the gateway's task queue.
+func (g *Gateway) TaskQueue() *taskqueue.Queue { return g.taskQueue }
+
+// EnvConfig returns the bootstrap config (FASTCLAW_* env vars).
+func (g *Gateway) EnvConfig() *config.EnvConfig { return g.envCfg }
+
+// New creates a Gateway. Storage + workspace + plugin manager + channel
+// manager + cron scheduler + webhook all initialize here, but no agents
+// are loaded until an authenticated request hits a user.
+func New(env *config.EnvConfig) (*Gateway, error) {
+	if env == nil {
+		env = &config.EnvConfig{}
+	}
 	mb := bus.New()
 
-	// Initialize storage backend. Local user's config on the filesystem is
-	// always the bootstrap; after reading it, we open the configured store
-	// (FileStore or DBStore) for all subsequent per-user data.
 	homeDir, _ := config.HomeDir()
 	st, err := store.New(&store.StorageConfig{
-		Type:        store.StorageType(cfg.Storage.Type),
-		DSN:         cfg.Storage.DSN,
-		AutoMigrate: cfg.Storage.AutoMigrate,
+		Type:        store.StorageType(env.Storage.Type),
+		DSN:         env.Storage.DSN,
+		AutoMigrate: env.Storage.AutoMigrate || env.Storage.Type == "" || env.Storage.Type == "sqlite",
 	}, homeDir)
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
-	// Hydrate product fields (providers, agents.defaults, channels, …)
-	// from the DB on EVERY mode, not just cloud — local mode benefits too
-	// after #4 made the store the source of truth. Infra fields (storage,
-	// objectStore, sandbox) still come from env/Secret because they're
-	// deployment-time concerns; we only adopt Gateway.Auth.Token from
-	// the store as a last-resort fallback so a UI-completed onboarding
-	// flow's freshly-generated token survives a process restart without
-	// the operator having to copy-paste it into FASTCLAW_AUTH_TOKEN.
-	if st != nil {
-		if gc, err := st.GetConfig(context.Background()); err == nil && gc != nil && len(gc.Data) > 0 {
-			if blob, err := json.Marshal(gc.Data); err == nil {
-				var stored config.Config
-				if err := json.Unmarshal(blob, &stored); err == nil {
-					mergeCloudConfig(cfg, &stored)
-					if cfg.Gateway.Auth.Token == "" && stored.Gateway.Auth.Token != "" {
-						cfg.Gateway.Auth.Token = stored.Gateway.Auth.Token
-						slog.Info("adopted gateway token from store")
-					}
-				} else {
-					slog.Warn("decode stored config", "error", err)
-				}
-			}
-		} else if err != nil {
-			slog.Warn("store GetConfig failed", "error", err)
-		}
-	}
-	// Re-apply defaults after every overlay (env, fastclaw.json, store)
-	// so a stored cfg that left MaxTokens / Temperature /
-	// MaxToolIterations at 0 doesn't propagate the zeros into the
-	// resolved agent — Otherwise the agent loop hits its iteration cap
-	// on iteration 0 and the very first chat turn errors out with
-	// "max tool iterations reached max=0".
-	config.ApplyDefaults(cfg)
-
-	// Wire layer-3 agent config (per-agent overrides — model, providers,
-	// skills, tools, MCP) to read from the store first and only fall back
-	// to FS for legacy installs whose DB row is empty. Without this, agents
-	// table on a fresh SaaS pod has no per-agent config visible to the
-	// runtime even when admins edited it through the API. Set lazily so
-	// other packages that already imported config see the upgraded loader.
+	// Wire layer-3 agent config (per-agent overrides) to read from the DB.
 	config.AgentFileConfigLoader = makeStoreFirstAgentFileLoader(st)
 
-	// Workspace blob store (local FS or S3). Distinct from the Store above:
-	// that one holds small structured state (sessions, identity md files);
-	// this one holds arbitrary artifacts (generated PDFs/images/audio).
-	osCfg := cfg.ObjectStore
+	// Object store for agent-produced artifacts. Object store config lives
+	// in system_settings for runtime-edited fields and FASTCLAW_OBJECT_STORE_*
+	// env vars for ops-managed overrides.
+	osCfg := readObjectStoreCfg(st)
 	wsInner, err := workspace.Factory{
 		Type:         osCfg.Type,
 		LocalDir:     osCfg.Local.Root,
@@ -289,239 +173,79 @@ func New(cfg *config.Config) (*Gateway, error) {
 	}
 	slog.Info("object store", "type", defaultStr(osCfg.Type, "local"))
 
-	// Usage meter sits on top of the workspace store so every agent Put is
-	// automatically counted as workspace_bytes. In-memory for now;
-	// swapping in a DB-backed implementation is a one-line change.
 	meter := usage.NewMemMeter()
 	ws := workspace.NewMetered(wsInner, func(ctx context.Context, agentID string, bytes int64) {
-		// agentID is the metering "agent" dimension. The API-key dimension
-		// comes from the request context; workspace writes from inside
-		// the agent loop don't carry it, so we record it as "" (admin).
-		// For tenant attribution we'd need to thread the caller through
-		// the tool stack — left as a follow-up.
 		meter.Add(ctx, "", agentID, usage.WorkspaceBytes, bytes)
 	})
 
-	// Resolve provider + agents for the local user. This mirrors what
-	// loadUserSpace does, but we keep the inline version here because the
-	// caller already handed us a *config.Config (avoiding a redundant disk
-	// read) and we want to surface any provider log lines.
-	llm := newProviderFromConfig(cfg)
-	slog.Info("local provider resolved", "defaultModel", cfg.Agents.Defaults.Model)
-
-	// In Postgres-backed deployments a freshly-scheduled pod has an empty
-	// filesystem — DiscoverAgents returns nothing even though agents exist
-	// in the DB. Supplement filesystem discovery with the Store's agent
-	// list so any pod can serve any agent without relying on pod-local FS.
-	var storeAgents []config.AgentEntry
-	if st != nil {
-		if records, err := st.ListAgents(context.Background()); err == nil {
-			for _, ar := range records {
-				storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
-			}
-		} else {
-			slog.Warn("store ListAgents failed", "error", err)
-		}
-	}
-	resolved := config.ResolveAgentsWithExtra(cfg, "", storeAgents)
-	// Ensure each agent's home dir layout exists on this pod's local FS.
-	// Agents discovered via the store may not have a home dir yet (the
-	// pod that handled the create request mkdir'd it on its own emptyDir);
-	// without this the config watcher logs "failed to watch agent home"
-	// and identity-file hot-reload silently breaks until the dir appears.
-	for _, rc := range resolved {
-		ensureAgentHome(rc)
-	}
-	managerOpts := []agent.ManagerOption{
-		agent.WithUserID(config.DefaultUserID),
-		agent.WithGlobalSkillsCfg(cfg.Skills),
-	}
-	if st != nil {
-		managerOpts = append(managerOpts,
-			agent.WithSessionStore(session.NewStoreAdapter(st)),
-			agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
-		)
-	}
-	if ws != nil {
-		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
-	}
-	agentMgr, err := agent.NewManager(resolved, llm, mb, managerOpts...)
-	if err != nil {
-		return nil, err
-	}
-
-	// Attach sandbox (E2B / Docker) to every local-user agent so exec +
-	// file tool calls run inside an isolated env, not on the pod's host
-	// shell. loadUserSpace does the same for cloud users; this inline
-	// bootstrap used to skip it entirely — which meant admin chats
-	// ignored the sandbox config no matter what env we set.
-	sandboxPool := attachSandboxToAgents(config.DefaultUserID, resolved, agentMgr, ws)
-
-	localSpace := &UserSpace{
-		UserID:      config.DefaultUserID,
-		Config:      cfg,
-		Provider:    llm,
-		Agents:      agentMgr,
-		SandboxPool: sandboxPool,
-	}
-	userReg := newUserSpaceRegistry(mb, st)
-	userReg.workspace = ws
-	userReg.put(localSpace)
-
-	slog.Info("agents loaded", "user", config.DefaultUserID, "count", len(resolved), "names", agentMgr.Names())
-
-	// Create channel manager and register channel instances
 	chanMgr := channels.NewManager(mb)
 
-	if err := registerChannels(cfg, mb, chanMgr); err != nil {
-		return nil, err
-	}
+	// Cron scheduler reads jobs directly from the DB on each tick — no
+	// in-memory job list, no fastclaw.json copy. Each fired job carries
+	// its OwnerUserID so processInbound can route into the right space.
+	scheduler := cron.NewSchedulerFromStore(&cronStoreAdapter{st: st}, mb)
 
-	// Build agentID -> botUsername mapping from bindings + channel manager
-	botUsernames := buildBotUsernames(cfg.Bindings, chanMgr)
-	if len(botUsernames) > 0 {
-		slog.Info("bot username mappings", "map", botUsernames)
-	}
-
-	teams := cfg.Teams
-	if teams == nil {
-		teams = make(map[string]config.TeamEntry)
-	}
-
-	// Set up group context for agents in teams
-	for _, team := range teams {
-		for _, agentID := range team.Agents {
-			ag := agentMgr.AgentByID(agentID)
-			if ag == nil {
-				continue
-			}
-			var teammates []string
-			for _, otherID := range team.Agents {
-				if otherID != agentID {
-					if uname, ok := botUsernames[otherID]; ok {
-						teammates = append(teammates, "@"+uname)
-					} else {
-						teammates = append(teammates, otherID)
-					}
-				}
-			}
-			if botUname, ok := botUsernames[agentID]; ok {
-				ag.SetGroupContext(&agent.GroupContext{
-					BotUsername: botUname,
-					Teammates:  teammates,
-				})
-			}
-		}
-	}
-
-	// Set up heartbeats for each agent
-	heartbeatInterval := time.Duration(cfg.Heartbeat.IntervalMinutes) * time.Minute
-	if heartbeatInterval <= 0 {
-		heartbeatInterval = agent.DefaultHeartbeatInterval
-	}
-	var heartbeats []*agent.Heartbeat
-	for _, ag := range agentMgr.All() {
-		hb := agent.NewHeartbeat(ag, mb, heartbeatInterval)
-		heartbeats = append(heartbeats, hb)
-	}
-
-	// Set up cron scheduler
-	var cronJobs []cron.Job
-	for _, cj := range cfg.CronJobs {
-		cronJobs = append(cronJobs, cron.Job{
-			Name:     cj.Name,
-			Type:     cron.JobType(cj.Type),
-			Schedule: cj.Schedule,
-			AgentID:  cj.AgentID,
-			Channel:  cj.Channel,
-			ChatID:   cj.ChatID,
-			Message:  cj.Message,
-		})
-	}
-	scheduler := cron.NewScheduler(cronJobs, mb)
-
-	// Register provider-backed tools (web_search, image_gen, tts, …) on every
-	// agent. Categories with no configured providers are simply hidden from
-	// the LLM's tool list.
-	registerAgentToolChains(cfg, agentMgr.All())
-
-	// Register sub-agent spawner for all agents
-	spawner := &gatewaySubAgentSpawner{agents: agentMgr}
-	for _, ag := range agentMgr.All() {
-		ag.SetSubAgentSpawner(spawner)
-	}
-
-	// Set up webhook server if enabled
+	systemHooks := readSystemHooks(st)
 	var webhookSrv *webhook.Server
-	if cfg.Hooks.Enabled {
-		webhookSrv = webhook.NewServer(cfg.Hooks.Token, cfg.Hooks.Path, &webhookAgentHandler{agents: agentMgr}, nil)
+	if systemHooks.Enabled {
+		webhookSrv = webhook.NewServer(systemHooks.Token, systemHooks.Path, nil, nil)
 	}
 
-	// Set up plugin manager
 	var pluginMgr *plugin.Manager
-	if cfg.Plugins.Enabled {
+	systemPlugins := readSystemPlugins(st)
+	if systemPlugins.Enabled {
 		pluginMgr = plugin.NewManager(mb)
-
-		homeDir, _ := config.HomeDir()
 		pluginPaths := []string{filepath.Join(homeDir, "plugins")}
-		for _, p := range cfg.Plugins.Paths {
-			pluginPaths = append(pluginPaths, p)
-		}
-
+		pluginPaths = append(pluginPaths, systemPlugins.Paths...)
 		if err := pluginMgr.Discover(pluginPaths); err != nil {
 			slog.Warn("plugin discovery error", "error", err)
 		}
-
-		// Apply per-plugin config
-		if len(cfg.Plugins.Entries) > 0 {
-			entries := make(map[string]plugin.PluginEntryCfg, len(cfg.Plugins.Entries))
-			for k, v := range cfg.Plugins.Entries {
-				entries[k] = plugin.PluginEntryCfg{
-					Enabled: v.Enabled,
-					Config:  v.Config,
-				}
+		if len(systemPlugins.Entries) > 0 {
+			entries := make(map[string]plugin.PluginEntryCfg, len(systemPlugins.Entries))
+			for k, v := range systemPlugins.Entries {
+				entries[k] = plugin.PluginEntryCfg{Enabled: v.Enabled, Config: v.Config}
 			}
 			pluginMgr.ApplyConfig(entries)
 		}
 	}
 
-	// Create task queue with config values
-	maxConcurrent := cfg.TaskQueue.MaxConcurrent
+	taskCfg := readSystemTaskQueue(st)
+	maxConcurrent := taskCfg.MaxConcurrent
 	if maxConcurrent <= 0 {
 		maxConcurrent = 10
 	}
-	taskTimeoutSec := cfg.TaskQueue.TaskTimeoutSec
+	taskTimeoutSec := taskCfg.TaskTimeoutSec
 	if taskTimeoutSec <= 0 {
 		taskTimeoutSec = 300
 	}
 	taskTimeout := time.Duration(taskTimeoutSec) * time.Second
 
 	g := &Gateway{
-		config:       cfg,
-		bus:          mb,
-		store:        st,
-		workspace:    ws,
-		usage:        meter,
-		users:        userReg,
-		localSpace:   localSpace,
-		agents:       agentMgr,
-		chanMgr:      chanMgr,
-		bindings:     cfg.Bindings,
-		botUsernames: botUsernames,
-		teams:        teams,
-		heartbeats:   heartbeats,
-		scheduler:    scheduler,
-		webhookSrv:   webhookSrv,
-		pluginMgr:    pluginMgr,
+		bus:        mb,
+		store:      st,
+		workspace:  ws,
+		usage:      meter,
+		users:      newUserSpaceRegistry(mb, st, ws),
+		chanMgr:    chanMgr,
+		scheduler:  scheduler,
+		webhookSrv: webhookSrv,
+		pluginMgr:  pluginMgr,
+		envCfg:     env,
+	}
+
+	if webhookSrv != nil {
+		webhookSrv.SetHandler(&webhookAgentHandler{gateway: g})
 	}
 
 	tq := taskqueue.NewQueue(maxConcurrent, taskTimeout, func(ctx context.Context, task *taskqueue.Task) (string, error) {
-		ag := agentMgr.AgentByID(task.AgentID)
+		space, err := g.users.getOrLoad(ctx, task.OwnerUserID)
+		if err != nil {
+			return "", fmt.Errorf("load user space: %w", err)
+		}
+		ag := space.Agents.AgentByID(task.AgentID)
 		if ag == nil {
 			return "", fmt.Errorf("agent %q not found", task.AgentID)
 		}
-
-		// Send typing indicator and keep sending every 5s until done
 		chanMgr.SendTyping(task.Message.Channel, task.AccountID, task.Message.ChatID)
 		typingDone := make(chan struct{})
 		go func() {
@@ -538,10 +262,8 @@ func New(cfg *config.Config) (*Gateway, error) {
 				}
 			}
 		}()
-
 		reply := ag.HandleMessage(ctx, task.Message)
 		close(typingDone)
-
 		mb.Outbound <- bus.OutboundMessage{
 			Channel:      task.Message.Channel,
 			AccountID:    task.AccountID,
@@ -553,57 +275,41 @@ func New(cfg *config.Config) (*Gateway, error) {
 	})
 	g.taskQueue = tq
 
+	// Register all enabled channel rows from the DB.
+	if err := registerChannelsFromStore(st, mb, chanMgr); err != nil {
+		slog.Warn("registerChannelsFromStore", "error", err)
+	}
+
 	return g, nil
 }
 
-// AgentManager returns the local user's agent manager.
-// For per-user routing in cloud mode, use UserSpaceFor.
-func (g *Gateway) AgentManager() *agent.Manager {
-	return g.agents
-}
-
-// LocalUserSpace returns the preloaded local ("host admin") user space that
-// owns channels, cron jobs, plugins, and the webhook ingress.
-func (g *Gateway) LocalUserSpace() *UserSpace {
-	return g.localSpace
-}
-
-// UserSpaceFor returns the user space for the given user ID, loading it
-// lazily from disk if needed. In local mode callers normally pass
-// config.DefaultUserID and get the preloaded space; in cloud mode the HTTP
-// auth middleware resolves the real user ID and this method fetches the
-// matching space.
+// UserSpaceFor returns the resolved user's UserSpace, lazy-loading on
+// first call. There is no implicit/local user — userID must be a real
+// users.id.
 func (g *Gateway) UserSpaceFor(userID string) (*UserSpace, error) {
+	return g.UserSpaceForCtx(context.Background(), userID)
+}
+
+// UserSpaceForCtx is the ctx-aware variant; HTTP handlers should prefer
+// it so the underlying DB queries inherit the request deadline.
+func (g *Gateway) UserSpaceForCtx(ctx context.Context, userID string) (*UserSpace, error) {
 	if userID == "" {
-		userID = config.DefaultUserID
+		return nil, fmt.Errorf("UserSpaceFor: userID required")
 	}
-	return g.users.getOrLoad(userID)
+	return g.users.getOrLoad(ctx, userID)
 }
 
-// LocalAgentManager satisfies the api.UserResolver interface by exposing
-// the local user's agent manager.
-func (g *Gateway) LocalAgentManager() *agent.Manager {
-	return g.agents
-}
+// LocalAgentManager satisfies the api.UserResolver interface — but there
+// is no longer a "local" pinned manager. Callers that legitimately need
+// any agent manager should resolve the request's own user_id and call
+// UserSpaceFor.
+func (g *Gateway) LocalAgentManager() *agent.Manager { return nil }
 
-// IsCloudMode reports whether the gateway is configured to accept multiple
-// users via HTTP auth. Channels, cron and plugins remain bound to the
-// local user regardless.
-func (g *Gateway) IsCloudMode() bool {
-	return g.config != nil && g.config.Gateway.Mode == "cloud"
-}
+// IsCloudMode is retained for a few callers that still branch on it but
+// always returns true now: multi-user is unconditional.
+func (g *Gateway) IsCloudMode() bool { return true }
 
-// Store returns the gateway's storage backend.
-func (g *Gateway) Store() store.Store {
-	return g.store
-}
-
-// TaskQueue returns the gateway's task queue.
-func (g *Gateway) TaskQueue() *taskqueue.Queue {
-	return g.taskQueue
-}
-
-// Run starts the gateway and blocks until shutdown signal.
+// Run starts the gateway and blocks until the process gets SIGINT/SIGTERM.
 func (g *Gateway) Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -617,69 +323,23 @@ func (g *Gateway) Run() error {
 	}()
 
 	var wg sync.WaitGroup
-
-	// Start idle user space evictor (cloud mode: free memory for inactive users)
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		g.users.startEvictor(ctx)
-	}()
-
-	// Start config file watcher for hot-reload. Cloud pods have an
-	// ephemeral /data/.fastclaw and each request that touches the API
-	// may write a bootstrap stub — letting the watcher act on that would
-	// overwrite the DB-hydrated in-memory config (providers wiped, fake
-	// "default" agent added). Config truth in cloud lives in the DB.
-	if g.config.Gateway.Mode != "cloud" {
+	go func() { defer wg.Done(); g.users.startEvictor(ctx) }()
+	wg.Add(1)
+	go func() { defer wg.Done(); g.cleanupDedup(ctx) }()
+	wg.Add(1)
+	go func() { defer wg.Done(); g.processInbound(ctx) }()
+	wg.Add(1)
+	go func() { defer wg.Done(); g.chanMgr.Start(ctx) }()
+	if g.scheduler != nil {
 		wg.Add(1)
-		go g.startConfigWatcher(ctx, &wg)
-	} else {
-		slog.Info("config watcher disabled in cloud mode")
+		go func() { defer wg.Done(); g.scheduler.Start(ctx) }()
 	}
-
-	// Start dedup cleanup goroutine
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		g.cleanupDedup(ctx)
-	}()
-
-	// Start inbound message processor
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		g.processInbound(ctx)
-	}()
-
-	// Start channel manager
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		g.chanMgr.Start(ctx)
-	}()
-
-	// Start heartbeats for each agent
-	for _, hb := range g.heartbeats {
-		wg.Add(1)
-		go func(h *agent.Heartbeat) {
-			defer wg.Done()
-			h.Start(ctx)
-		}(hb)
-	}
-
-	// Start cron scheduler
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		g.scheduler.Start(ctx)
-	}()
-
-	// Start webhook server if configured
 	if g.webhookSrv != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			port := g.config.Hooks.Port
+			port := readSystemHooks(g.store).Port
 			if port == 0 {
 				port = 18954
 			}
@@ -689,101 +349,159 @@ func (g *Gateway) Run() error {
 			}
 		}()
 	}
-
-	// Start plugins if enabled
 	if g.pluginMgr != nil {
 		if err := g.pluginMgr.StartAll(ctx); err != nil {
 			slog.Error("plugin start error", "error", err)
 		}
-
-		// Register channel adapters for channel plugins
 		for _, inst := range g.pluginMgr.ChannelPlugins() {
 			adapter := plugin.NewChannelAdapter(g.pluginMgr, inst.Manifest.ID)
 			g.chanMgr.Register(adapter)
-			slog.Info("registered plugin channel", "plugin", inst.Manifest.ID)
 		}
-
-		// Register tool plugins with all agents
-		for _, inst := range g.pluginMgr.ToolPlugins() {
-			for _, ag := range g.agents.All() {
-				if err := plugin.RegisterPluginTools(ctx, g.pluginMgr, inst.Manifest.ID, ag.ToolRegistry()); err != nil {
-					slog.Error("register plugin tools failed", "plugin", inst.Manifest.ID, "agent", ag.Name(), "error", err)
-				}
-			}
-		}
-
-		// Register plugin-provided tool providers (e.g. a custom web_search
-		// backend) into the same provider registry the built-ins use, so
-		// fallback chains treat them uniformly.
 		plugin.RegisterPluginProviders(ctx, g.pluginMgr, toolProviderRegistry)
-
-		// Register hook plugins with all agents
-		for _, inst := range g.pluginMgr.HookPlugins() {
-			for _, ag := range g.agents.All() {
-				if err := plugin.RegisterPluginHooks(ctx, g.pluginMgr, inst.Manifest.ID, ag.HookRegistry(), ag.Name()); err != nil {
-					slog.Error("register plugin hooks failed", "plugin", inst.Manifest.ID, "agent", ag.Name(), "error", err)
-				}
-			}
-		}
 	}
-
 	slog.Info("gateway started")
-
 	wg.Wait()
-
-	// Stop task queue
 	if g.taskQueue != nil {
 		g.taskQueue.Stop()
 	}
-
-	// Stop plugins on shutdown
 	if g.pluginMgr != nil {
 		g.pluginMgr.StopAll()
 	}
-
-	// Tear down every live sandbox across every loaded user space. On
-	// rolling restart this means E2B instances stop billing immediately
-	// instead of waiting for their server-side max-TTL.
 	for _, sp := range g.users.all() {
 		if sp.SandboxPool != nil {
 			sp.SandboxPool.CloseAll()
 		}
 	}
-
 	slog.Info("gateway stopped")
 	return nil
 }
 
 // makeStoreFirstAgentFileLoader returns a loader that reads per-agent
-// config from `agents.config` (DB-backed source of truth) and falls back
-// to `<home>/agent.json` only if the store has nothing for that agent.
-// The bool return is "true if any layer produced a parseable config" —
-// false leaves the resolved struct on layer-2 defaults.
+// config from the agents.config column.
 func makeStoreFirstAgentFileLoader(st store.Store) func(string, string) (config.AgentFileConfig, bool) {
-	return func(agentID, home string) (config.AgentFileConfig, bool) {
-		if st != nil && agentID != "" {
-			if rec, err := st.GetAgent(context.Background(), agentID); err == nil && rec != nil && len(rec.Config) > 0 {
-				blob, merr := json.Marshal(rec.Config)
-				if merr == nil {
-					var cfg config.AgentFileConfig
-					if uerr := json.Unmarshal(blob, &cfg); uerr == nil {
-						return cfg, true
-					}
-				}
-			}
-		}
-		// Fall back to FS for legacy installs / single-pod local dev.
-		if home == "" {
+	return func(agentID, _ string) (config.AgentFileConfig, bool) {
+		if st == nil || agentID == "" {
 			return config.AgentFileConfig{}, false
 		}
-		data, err := os.ReadFile(filepath.Join(home, "agent.json"))
+		// We need user_id for GetAgent now; iterate every user is
+		// expensive. Instead use ListAllAgents and pick.
+		all, err := st.ListAllAgents(context.Background())
 		if err != nil {
 			return config.AgentFileConfig{}, false
 		}
-		var cfg config.AgentFileConfig
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return config.AgentFileConfig{}, false
+		for _, ar := range all {
+			if ar.ID != agentID {
+				continue
+			}
+			if len(ar.Config) == 0 {
+				return config.AgentFileConfig{}, false
+			}
+			blob, _ := json.Marshal(ar.Config)
+			var cfg config.AgentFileConfig
+			if err := json.Unmarshal(blob, &cfg); err == nil {
+				return cfg, true
+			}
 		}
-		return cfg, true
+		return config.AgentFileConfig{}, false
 	}
+}
+
+func defaultStr(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+// readObjectStoreCfg pulls the "objectstore" setting namespace, then
+// layers FASTCLAW_OBJECT_STORE_* env vars on top.
+func readObjectStoreCfg(st store.Store) config.ObjectStoreCfg {
+	cfg := &config.Config{}
+	if st != nil {
+		_ = scope.SettingInto(context.Background(), st, NSObjectStore, "", "", "", &cfg.ObjectStore)
+	}
+	config.LoadEnv().ApplyToConfig(cfg)
+	return cfg.ObjectStore
+}
+
+func readSystemHooks(st store.Store) config.HooksCfg {
+	var out config.HooksCfg
+	if st != nil {
+		_ = scope.SettingInto(context.Background(), st, NSHooks, "", "", "", &out)
+	}
+	return out
+}
+
+func readSystemPlugins(st store.Store) config.PluginsCfg {
+	var out config.PluginsCfg
+	if st != nil {
+		_ = scope.SettingInto(context.Background(), st, NSPlugins, "", "", "", &out)
+	}
+	return out
+}
+
+func readSystemTaskQueue(st store.Store) config.TaskQueueCfg {
+	var out config.TaskQueueCfg
+	if st != nil {
+		_ = scope.SettingInto(context.Background(), st, NSTaskQueue, "", "", "", &out)
+	}
+	return out
+}
+
+// Setting namespace constants. Each maps to one row in configs
+// with kind="setting". Adding a new namespace is a one-line append; the
+// scope.Setting / SettingInto helpers handle merging across scopes.
+const (
+	NSAgentDefaults = "agents.defaults"
+	NSSandbox       = "sandbox"
+	NSObjectStore   = "objectstore"
+	NSHooks         = "hooks"
+	NSPlugins       = "plugins"
+	NSTaskQueue     = "taskqueue"
+	NSToolProviders = "tools.providers"
+	NSToolCategories = "tools.categories"
+	NSSkillsInstall = "skills.install"
+	NSSkillsEntries = "skills.entries"
+	NSMemory        = "memory"
+	NSPrivacy       = "privacy"
+	NSSkillsLearner = "skillsLearner"
+	NSHeartbeat     = "heartbeat"
+	NSTeams         = "teams"
+	NSBindings      = "bindings"
+)
+
+// registerChannelsFromStore loads every enabled kind="channel" row from
+// configs and starts a channel adapter for each, regardless of
+// scope. The owner is captured per-row and resolved at message receipt
+// time via LookupChannelByCredential.
+func registerChannelsFromStore(st store.Store, mb *bus.MessageBus, chanMgr *channels.Manager) error {
+	if st == nil {
+		return nil
+	}
+	rows, err := allChannelRows(st)
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if !r.Enabled {
+			continue
+		}
+		if err := registerChannelInstance(r, mb, chanMgr); err != nil {
+			slog.Warn("register channel failed",
+				"type", r.Name, "scope", r.Scope, "scope_id", r.ScopeID, "error", err)
+		}
+	}
+	return nil
+}
+
+func allChannelRows(st store.Store) ([]store.ConfigRecord, error) {
+	var out []store.ConfigRecord
+	for _, sc := range []string{store.ScopeSystem, store.ScopeUser, store.ScopeAgent} {
+		rows, err := st.ListConfigs(context.Background(), store.KindChannel, sc, "")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rows...)
+	}
+	return out, nil
 }

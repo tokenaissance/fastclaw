@@ -58,6 +58,13 @@ func NewServer(token, path string, handler AgentHandler, userLookup UserLookup) 
 	}
 }
 
+// SetHandler replaces the agent handler. Used by gateway.New so the
+// handler can hold a reference to the Gateway being constructed without a
+// chicken-and-egg problem.
+func (s *Server) SetHandler(h AgentHandler) {
+	s.handler = h
+}
+
 // Handler returns an http.Handler for the webhook endpoint.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()

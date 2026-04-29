@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -9,408 +10,463 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// loadUserConfig reads the config for the user identified by the request
-// context. Store is the source of truth whenever it's configured —
-// saveUserConfig (post-#4) writes there exclusively, so reading anywhere
-// else gives stale data. The local fastclaw.json is only used as a
-// bootstrap when the store has nothing yet.
+type agentChatEvent = agent.ChatEvent
+
+// loadUserConfig reads the merged Config view for the request's user.
+// Walks system → user setting namespaces + the scope-aware provider /
+// channel rows. The result is the same shape gateway.assembleConfig
+// produces — UI-only fields like Storage/Gateway are filled by env
+// overlay, not by the DB.
 func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
-	userID := config.UserIDFromContext(r.Context())
-
-	// Store-first when wired. The cloud-vs-local mode flag used to gate
-	// this, but that diverged read from write — saves went to DB,
-	// subsequent reads came from a stale FS copy with empty providers.
-	if s.dataStore != nil {
-		if gc, gerr := s.dataStore.GetConfig(r.Context()); gerr == nil && gc != nil && len(gc.Data) > 0 {
-			blob, merr := json.Marshal(gc.Data)
-			if merr == nil {
-				var stored config.Config
-				if uerr := json.Unmarshal(blob, &stored); uerr == nil {
-					return &stored, nil
-				}
-			}
+	if s.dataStore == nil {
+		return &config.Config{}, nil
+	}
+	uid := config.UserIDFromContext(r.Context())
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{},
+		Channels:  map[string]config.ChannelConfig{},
+	}
+	for _, ns := range settingNamespaces {
+		if err := scope.SettingInto(r.Context(), s.dataStore, ns.namespace, uid, "", "", ns.dst(cfg)); err != nil {
+			return nil, err
 		}
 	}
-
-	// Fall back to filesystem for fresh installs whose store is empty.
-	cfg, err := config.LoadForUser(userID)
-	if err == nil {
-		return cfg, nil
-	}
-
-	// Cloud mode without any config yet — return a zero-value config so
-	// the setup wizard can flow. Don't write anything to disk.
-	cloudMode := s.gatewayCfg != nil && s.gatewayCfg.Mode == "cloud"
-	if cloudMode && s.dataStore != nil {
-		return &config.Config{
-			Providers: map[string]config.ProviderConfig{},
-			Channels:  map[string]config.ChannelConfig{},
-		}, nil
-	}
-
-	// No config on disk and no store row — return an empty cfg so callers
-	// like /api/config and /api/status can answer truthfully. Pre-#5 we
-	// auto-provisioned a per-user workspace + default agent here, but
-	// that meant any random GET against an unknown user_id silently
-	// minted a new agent (and a workspace dir) — operators saw phantom
-	// agents materialize without any explicit action. Onboarding for
-	// non-default users is now an explicit POST /api/agents call from
-	// the application layer.
-	if os.IsNotExist(unwrapPathError(err)) {
-		return &config.Config{
-			Providers: map[string]config.ProviderConfig{},
-			Channels:  map[string]config.ChannelConfig{},
-		}, nil
-	}
-	return nil, err
-}
-
-func unwrapPathError(err error) error {
-	for err != nil {
-		if pe, ok := err.(*os.PathError); ok {
-			return pe.Err
+	if provs, err := scope.Providers(r.Context(), s.dataStore, uid, ""); err == nil {
+		for k, v := range provs {
+			cfg.Providers[k] = v
 		}
-		err = errors.Unwrap(err)
 	}
-	return nil
+	if chs, err := scope.Channels(r.Context(), s.dataStore, uid, ""); err == nil {
+		for k, v := range chs {
+			cfg.Channels[k] = v
+		}
+	}
+	if ae, err := loadAgentSkillEntriesForUser(r.Context(), s.dataStore, uid); err == nil && len(ae) > 0 {
+		cfg.Skills.AgentEntries = ae
+	}
+	config.LoadEnv().ApplyToConfig(cfg)
+	config.ApplyDefaults(cfg)
+	return cfg, nil
 }
 
-// saveUserConfig persists a UI-originated config update. Most infra
-// fields (objectStore, gateway.auth.token) are deliberately NOT
-// overwritten — they belong to the deployment and are sourced from env
-// / Secret. Sandbox USED to be in that bucket but the Settings page
-// now exposes Backend / Image / E2B key directly, so it has to round-
-// trip; preserving the stored value here was silently undoing every
-// save and the Docker Image field appeared blank after refresh.
-// Other UI handlers (cron, plugins, tools) load the full config via
-// loadUserConfig before mutating, so cfg.Sandbox already carries the
-// correct existing value when they call us — writing it back is fine.
-//
-// Everything else (providers, toolProviders, tools, agents.defaults,
-// channels, plugins, cron, skills, …) goes to the DB store. The
-// fastclaw.json filesystem path is the back-compat fallback used only
-// when no store is wired (legacy single-user installs predating the
-// DB-primary refactor); it'll go away after #5 merges the wizard.
+// loadAgentSkillEntriesForUser collects every agent-scope skills.entries
+// row owned by this user. Replaces the legacy single-row keyed-by-agent
+// blob — each agent now persists its own row, so the JSON we hand back
+// is rebuilt by listing the user's agents and pulling each one's row.
+func loadAgentSkillEntriesForUser(ctx context.Context, st store.Store, userID string) (map[string]map[string]config.SkillEntryCfg, error) {
+	if st == nil || userID == "" {
+		return nil, nil
+	}
+	agents, err := st.ListAgents(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]config.SkillEntryCfg{}
+	for _, ar := range agents {
+		rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, ar.ID, "skills.entries")
+		if err != nil || rec == nil || len(rec.Data) == 0 {
+			continue
+		}
+		blob, _ := json.Marshal(rec.Data)
+		var entries map[string]config.SkillEntryCfg
+		if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
+			out[ar.ID] = entries
+		}
+	}
+	return out, nil
+}
+
+// saveAgentSkillEntries upserts the agent-scope skills.entries row.
+// Empty inner map deletes the row (no overrides → no row, keeps the
+// configs table tight). Authorization is the caller's responsibility;
+// we just persist what was requested.
+func saveAgentSkillEntries(ctx context.Context, st store.Store, agentID string, entries map[string]config.SkillEntryCfg) error {
+	if len(entries) == 0 {
+		return scope.SaveSetting(ctx, st, scope.Agent, agentID, "skills.entries", nil)
+	}
+	blob, _ := json.Marshal(entries)
+	var asMap map[string]interface{}
+	_ = json.Unmarshal(blob, &asMap)
+	return scope.SaveSetting(ctx, st, scope.Agent, agentID, "skills.entries", asMap)
+}
+
+// saveUserConfig persists the namespaced setting rows for the calling
+// user's scope. Providers/Channels live in their own configs rows
+// and are NOT touched here — the dedicated /api/providers and /api/channels
+// endpoints (and the onboard handler) write those.
 func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
-	merged := *cfg
-	// Preserve infra fields from whatever the caller assembled. In the
-	// store-primary path we read the previous DB row; in the FS path we
-	// read fastclaw.json. Either way, the UI's caller passed a Config
-	// that already had infra populated (handleUpdateConfig copies it
-	// from the running cfg), so this read-modify-write is mostly a
-	// belt-and-suspenders against the UI accidentally clearing fields.
-	if s.dataStore != nil {
-		if existing, err := s.dataStore.GetConfig(r.Context()); err == nil && existing != nil && len(existing.Data) > 0 {
-			if blob, err := json.Marshal(existing.Data); err == nil {
-				var stored config.Config
-				if err := json.Unmarshal(blob, &stored); err == nil {
-					merged.Storage = stored.Storage
-					merged.ObjectStore = stored.ObjectStore
-					merged.Gateway = stored.Gateway
-				}
+	if s.dataStore == nil {
+		return errors.New("store not configured")
+	}
+	ident, ok := authIdentity(r)
+	scopeName := scope.User
+	scopeID := ""
+	if ok && ident.Role == "super_admin" {
+		// Super-admin save without ?actAs= writes to system; with
+		// ?actAs=<id> writes into that user's scope (handled implicitly
+		// because EffectiveUserID() returns the impersonated id).
+		if !ident.IsActingAs() {
+			scopeName = scope.System
+		} else {
+			scopeID = ident.EffectiveUserID()
+		}
+	} else if ok {
+		scopeID = ident.UserID
+	}
+	for _, ns := range settingNamespaces {
+		data := ns.collect(cfg)
+		if err := scope.SaveSetting(r.Context(), s.dataStore, scopeName, scopeID, ns.namespace, data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// settingNamespaces is the table that drives loadUserConfig /
+// saveUserConfig. Adding a new sub-block of Config to the round-trip is
+// a single append here.
+var settingNamespaces = []settingNamespace{
+	{namespace: "agents.defaults",
+		dst:     func(c *config.Config) interface{} { return &c.Agents.Defaults },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Agents.Defaults) }},
+	{namespace: "sandbox",
+		dst:     func(c *config.Config) interface{} { return &c.Sandbox },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Sandbox) }},
+	{namespace: "objectstore",
+		dst:     func(c *config.Config) interface{} { return &c.ObjectStore },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.ObjectStore) }},
+	{namespace: "hooks",
+		dst:     func(c *config.Config) interface{} { return &c.Hooks },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Hooks) }},
+	{namespace: "plugins",
+		dst:     func(c *config.Config) interface{} { return &c.Plugins },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Plugins) }},
+	{namespace: "taskqueue",
+		dst:     func(c *config.Config) interface{} { return &c.TaskQueue },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.TaskQueue) }},
+	{namespace: "tools.providers",
+		dst:     func(c *config.Config) interface{} { return &c.ToolProviders },
+		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.ToolProviders) }},
+	{namespace: "tools.categories",
+		dst:     func(c *config.Config) interface{} { return &c.Tools },
+		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.Tools) }},
+	{namespace: "skills.install",
+		dst:     func(c *config.Config) interface{} { return &c.Skills.Install },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Skills.Install) }},
+	{namespace: "skills.entries",
+		dst:     func(c *config.Config) interface{} { return &c.Skills.Entries },
+		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.Skills.Entries) }},
+	// Per-agent skill env/key overrides have been split off this table
+	// into one row per agent at scope=agent, name=skills.entries — see
+	// loadAgentSkillEntriesForUser / saveAgentSkillEntries below. Lumping
+	// every agent's overrides into a single user/system-scope row let
+	// the JSON blob grow with every agent × skill, and forced a full
+	// rewrite on every patch.
+	{namespace: "memory",
+		dst:     func(c *config.Config) interface{} { return &c.Memory },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Memory) }},
+	{namespace: "privacy",
+		dst:     func(c *config.Config) interface{} { return &c.Privacy },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Privacy) }},
+	{namespace: "skillsLearner",
+		dst:     func(c *config.Config) interface{} { return &c.SkillsLearner },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.SkillsLearner) }},
+	{namespace: "heartbeat",
+		dst:     func(c *config.Config) interface{} { return &c.Heartbeat },
+		collect: func(c *config.Config) map[string]interface{} { return toMap(c.Heartbeat) }},
+	{namespace: "teams",
+		dst:     func(c *config.Config) interface{} { return &c.Teams },
+		collect: func(c *config.Config) map[string]interface{} { return wrapKeyed(c.Teams) }},
+	{namespace: "bindings",
+		dst:     func(c *config.Config) interface{} { return &c.Bindings },
+		collect: func(c *config.Config) map[string]interface{} {
+			if len(c.Bindings) == 0 {
+				return nil
 			}
-		}
-		data, err := json.MarshalIndent(&merged, "", "  ")
-		if err != nil {
-			return err
-		}
-		var rawCfg map[string]interface{}
-		if err := json.Unmarshal(data, &rawCfg); err != nil {
-			return err
-		}
-		return s.dataStore.SaveConfig(r.Context(), &store.GlobalConfig{Data: rawCfg})
-	}
-	// Store-less fallback (legacy FS-only mode). Same read-modify-write
-	// against fastclaw.json on disk.
-	if _, err := config.EnsureUserDir(); err != nil {
-		return err
-	}
-	configPath, err := config.GlobalConfigPath()
+			return map[string]interface{}{"list": c.Bindings}
+		}},
+}
+
+type settingNamespace struct {
+	namespace string
+	dst       func(*config.Config) interface{}
+	collect   func(*config.Config) map[string]interface{}
+}
+
+func toMap(v interface{}) map[string]interface{} {
+	blob, err := json.Marshal(v)
 	if err != nil {
-		return err
+		return nil
 	}
-	if existingData, readErr := os.ReadFile(configPath); readErr == nil {
-		var existing config.Config
-		if jsonErr := json.Unmarshal(existingData, &existing); jsonErr == nil {
-			merged.Storage = existing.Storage
-			merged.ObjectStore = existing.ObjectStore
-			merged.Gateway = existing.Gateway
-		}
+	var m map[string]interface{}
+	_ = json.Unmarshal(blob, &m)
+	if len(m) == 0 {
+		return nil
 	}
-	data, err := json.MarshalIndent(&merged, "", "  ")
+	return m
+}
+
+// wrapKeyed marshals a map[string]X into map[string]interface{} so it
+// fits the configs.data column. Empty maps return nil so
+// SaveSetting deletes the row instead of writing {}.
+func wrapKeyed(v interface{}) map[string]interface{} {
+	blob, err := json.Marshal(v)
 	if err != nil {
-		return err
+		return nil
 	}
-	return os.WriteFile(configPath, data, 0o644)
-}
-
-// userDir returns the workspace directory for the request's user.
-func userDirForRequest(r *http.Request) (string, error) {
-	return config.HomeDir()
-}
-
-// configBackend names the persistence path for log lines so operators
-// can tell at a glance whether a save landed in the DB or in legacy
-// fastclaw.json. The store-less branch goes away once #5 merges the
-// wizard into the gateway.
-func configBackend(st store.Store) string {
-	if st != nil {
-		return "store"
+	var m map[string]interface{}
+	_ = json.Unmarshal(blob, &m)
+	if len(m) == 0 {
+		return nil
 	}
-	return "fastclaw.json"
+	return m
 }
 
-// resolveAgent finds an agent for the current request's user. For the local
-// user it uses the preloaded agentProvider; for cloud users it lazily loads
-// their UserSpace via the resolver.
+func authIdentity(r *http.Request) (auth.Identity, bool) {
+	return auth.FromContext(r.Context())
+}
+
+// resolveAgent returns the AgentHandle for the given agent within the
+// caller's user space. Apikey callers are additionally checked against
+// their access list before the handle is returned.
 func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
-	userID := config.UserIDFromContext(r.Context())
-
-	// Cloud user → resolve from userResolver.
-	if userID != config.DefaultUserID && s.userResolver != nil {
-		space, err := s.userResolver.UserSpaceFor(userID)
-		if err != nil {
-			return nil
-		}
-		ag := space.Agents.AgentByID(agentID)
-		if ag == nil {
-			return nil
-		}
-		return ag
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		return nil
 	}
-
-	// Local user → use preloaded provider.
-	if s.agentProvider != nil {
-		return s.agentProvider.AgentByID(agentID)
+	if !ident.CanAccessAgent(agentID) {
+		return nil
 	}
-	return nil
+	if s.userResolver == nil {
+		return nil
+	}
+	space, err := s.userResolver.UserSpaceFor(ident.EffectiveUserID())
+	if err != nil || space == nil || space.Agents == nil {
+		return nil
+	}
+	ag := space.Agents.AgentByID(agentID)
+	if ag == nil {
+		return nil
+	}
+	return ag
 }
 
-// resolveAllAgents returns all agents for the current request's user.
 func (s *Server) resolveAllAgents(r *http.Request) []AgentHandle {
-	userID := config.UserIDFromContext(r.Context())
-
-	if userID != config.DefaultUserID && s.userResolver != nil {
-		space, err := s.userResolver.UserSpaceFor(userID)
-		if err != nil {
-			return nil
-		}
-		all := space.Agents.All()
-		result := make([]AgentHandle, len(all))
-		for i, ag := range all {
-			result[i] = ag
-		}
-		return result
+	ident, ok := auth.FromContext(r.Context())
+	if !ok || s.userResolver == nil {
+		return nil
 	}
-
-	if s.agentProvider != nil {
-		return s.agentProvider.AllAgents()
+	space, err := s.userResolver.UserSpaceFor(ident.EffectiveUserID())
+	if err != nil || space == nil || space.Agents == nil {
+		return nil
 	}
-	return nil
+	all := space.Agents.All()
+	out := make([]AgentHandle, 0, len(all))
+	for _, ag := range all {
+		if !ident.CanAccessAgent(ag.Name()) {
+			continue
+		}
+		out = append(out, ag)
+	}
+	return out
 }
+
+// --- /api/status ---
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	mode := ""
-	if s.gatewayCfg != nil {
-		mode = s.gatewayCfg.Mode
-	}
-
-	// "configured" gates the onboard wizard. The on-disk fastclaw.json
-	// under $FASTCLAW_HOME is the canonical signal — handleSaveConfig
-	// writes it on first save in local mode, and main.go reads it back
-	// at next gateway start to recover the admin token before the store
-	// opens. The DB alone is no longer enough: a fresh install with
-	// stray rows in other tables (e.g. apikeys from a prior aborted run)
-	// should still drop into onboarding. env.toml's presence covers
-	// operator-provisioned deployments (cloud mode, infra in TOML, user
-	// config in DB) where pod-local FS is ephemeral and fastclaw.json
-	// is intentionally never written.
 	configured := false
-	if configPath, err := config.GlobalConfigPath(); err == nil {
-		if _, statErr := os.Stat(configPath); statErr == nil {
+	if s.accounts != nil {
+		if n, err := s.accounts.Count(r.Context()); err == nil && n > 0 {
 			configured = true
 		}
 	}
-	// env.toml alone only signals "configured" in cloud mode, where infra
-	// is operator-provisioned and per-user onboarding is handled separately
-	// (apikey + agents). In local mode env.toml carries only infra fields
-	// (port/token/storage/sandbox); providers and agents still need the
-	// onboard wizard, so check the store's configs row as the
-	// post-#7cdc49b source of truth before declaring configured.
-	if !configured && config.EnvTOMLExists() {
-		if mode == "cloud" {
-			configured = true
-		} else if s.dataStore != nil {
-			if _, err := s.dataStore.GetConfig(r.Context()); err == nil {
-				configured = true
-			}
-		}
-	}
-
-	// /api/status is reachable unauthenticated so the login / onboarding UI
-	// can bootstrap — in that case we only return the non-sensitive public
-	// fields and skip everything that would leak user-scoped data.
-	authenticated := config.HasUserID(r.Context())
-	userID := config.UserIDFromContext(r.Context())
-	isAdmin := authenticated && userID == config.DefaultUserID && s.authToken != ""
-
 	resp := map[string]any{
 		"configured": configured,
-		"running":    s.agentProvider != nil,
+		"running":    s.userResolver != nil,
 		"port":       s.port,
-		"mode":       mode,
 		"agents":     []any{},
 		"channels":   []any{},
 		"provider":   nil,
 		"uptime":     formatDuration(time.Since(s.startedAt)),
-		"isAdmin":    isAdmin,
 	}
-	if authenticated {
-		resp["userId"] = userID
-	}
-
-	if !authenticated {
+	ident, authed := auth.FromContext(r.Context())
+	if !authed {
 		jsonResponse(w, http.StatusOK, resp)
 		return
 	}
+	resp["userId"] = ident.UserID
+	resp["role"] = ident.Role
+	resp["isAdmin"] = ident.Role == "super_admin"
 
+	if !configured {
+		jsonResponse(w, http.StatusOK, resp)
+		return
+	}
+	cfg, err := s.loadUserConfig(r)
+	if err == nil {
+		for name, prov := range cfg.Providers {
+			resp["provider"] = map[string]string{
+				"name":    name,
+				"model":   cfg.Agents.Defaults.Model,
+				"apiBase": prov.APIBase,
+				"apiKey":  maskAPIKey(prov.APIKey),
+			}
+			break
+		}
+		var chs []map[string]string
+		for chType, ch := range cfg.Channels {
+			if !ch.Enabled {
+				continue
+			}
+			chs = append(chs, map[string]string{"type": chType})
+		}
+		if len(chs) > 0 {
+			resp["channels"] = chs
+		}
+	}
 	allAgents := s.resolveAllAgents(r)
 	if len(allAgents) > 0 {
 		var agentList []map[string]string
 		for _, ag := range allAgents {
-			agentList = append(agentList, map[string]string{
-				"id": ag.Name(),
-			})
+			agentList = append(agentList, map[string]string{"id": ag.Name()})
 		}
 		resp["agents"] = agentList
 	}
-
-	// Load config for provider/channel/agent details
-	if configured {
-		cfg, loadErr := s.loadUserConfig(r)
-		if loadErr == nil {
-			// Provider info
-			for name, prov := range cfg.Providers {
-				maskedKey := maskAPIKey(prov.APIKey)
-				resp["provider"] = map[string]string{
-					"name":   name,
-					"model":  cfg.Agents.Defaults.Model,
-					"apiBase": prov.APIBase,
-					"apiKey": maskedKey,
-				}
-				break // use first provider
-			}
-
-			// Channel info
-			var channelList []map[string]string
-			for chType, ch := range cfg.Channels {
-				if !ch.Enabled {
-					continue
-				}
-				entry := map[string]string{"type": chType}
-				channelList = append(channelList, entry)
-			}
-			if len(channelList) > 0 {
-				resp["channels"] = channelList
-			}
-
-			// Agent info with model details. Supplement filesystem
-			// discovery with DB agent IDs so admin sees agents owned by
-			// other pods in a multi-replica cloud deploy.
-			var storeAgents []config.AgentEntry
-			if s.dataStore != nil {
-				if records, lerr := s.dataStore.ListAgents(r.Context()); lerr == nil {
-					for _, ar := range records {
-						storeAgents = append(storeAgents, config.AgentEntry{ID: ar.ID, Model: ar.Model})
-					}
-				}
-			}
-			resolved := config.ResolveAgentsWithExtra(cfg, userID, storeAgents)
-			if s.agentProvider == nil {
-				// Not running - get agent list from config
-				var agentList []map[string]string
-				for _, ra := range resolved {
-					agentList = append(agentList, map[string]string{
-						"id":        ra.ID,
-						"model":     ra.Model,
-						"workspace": ra.Workspace,
-					})
-				}
-				resp["agents"] = agentList
-			} else {
-				// Running - enrich with model info from config
-				modelMap := make(map[string]string)
-				wsMap := make(map[string]string)
-				for _, ra := range resolved {
-					modelMap[ra.ID] = ra.Model
-					wsMap[ra.ID] = ra.Workspace
-				}
-				var agentList []map[string]string
-				for _, ag := range s.agentProvider.AllAgents() {
-					agentList = append(agentList, map[string]string{
-						"id":        ag.Name(),
-						"model":     modelMap[ag.Name()],
-						"workspace": wsMap[ag.Name()],
-					})
-				}
-				resp["agents"] = agentList
-			}
-		}
-	}
-
 	jsonResponse(w, http.StatusOK, resp)
 }
+
+// --- /api/config (GET / POST) ---
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.loadUserConfig(r)
 	if err != nil {
-		jsonResponse(w, http.StatusOK, map[string]any{"error": "no config found"})
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-
-	// Mask API keys
 	masked := *cfg
 	masked.Providers = make(map[string]config.ProviderConfig)
 	for k, v := range cfg.Providers {
 		v.APIKey = maskAPIKey(v.APIKey)
 		masked.Providers[k] = v
 	}
-
-	// Mask skill secrets (entries[*].apiKey and entries[*].env values
-	// that look like keys/tokens). Same masking shape as providers so
-	// the UI can detect "***" and preserve on save.
 	if len(cfg.Skills.Entries) > 0 {
-		maskedEntries := make(map[string]config.SkillEntryCfg, len(cfg.Skills.Entries))
+		me := make(map[string]config.SkillEntryCfg, len(cfg.Skills.Entries))
 		for k, v := range cfg.Skills.Entries {
-			maskedEntries[k] = maskSkillEntry(v)
+			me[k] = maskSkillEntry(v)
 		}
-		masked.Skills.Entries = maskedEntries
+		masked.Skills.Entries = me
 	}
 	if len(cfg.Skills.AgentEntries) > 0 {
-		maskedAgent := make(map[string]map[string]config.SkillEntryCfg, len(cfg.Skills.AgentEntries))
-		for agentID, agentMap := range cfg.Skills.AgentEntries {
-			inner := make(map[string]config.SkillEntryCfg, len(agentMap))
-			for k, v := range agentMap {
-				inner[k] = maskSkillEntry(v)
+		ma := make(map[string]map[string]config.SkillEntryCfg, len(cfg.Skills.AgentEntries))
+		for aid, inner := range cfg.Skills.AgentEntries {
+			out := make(map[string]config.SkillEntryCfg, len(inner))
+			for k, v := range inner {
+				out[k] = maskSkillEntry(v)
 			}
-			maskedAgent[agentID] = inner
+			ma[aid] = out
 		}
-		masked.Skills.AgentEntries = maskedAgent
+		masked.Skills.AgentEntries = ma
 	}
-
 	jsonResponse(w, http.StatusOK, masked)
 }
+
+func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok || ident.ReadOnly() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "read-only"})
+		return
+	}
+	// PATCH semantics: load existing cfg, then decode the request into
+	// it. Go's json.Unmarshal leaves struct fields and map entries that
+	// aren't present in the JSON untouched, so /settings POSTing just
+	// `{"sandbox":{...}}` no longer wipes agents.defaults / skills.* /
+	// every other namespace via saveUserConfig's namespace sweep.
+	buf, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	merged, err := s.loadUserConfig(r)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	// Avoid merging stale per-agent skill entries back into the saved
+	// state — those are persisted via the per-agent loop below, not
+	// through the namespace sweep, and re-writing them here would
+	// re-build the legacy shape we just split apart.
+	merged.Skills.AgentEntries = nil
+	if err := json.Unmarshal(buf, merged); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if err := s.saveUserConfig(r, merged); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	// Per-agent skill env overrides (one row per agent at scope=agent,
+	// name=skills.entries). Pull from the raw body — not from the
+	// merged Config — so we only touch agents the caller actually
+	// patched, and don't echo every existing override back as a write.
+	var raw struct {
+		Skills *struct {
+			AgentEntries map[string]map[string]config.SkillEntryCfg `json:"agentEntries"`
+		} `json:"skills"`
+	}
+	_ = json.Unmarshal(buf, &raw)
+	if raw.Skills != nil && raw.Skills.AgentEntries != nil {
+		for agentID, entries := range raw.Skills.AgentEntries {
+			rec, err := s.dataStore.GetAgent(r.Context(), agentID)
+			if err != nil || rec == nil {
+				jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "agent not found: " + agentID})
+				return
+			}
+			if !s.authorizeScope(w, r, scope.Agent, agentID) {
+				return
+			}
+			if err := saveAgentSkillEntries(r.Context(), s.dataStore, agentID, entries); err != nil {
+				jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+		}
+	}
+	// Cached UserSpaces hold a snapshot of the merged config (including
+	// agents.defaults.model and the provider chain). Without this, an
+	// agent loaded before the change keeps seeing the stale model and
+	// surfaces "no usable LLM provider" in chat.
+	sc, scopeID := s.scopeForSave(r)
+	s.invalidateScope(sc, scopeID)
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// scopeForSave mirrors the scope-resolution logic in saveUserConfig so
+// callers can invalidate exactly the UserSpaces that were just touched.
+func (s *Server) scopeForSave(r *http.Request) (string, string) {
+	ident, ok := authIdentity(r)
+	if ok && ident.Role == "super_admin" {
+		if !ident.IsActingAs() {
+			return scope.System, ""
+		}
+		return scope.User, ident.EffectiveUserID()
+	}
+	if ok {
+		return scope.User, ident.UserID
+	}
+	return scope.User, ""
+}
+
+// --- /api/test-provider ---
 
 type testProviderRequest struct {
 	APIBase  string `json:"apiBase"`
@@ -420,74 +476,64 @@ type testProviderRequest struct {
 	AuthType string `json:"authType"`
 }
 
-// systemConfigured reports whether initial setup has completed. Mirrors
-// the logic in handleStatus so onboarding-only endpoints can tell whether
-// they're running for a first-time setup (allow unauthenticated) or for an
-// already-configured deployment (require admin auth).
-//
-// Post-#4 the store is authoritative regardless of mode — saveUserConfig
-// stops touching fastclaw.json once a store is wired. Fall back to the
-// FS check only as legacy support for installs predating that change.
-func (s *Server) systemConfigured(r *http.Request) bool {
-	if s.dataStore != nil {
-		if gc, err := s.dataStore.GetConfig(r.Context()); err == nil && gc != nil && len(gc.Data) > 0 {
-			return true
-		}
-	}
-	if configPath, err := config.GlobalConfigPath(); err == nil {
-		if _, statErr := os.Stat(configPath); statErr == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// requireOnboardingOrAuthed gates endpoints that the onboarding wizard must
-// reach before a token exists. When the system is already configured, the
-// caller must be an authenticated user — otherwise anyone could overwrite
-// the deployment's provider/config from the public network.
-func (s *Server) requireOnboardingOrAuthed(w http.ResponseWriter, r *http.Request) bool {
-	if !s.systemConfigured(r) {
-		return true
-	}
-	if config.HasUserID(r.Context()) {
-		return true
-	}
-	jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid token"})
-	return false
-}
-
 func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
-	if !s.requireOnboardingOrAuthed(w, r) {
-		return
-	}
 	var req testProviderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
 		return
 	}
+	jsonResponse(w, http.StatusOK, runProviderTest(r.Context(), req))
+}
 
+// handleTestStoredProvider runs the same connection check, but reads the
+// apiKey + apiBase + apiType + authType from a saved provider row instead
+// of taking them from the request body. Lets the Edit dialog test against
+// the stored secret so users don't have to re-paste the key on every edit.
+func (s *Server) handleTestStoredProvider(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rec, err := s.dataStore.GetConfig(r.Context(), id)
+	if err != nil || rec == nil || rec.Kind != store.KindProvider {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"ok": false, "error": "not found"})
+		return
+	}
+	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID) {
+		return
+	}
+	var body struct {
+		Model string `json:"model"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	pc := config.ProviderConfig{}
+	if blob, err := json.Marshal(rec.Data); err == nil {
+		_ = json.Unmarshal(blob, &pc)
+	}
+	jsonResponse(w, http.StatusOK, runProviderTest(r.Context(), testProviderRequest{
+		APIBase:  pc.APIBase,
+		APIKey:   pc.APIKey,
+		Model:    body.Model,
+		APIType:  pc.APIType,
+		AuthType: pc.AuthType,
+	}))
+}
+
+// runProviderTest issues a lightweight chat completion against the
+// upstream provider. Shared between the inline test (key supplied in
+// the request body, used during create / re-key) and the stored test
+// (key looked up server-side, used during edit).
+func runProviderTest(ctx context.Context, req testProviderRequest) map[string]any {
 	base := strings.TrimRight(req.APIBase, "/")
 	var testURL string
-	var method string
 	var body io.Reader
-
 	if req.APIType == "anthropic-messages" {
-		// Anthropic Messages API: base + /v1/messages
 		testURL = base + "/v1/messages"
-		method = "POST"
 		model := req.Model
 		if model == "" {
 			model = "claude-sonnet-4-20250514"
 		}
-		// max_tokens is required by the Anthropic Messages API — some
-		// compat gateways (e.g. DeepSeek's /anthropic endpoint) 400 without it.
 		payload := fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		body = strings.NewReader(payload)
 	} else {
-		// OpenAI-compatible: send a minimal chat completion to verify API key
 		testURL = base + "/chat/completions"
-		method = "POST"
 		model := req.Model
 		if model == "" {
 			model = "gpt-4o-mini"
@@ -495,190 +541,156 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		payload := fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 		body = strings.NewReader(payload)
 	}
-
-	httpReq, err := http.NewRequestWithContext(r.Context(), method, testURL, body)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", testURL, body)
 	if err != nil {
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "url": testURL})
-		return
+		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-
-	// Set auth headers based on API type
 	if req.APIType == "anthropic-messages" {
-		if req.APIKey != "" {
-			httpReq.Header.Set("x-api-key", req.APIKey)
-		}
+		httpReq.Header.Set("x-api-key", req.APIKey)
 		httpReq.Header.Set("anthropic-version", "2023-06-01")
+	} else if req.AuthType == "api-key" {
+		httpReq.Header.Set("api-key", req.APIKey)
 	} else {
-		if req.APIKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+req.APIKey)
-		}
+		httpReq.Header.Set("Authorization", "Bearer "+req.APIKey)
 	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "url": testURL})
-		return
+		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	defer resp.Body.Close()
-
-	// For chat/messages endpoints, 200 means success.
-	// 401/403 means bad API key, other errors are connectivity issues.
-	if resp.StatusCode == http.StatusOK {
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "url": testURL})
-		return
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return map[string]any{"ok": true}
 	}
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	errMsg := fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(respBody))
-
-	// 401/403 = auth failure, clearly report it
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": "Authentication failed. Please check your API Key.", "url": testURL})
-		return
+	respBody, _ := io.ReadAll(resp.Body)
+	return map[string]any{
+		"ok":    false,
+		"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody))),
 	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": false, "error": errMsg, "url": testURL})
 }
 
+// --- /api/tasks ---
+
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	if s.taskQueue == nil {
+		jsonResponse(w, http.StatusOK, []any{})
+		return
+	}
+	tasks := s.taskQueue.RecentTasks(50)
+	out := make([]map[string]any, 0, len(tasks))
+	for _, t := range tasks {
+		entry := map[string]any{
+			"id":        t.ID,
+			"agentId":   t.AgentID,
+			"chatKey":   t.ChatKey,
+			"status":    string(t.Status),
+			"createdAt": t.CreatedAt.Format(time.RFC3339),
+		}
+		if t.StartedAt != nil && t.DoneAt != nil {
+			entry["duration"] = t.DoneAt.Sub(*t.StartedAt).Milliseconds()
+		}
+		if t.Error != nil {
+			entry["error"] = t.Error.Error()
+		}
+		out = append(out, entry)
+	}
+	jsonResponse(w, http.StatusOK, out)
+}
+
+// --- chat handlers (delegate to per-user agent) ---
+
 type chatRequest struct {
-	AgentID   string   `json:"agentId"`
+	AgentID   string   `json:"agentId,omitempty"`
 	SessionID string   `json:"sessionId"`
 	Message   string   `json:"message"`
-	// ImageURLs carries user-attached images for vision models. Frontend
-	// sends data: URLs (base64) for local single-user mode where the model
-	// can't reach the gateway directly. Empty for text-only messages.
-	ImageURLs []string `json:"imageUrls,omitempty"`
+	Images    []string `json:"images,omitempty"`
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid request"})
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-
 	ag := s.resolveAgent(r, req.AgentID)
 	if ag == nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
-
 	reply := ag.HandleWebChat(r.Context(), req.SessionID, req.Message)
-	jsonResponse(w, http.StatusOK, map[string]any{"response": reply})
+	jsonResponse(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-
 	ag := s.resolveAgent(r, req.AgentID)
 	if ag == nil {
-		http.Error(w, "agent not found", http.StatusNotFound)
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
 		return
 	}
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-
-	events := make(chan agent.ChatEvent, 32)
-
-	// Run agent in background
-	go func() {
-		defer close(events)
-		ag.HandleWebChatStream(r.Context(), req.SessionID, req.Message, req.ImageURLs, events)
-	}()
-
-	for evt := range events {
-		data, _ := json.Marshal(evt)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
-	}
-
-	// Send final done event (in case agent returned without emitting done)
-	fmt.Fprintf(w, "data: {\"type\":\"done\"}\n\n")
 	flusher.Flush()
+	events := make(chan agentChatEvent, 32)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range events {
+			data, _ := json.Marshal(ev)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}()
+	_ = ag.HandleWebChatStream(r.Context(), req.SessionID, req.Message, req.Images, events)
+	close(events)
+	<-done
 }
 
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	agentID := r.URL.Query().Get("agentId")
 	sessionID := r.URL.Query().Get("sessionId")
-	if agentID == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agentId required"})
-		return
-	}
-
 	ag := s.resolveAgent(r, agentID)
-	if ag == nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
-	}
-
-	history := ag.WebChatHistory(sessionID)
-	if history == nil {
-		history = []map[string]any{}
-	}
-	jsonResponse(w, http.StatusOK, history)
-}
-
-func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
-	agentID := r.URL.Query().Get("agentId")
-	if agentID == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agentId required"})
-		return
-	}
-
-	ag := s.resolveAgent(r, agentID)
-	if ag == nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
-	}
-
-	sessions := ag.WebChatSessions()
-	if sessions == nil {
-		sessions = []session.WebSession{}
-	}
-	jsonResponse(w, http.StatusOK, sessions)
-}
-
-func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
-	sessionKey := r.PathValue("key")
-	if sessionKey == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "session key required"})
-		return
-	}
-
-	var body struct {
-		AgentID string `json:"agentId"`
-		Title   string `json:"title"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid request"})
-		return
-	}
-	if body.Title == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "title required"})
-		return
-	}
-
-	ag := s.resolveAgent(r, body.AgentID)
 	if ag == nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
+	jsonResponse(w, http.StatusOK, map[string]any{"history": ag.WebChatHistory(sessionID)})
+}
 
-	if err := ag.RenameWebChatSession(sessionKey, body.Title); err != nil {
+func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
+	agentID := r.URL.Query().Get("agentId")
+	ag := s.resolveAgent(r, agentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusOK, map[string]any{"sessions": []session.WebSession{}})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"sessions": ag.WebChatSessions()})
+}
+
+func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	agentID := r.URL.Query().Get("agentId")
+	ag := s.resolveAgent(r, agentID)
+	if ag == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+	var req struct{ Title string `json:"title"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := ag.RenameWebChatSession(r.PathValue("key"), req.Title); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -686,438 +698,20 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	sessionKey := r.PathValue("key")
-	if sessionKey == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "session key required"})
-		return
-	}
-
 	agentID := r.URL.Query().Get("agentId")
 	ag := s.resolveAgent(r, agentID)
 	if ag == nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
-
-	if err := ag.DeleteWebChatSession(sessionKey); err != nil {
+	if err := ag.DeleteWebChatSession(r.PathValue("key")); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-type saveConfigRequest struct {
-	Provider        string `json:"provider"`
-	ProviderName    string `json:"providerName"`
-	APIBase         string `json:"apiBase"`
-	APIKey          string `json:"apiKey"`
-	APIType         string `json:"apiType"`
-	AuthType        string `json:"authType"`
-	Model           string `json:"model"`
-	TelegramEnabled bool   `json:"telegramEnabled"`
-	TelegramToken   string `json:"telegramToken"`
-	Port            int    `json:"port"`
-	AgentName       string `json:"agentName"`
-	Personality     string `json:"personality"`
-	GatewayToken    string `json:"gatewayToken"`
-
-	// Storage + sandbox come from the wizard so fastclaw.json reflects
-	// what the user actually picked. LoadEnv no longer ships zero-config
-	// defaults, so an empty StorageType here genuinely means "not set"
-	// — we fall back to sqlite to keep the gateway runnable.
-	StorageType    string `json:"storageType"`
-	StorageDSN     string `json:"storageDSN"`
-	SandboxEnabled bool   `json:"sandboxEnabled"`
-	SandboxBackend string `json:"sandboxBackend"`
-	SandboxImage   string `json:"sandboxImage"`
-	SandboxE2BKey  string `json:"sandboxE2BKey"`
-}
-
-func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
-	if !s.requireOnboardingOrAuthed(w, r) {
-		return
-	}
-	var req saveConfigRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
-		return
-	}
-
-	// Normalize agent name
-	agentID := strings.ToLower(strings.TrimSpace(req.AgentName))
-	if agentID == "" {
-		agentID = "default"
-	}
-	agentID = strings.ReplaceAll(agentID, " ", "-")
-	agentID = strings.ReplaceAll(agentID, "_", "-")
-
-	// Build global config
-	cfg := &config.Config{
-		Providers: map[string]config.ProviderConfig{},
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				MaxTokens:         8192,
-				Temperature:       0.7,
-				MaxToolIterations: 20,
-			},
-		},
-		Channels: map[string]config.ChannelConfig{},
-		Bindings: []config.Binding{},
-	}
-
-	// Storage: prefer the wizard's choice, default to sqlite when the
-	// request omits it (legacy clients, smoke tests). AutoMigrate is on
-	// for db backends so a fresh sqlite/postgres comes up with schema
-	// — "file" needs nothing.
-	storageType := req.StorageType
-	if storageType == "" {
-		storageType = "sqlite"
-	}
-	cfg.Storage = config.StorageCfg{
-		Type:        storageType,
-		DSN:         req.StorageDSN,
-		AutoMigrate: storageType != "file",
-	}
-
-	// Sandbox: explicit fields from the wizard. Empty Backend on an
-	// enabled sandbox falls through to the gateway's "docker" default
-	// at construction time, but persisting "" here would leave the
-	// settings page showing a blank backend, so keep it explicit.
-	sandboxBackend := req.SandboxBackend
-	if req.SandboxEnabled && sandboxBackend == "" {
-		sandboxBackend = "docker"
-	}
-	cfg.Sandbox = config.SandboxCfg{
-		Enabled: req.SandboxEnabled,
-		Backend: sandboxBackend,
-		Image:   req.SandboxImage,
-		E2BKey:  req.SandboxE2BKey,
-	}
-
-	// Provider + model (optional — can be configured later per agent)
-	if req.APIKey != "" && req.Provider != "" {
-		providerKey := req.Provider
-		if req.Provider == "custom" && req.ProviderName != "" {
-			providerKey = strings.ToLower(strings.TrimSpace(req.ProviderName))
-			providerKey = strings.ReplaceAll(providerKey, " ", "-")
-		}
-		cfg.Providers[providerKey] = config.ProviderConfig{
-			APIKey:   req.APIKey,
-			APIBase:  req.APIBase,
-			APIType:  req.APIType,
-			AuthType: req.AuthType,
-		}
-		if req.Model != "" {
-			cfg.Agents.Defaults.Model = providerKey + "/" + req.Model
-		}
-	}
-
-	// Gateway: infra fields (port/token/mode/bind) belong to the deployment,
-	// not the UI. In cloud mode they come from env; in local mode from an
-	// existing fastclaw.json or UI input on first run. Either way, avoid
-	// clobbering an already-loaded gateway config with UI-provided values.
-	cloudMode := s.gatewayCfg != nil && s.gatewayCfg.Mode == "cloud"
-	if cloudMode && s.gatewayCfg != nil {
-		cfg.Gateway = *s.gatewayCfg
-	} else {
-		port := req.Port
-		if port == 0 {
-			port = 18953
-		}
-		gatewayToken := req.GatewayToken
-		if gatewayToken == "" {
-			gatewayToken = generateRandomToken(32)
-		}
-		cfg.Gateway = config.GatewayCfg{
-			Port: port,
-			Auth: config.GatewayAuth{
-				Token: gatewayToken,
-			},
-			HTTP: config.GatewayHTTP{
-				Endpoints: config.GatewayHTTPEndpoints{
-					ChatCompletions: config.GatewayEndpoint{Enabled: true},
-					Agents:          config.GatewayEndpoint{Enabled: true},
-				},
-			},
-		}
-	}
-
-	// Telegram (optional)
-	if req.TelegramEnabled && req.TelegramToken != "" {
-		cfg.Channels["telegram"] = config.ChannelConfig{
-			Enabled:  true,
-			BotToken: req.TelegramToken,
-		}
-		cfg.Bindings = append(cfg.Bindings, config.Binding{
-			AgentID: agentID,
-			Match:   config.Match{Channel: "telegram"},
-		})
-	}
-
-	// fastclaw.json is the on-disk "configured" sentinel that handleStatus
-	// checks and the bootstrap config the next gateway start reads to
-	// recover the admin token before the store opens. Write it whenever
-	// FS is durable — i.e. local mode. In cloud mode pod-local FS is
-	// ephemeral and env.toml carries the same role (storage DSN, gateway
-	// token), so skip the write and let the configs row below be the
-	// only persistent record.
-	if !cloudMode {
-		if _, err := config.EnsureUserDir(); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		configPath, err := config.GlobalConfigPath()
-		if err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		data, _ := json.MarshalIndent(cfg, "", "  ")
-		if err := os.WriteFile(configPath, data, 0o644); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-	}
-
-	// Bootstrap identity files for the new agent.
-	//
-	// DB rows are *overrides* on top of the FS base shipped with the agent
-	// definition. Writing non-empty placeholder text here would permanently
-	// shadow the on-disk SOUL.md / IDENTITY.md the repo ships, since
-	// ContextBuilder.loadFile prefers a non-empty DB row over the FS file.
-	// So we only write rows the user actually filled in (Personality), and
-	// skip the rest entirely — letting FS-based defaults win until the user
-	// explicitly customizes via the UI.
-	wsFiles := map[string]string{}
-	if req.Personality != "" {
-		wsFiles["SOUL.md"] = fmt.Sprintf("# %s\n\n%s\n", req.AgentName, req.Personality)
-	}
-
-	if s.dataStore != nil {
-		// DB-primary path (cloud deployments): everything goes through the
-		// store. No filesystem writes — pod-local FS is ephemeral anyway.
-		var rawCfg map[string]interface{}
-		if marshalled, err := json.Marshal(cfg); err == nil {
-			_ = json.Unmarshal(marshalled, &rawCfg)
-		}
-		if err := s.dataStore.SaveConfig(r.Context(), &store.GlobalConfig{Data: rawCfg}); err != nil {
-			slog.Warn("dataStore.SaveConfig failed", "error", err)
-		}
-		agentRecord := &store.AgentRecord{
-			ID:    agentID,
-			Name:  req.AgentName,
-			Model: cfg.Agents.Defaults.Model,
-		}
-		if err := s.dataStore.SaveAgent(r.Context(), agentRecord); err != nil {
-			slog.Warn("dataStore.SaveAgent failed", "error", err)
-		}
-		for filename, content := range wsFiles {
-			if err := s.dataStore.SaveWorkspaceFile(r.Context(), agentID, filename, []byte(content)); err != nil {
-				slog.Warn("dataStore.SaveWorkspaceFile failed", "file", filename, "error", err)
-			}
-		}
-	} else {
-		// Store-less mode (the wizard process before gateway boots, or
-		// tests). Fall back to filesystem so the next gateway start can
-		// load the agent from disk. This branch goes away once the wizard
-		// is merged into the gateway in step #5.
-		userDir, _ := config.HomeDir()
-		agentDir := filepath.Join(userDir, "agents", agentID, "agent")
-		for _, dir := range []string{
-			agentDir,
-			filepath.Join(agentDir, "memory"),
-			filepath.Join(agentDir, "sessions"),
-			filepath.Join(agentDir, "skills"),
-		} {
-			os.MkdirAll(dir, 0o755)
-		}
-		for filename, content := range wsFiles {
-			path := filepath.Join(agentDir, filename)
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				os.WriteFile(path, []byte(content), 0o644)
-			}
-		}
-	}
-
-	// Adopt the freshly persisted gateway token in-memory so the running
-	// server starts accepting it immediately. Pre-#5 the wizard process
-	// got around this by exiting and letting the gateway re-read the
-	// token from disk on restart; now that wizard + gateway are one
-	// process, we have to update s.authToken explicitly or admin login
-	// keeps reporting "Invalid admin token" because s.authToken is
-	// still the empty boot value while the user types the just-saved
-	// token from the UI.
-	if t := cfg.Gateway.Auth.Token; t != "" && t != s.authToken {
-		s.SetAuth(t, s.userRegistry)
-	}
-
-	// Refresh the running agent manager so the just-created agent is
-	// usable for chat without a process restart. handleCreateAgent does
-	// the same after individual create calls; handleSaveConfig has to
-	// do it too because onboarding goes through here, and pre-#5 the
-	// "wizard exits → gateway boot reads DB" flow used to cover this.
-	if s.agentProvider != nil {
-		if err := s.agentProvider.ReloadAgents(); err != nil {
-			slog.Warn("failed to reload agents after save", "error", err)
-		}
-	}
-
-	slog.Info("config saved", "agent", agentID,
-		"backend", configBackend(s.dataStore),
-		"hasProvider", len(cfg.Providers) > 0,
-		"defaultModel", cfg.Agents.Defaults.Model,
-	)
-
-	jsonResponse(w, http.StatusOK, map[string]any{
-		"ok":    true,
-		"token": cfg.Gateway.Auth.Token,
-	})
-
-	if s.onConfig != nil {
-		go s.onConfig(cfg)
-	}
-}
-
-// --- Config Update ---
-
-func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	var incoming map[string]json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
-		return
-	}
-
-	cfg, err := s.loadUserConfig(r)
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	// Replace providers (supports add, update, and delete)
-	if raw, ok := incoming["providers"]; ok {
-		var providers map[string]config.ProviderConfig
-		if json.Unmarshal(raw, &providers) == nil {
-			oldProviders := cfg.Providers
-			cfg.Providers = make(map[string]config.ProviderConfig)
-			for k, v := range providers {
-				p := config.ProviderConfig{
-					APIBase:  v.APIBase,
-					APIType:  v.APIType,
-					AuthType: v.AuthType,
-					Models:   v.Models,
-				}
-				if v.APIKey != "" && !strings.Contains(v.APIKey, "****") {
-					p.APIKey = v.APIKey
-				} else if old, exists := oldProviders[k]; exists {
-					p.APIKey = old.APIKey
-				}
-				cfg.Providers[k] = p
-			}
-		}
-	}
-
-	// Merge agents defaults
-	if raw, ok := incoming["agents"]; ok {
-		var agentUpdate struct {
-			Defaults config.AgentDefaults `json:"defaults"`
-		}
-		if json.Unmarshal(raw, &agentUpdate) == nil {
-			d := agentUpdate.Defaults
-			if d.Model != "" {
-				cfg.Agents.Defaults.Model = d.Model
-			}
-		}
-	}
-
-	// Merge sandbox (top-level)
-	if raw, ok := incoming["sandbox"]; ok {
-		var sandbox config.SandboxCfg
-		if json.Unmarshal(raw, &sandbox) == nil {
-			cfg.Sandbox = sandbox
-		}
-	}
-	// Also handle sandbox inside agents.defaults (backwards compat)
-	if raw, ok := incoming["agents"]; ok {
-		var agentSandbox struct {
-			Defaults struct {
-				Sandbox config.SandboxCfg `json:"sandbox"`
-			} `json:"defaults"`
-		}
-		if json.Unmarshal(raw, &agentSandbox) == nil {
-			if agentSandbox.Defaults.Sandbox.Enabled || agentSandbox.Defaults.Sandbox.Backend != "" {
-				cfg.Sandbox = agentSandbox.Defaults.Sandbox
-			}
-		}
-	}
-
-	// Merge storage
-	if raw, ok := incoming["storage"]; ok {
-		var storage config.StorageCfg
-		if json.Unmarshal(raw, &storage) == nil {
-			cfg.Storage = storage
-		}
-	}
-
-	// Merge hooks
-	if raw, ok := incoming["hooks"]; ok {
-		var hooks config.HooksCfg
-		if json.Unmarshal(raw, &hooks) == nil {
-			cfg.Hooks = hooks
-		}
-	}
-
-	// Merge skills.entries / skills.agentEntries. UI sends each touched
-	// skill's full entry; we treat the incoming object as a patch — any
-	// masked value (***) on an existing field is preserved from the
-	// current cfg so saving the form doesn't wipe a key the user
-	// couldn't see in the UI. AgentEntries are per-(agentID, skillName)
-	// overrides — the agent-scoped /agents/<id>/skills page writes here
-	// instead of `entries` so each agent can carry its own credentials.
-	if raw, ok := incoming["skills"]; ok {
-		var update struct {
-			Entries      map[string]config.SkillEntryCfg            `json:"entries"`
-			AgentEntries map[string]map[string]config.SkillEntryCfg `json:"agentEntries"`
-		}
-		if json.Unmarshal(raw, &update) == nil {
-			if cfg.Skills.Entries == nil {
-				cfg.Skills.Entries = make(map[string]config.SkillEntryCfg)
-			}
-			for skillName, in := range update.Entries {
-				cfg.Skills.Entries[skillName] = mergeSkillEntry(cfg.Skills.Entries[skillName], in)
-			}
-			if cfg.Skills.AgentEntries == nil {
-				cfg.Skills.AgentEntries = make(map[string]map[string]config.SkillEntryCfg)
-			}
-			for agentID, agentMap := range update.AgentEntries {
-				if cfg.Skills.AgentEntries[agentID] == nil {
-					cfg.Skills.AgentEntries[agentID] = make(map[string]config.SkillEntryCfg)
-				}
-				for skillName, in := range agentMap {
-					cfg.Skills.AgentEntries[agentID][skillName] =
-						mergeSkillEntry(cfg.Skills.AgentEntries[agentID][skillName], in)
-				}
-			}
-		}
-	}
-
-	if err := s.saveUserConfig(r, cfg); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	// Trigger full hot-reload: settings-page changes (provider rotation,
-	// sandbox toggle, model defaults) need to take effect on the running
-	// gateway without a restart. handleSaveConfig (onboarding) does the
-	// same; this used to no-op, so toggling sandbox on in the UI looked
-	// "saved" but the in-memory cfg + executor pool kept the boot-time
-	// state and exec silently fell back to the host shell.
-	if s.agentProvider != nil {
-		if err := s.agentProvider.ReloadAgents(); err != nil {
-			slog.Warn("failed to reload after config update", "error", err)
-		}
-	}
-
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
-}
+// --- Helpers ---
 
 func jsonResponse(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1149,10 +743,6 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dd %dh", days, hours)
 }
 
-// looksLikeSecret returns true when an env-var name suggests a credential
-// — used to decide whether the GET /api/config response should mask its
-// value. Keep the name list narrow so we don't accidentally mask
-// non-secret config (e.g. LOG_LEVEL).
 func looksLikeSecret(name string) bool {
 	upper := strings.ToUpper(name)
 	for _, marker := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"} {
@@ -1163,9 +753,6 @@ func looksLikeSecret(name string) bool {
 	return false
 }
 
-// isMaskedSecret detects values that came back from a previous GET in
-// masked form — used by the update path to preserve the underlying
-// value instead of overwriting the stored secret with literal "***".
 func isMaskedSecret(s string) bool {
 	if s == "" {
 		return false
@@ -1173,9 +760,6 @@ func isMaskedSecret(s string) bool {
 	return s == "****" || strings.Contains(s, "****")
 }
 
-// maskSkillEntry returns a copy of v safe for inclusion in a public GET
-// response — apiKey is masked unconditionally and env values whose key
-// looks like a secret marker (KEY/TOKEN/SECRET/...) are also masked.
 func maskSkillEntry(v config.SkillEntryCfg) config.SkillEntryCfg {
 	out := config.SkillEntryCfg{Enabled: v.Enabled, APIKey: maskAPIKey(v.APIKey)}
 	if len(v.Env) > 0 {
@@ -1191,16 +775,8 @@ func maskSkillEntry(v config.SkillEntryCfg) config.SkillEntryCfg {
 	return out
 }
 
-// mergeSkillEntry produces the new persisted entry given the existing
-// stored value and the patch coming from the UI. Masked-secret fields
-// (apiKey or env values still showing "***") fall back to the existing
-// value so a save that doesn't touch a credential leaves it untouched.
 func mergeSkillEntry(existing, in config.SkillEntryCfg) config.SkillEntryCfg {
-	out := config.SkillEntryCfg{
-		Enabled: in.Enabled,
-		APIKey:  in.APIKey,
-		Env:     in.Env,
-	}
+	out := config.SkillEntryCfg{Enabled: in.Enabled, APIKey: in.APIKey, Env: in.Env}
 	if isMaskedSecret(out.APIKey) {
 		out.APIKey = existing.APIKey
 	}
@@ -1214,55 +790,22 @@ func mergeSkillEntry(existing, in config.SkillEntryCfg) config.SkillEntryCfg {
 	return out
 }
 
-// generateRandomToken generates a cryptographically random hex token.
+func newRandID() (string, error) {
+	var buf [10]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
 func generateRandomToken(length int) string {
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
-		// Fallback: this should never happen
 		return "fastclaw-default-token"
 	}
 	return hex.EncodeToString(b)
 }
 
-func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	if s.taskQueue == nil {
-		jsonResponse(w, http.StatusOK, []any{})
-		return
-	}
-
-	tasks := s.taskQueue.RecentTasks(50)
-	result := make([]map[string]any, 0, len(tasks))
-	for _, t := range tasks {
-		entry := map[string]any{
-			"id":        t.ID,
-			"agentId":   t.AgentID,
-			"chatKey":   t.ChatKey,
-			"status":    string(t.Status),
-			"createdAt": t.CreatedAt.Format(time.RFC3339),
-		}
-		if t.StartedAt != nil && t.DoneAt != nil {
-			entry["duration"] = t.DoneAt.Sub(*t.StartedAt).Milliseconds()
-		}
-		if t.Error != nil {
-			entry["error"] = t.Error.Error()
-		}
-		result = append(result, entry)
-	}
-	jsonResponse(w, http.StatusOK, result)
-}
-
-// saveConfigFile persists the config to ~/.fastclaw/users/local/fastclaw.json.
-func saveConfigFile(cfg *config.Config) error {
-	if _, err := config.EnsureUserDir(); err != nil {
-		return err
-	}
-	configPath, err := config.UserConfigPath(config.DefaultUserID)
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(configPath, data, 0o644)
-}
+// debugLog is used from various handlers for diagnostic events; kept as a
+// thin wrapper so handler files don't import slog directly.
+func debugLog(msg string, kv ...any) { slog.Debug(msg, kv...) }

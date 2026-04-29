@@ -8,23 +8,9 @@ import (
 )
 
 // handleGetUsage returns the per-(day, apikey, agent, kind) counter rows.
-// Admin only — we currently lean on a process-local meter, so answers are
-// only for this pod's activity. When the Meter is swapped for a DB-backed
-// implementation the same endpoint starts returning fleet-wide totals
-// with no handler changes.
-//
-// Query params:
-//
-//	?apiKey=<id>  — filter to one api key (empty = all)
-//	?agent=<id>   — filter to one agent (empty = all)
-//	?kind=tokens_in,sandbox_seconds,...  (empty = all known kinds)
-//	?since=2026-04-01  (RFC3339 date or zero for last 30 days)
-//	?until=2026-04-30  (zero for now)
+// Wrapped by requireSuperAdmin in server.go. Filters: ?apiKey=, ?agent=,
+// ?kind=tokens_in,sandbox_seconds, ?since=, ?until=.
 func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
-	if callerFrom(r).Kind != callerAdmin {
-		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "admin only"})
-		return
-	}
 	if s.usage == nil {
 		jsonResponse(w, http.StatusOK, map[string]any{"rows": []any{}})
 		return
@@ -58,9 +44,6 @@ func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"rows": rows})
 }
 
-// splitKinds parses "a,b,c" into []usage.Kind. Kept trivial — no
-// validation of the individual tokens, so callers get whatever they
-// asked for and unknown kinds quietly return no rows.
 func splitKinds(s string) []usage.Kind {
 	var out []usage.Kind
 	start := 0

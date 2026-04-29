@@ -41,14 +41,6 @@ func pluginListCmd() *cobra.Command {
 
 			paths := []string{filepath.Join(homeDir, "plugins")}
 
-			// Also check config for extra paths
-			cfg, _ := config.Load()
-			if cfg != nil && cfg.Plugins.Enabled {
-				for _, p := range cfg.Plugins.Paths {
-					paths = append(paths, p)
-				}
-			}
-
 			mgr := plugin.NewManager(nil)
 			if err := mgr.Discover(paths); err != nil {
 				return err
@@ -64,11 +56,6 @@ func pluginListCmd() *cobra.Command {
 			fmt.Printf("%-15s %-20s %-10s %-10s %s\n", "ID", "NAME", "TYPE", "VERSION", "DIR")
 			for _, p := range plugins {
 				enabledStr := "enabled"
-				if cfg != nil {
-					if entry, ok := cfg.Plugins.Entries[p.Manifest.ID]; ok && !entry.Enabled {
-						enabledStr = "disabled"
-					}
-				}
 				fmt.Printf("%-15s %-20s %-10s %-10s %s [%s]\n",
 					p.Manifest.ID,
 					p.Manifest.Name,

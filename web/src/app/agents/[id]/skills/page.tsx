@@ -43,9 +43,11 @@ import {
 } from "@/lib/api";
 import { ConfigureSkillDialog, type SkillEntryView } from "@/components/configure-skill-dialog";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
+import { useAgentName } from "@/hooks/use-agent-name";
 
 export default function AgentSkillsPage() {
   const agentId = useAgentIdFromURL();
+  const agentName = useAgentName(agentId);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -102,7 +104,7 @@ export default function AgentSkillsPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Skills</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Skills scoped to <span className="font-mono">{agentId}</span> — only this
+            Skills scoped to <strong>{agentName}</strong> — only this
             agent sees them
           </p>
         </div>
@@ -197,7 +199,7 @@ export default function AgentSkillsPage() {
             <AlertDialogTitle>Remove Skill</AlertDialogTitle>
             <AlertDialogDescription>
               Remove <strong>{deleteTarget}</strong> from{" "}
-              <span className="font-mono">{agentId}</span>? Other agents are
+              <strong>{agentName}</strong>? Other agents are
               unaffected.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -215,6 +217,7 @@ export default function AgentSkillsPage() {
 
       <InstallSkillDialog
         agentId={agentId}
+        agentName={agentName}
         open={installOpen}
         onOpenChange={setInstallOpen}
         onInstalled={() => {
@@ -240,12 +243,14 @@ export default function AgentSkillsPage() {
 
 function InstallSkillDialog({
   agentId,
+  agentName,
   open,
   onOpenChange,
   onInstalled,
   installedNames,
 }: {
   agentId: string;
+  agentName: string;
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onInstalled: () => void;
@@ -314,7 +319,7 @@ function InstallSkillDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Install Skill for {agentId}</DialogTitle>
+          <DialogTitle>Install Skill for {agentName}</DialogTitle>
           <DialogDescription>
             Search skills.sh and install into{" "}
             <code className="font-mono text-xs">

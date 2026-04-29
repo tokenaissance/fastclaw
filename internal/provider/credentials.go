@@ -33,19 +33,20 @@ type CredentialManager struct {
 	mu            sync.RWMutex
 }
 
-// NewCredentialManager creates a new credential manager for the default user.
-// If passphrase is empty, uses a machine-derived key.
-func NewCredentialManager(passphrase string) (*CredentialManager, error) {
-	return NewCredentialManagerForUser(config.DefaultUserID, passphrase)
-}
-
 // NewCredentialManagerForUser creates a credential manager scoped to a specific
 // user. Credentials live at ~/.fastclaw/users/{userID}/credentials.json and
 // are encrypted with a key derived from the user ID, so one user's file
 // cannot be decrypted with another user's key even if moved on disk.
 func NewCredentialManagerForUser(userID, passphrase string) (*CredentialManager, error) {
-	storeDir, err := config.EnsureUserDir(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("provider: NewCredentialManagerForUser requires userID")
+	}
+	home, err := config.HomeDir()
 	if err != nil {
+		return nil, fmt.Errorf("home dir: %w", err)
+	}
+	storeDir := filepath.Join(home, "users", userID)
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		return nil, fmt.Errorf("ensure user dir: %w", err)
 	}
 
@@ -266,10 +267,6 @@ func legacyDeriveKey() []byte {
 	return hash[:]
 }
 
-func deriveKey(passphrase string) []byte {
-	return deriveKeyForUser(config.DefaultUserID, passphrase)
-}
-
 // deriveKeyForUser mixes the user ID into the encryption key so that each
 // user's credentials file is encrypted with a distinct KEK. In the absence
 // of an explicit passphrase, a machine-derived seed (hostname + home) is
@@ -278,7 +275,7 @@ func deriveKey(passphrase string) []byte {
 // from decrypting.
 func deriveKeyForUser(userID, passphrase string) []byte {
 	if userID == "" {
-		userID = config.DefaultUserID
+		userID = "_anonymous"
 	}
 	var seed string
 	if passphrase != "" {

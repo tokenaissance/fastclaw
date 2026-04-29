@@ -64,17 +64,11 @@ func NewManager(dataDir string) *Manager {
 	}
 }
 
-func NewManagerWithStore(dataDir string, st SessionStore, agentID string) *Manager {
-	return NewManagerWithStoreForUser(dataDir, st, config.DefaultUserID, agentID)
-}
-
-// NewManagerWithStoreForUser is the user-scoped constructor: store reads
-// and writes carry user_id so per-(user, agent) sessions don't collide
-// when multiple users hit the same agentID. CLI / heartbeat callers that
-// don't have a user can use NewManagerWithStore which defaults to local.
+// NewManagerWithStoreForUser is the user-scoped constructor. Caller MUST
+// supply a real user_id resolved from auth — there is no fallback.
 func NewManagerWithStoreForUser(dataDir string, st SessionStore, userID, agentID string) *Manager {
 	if userID == "" {
-		userID = config.DefaultUserID
+		panic("session.NewManagerWithStoreForUser: userID is required")
 	}
 	return &Manager{
 		sessions: make(map[string]*Session),

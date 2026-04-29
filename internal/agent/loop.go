@@ -92,6 +92,15 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 	if a.ctxBuilder != nil {
 		a.ctxBuilder.sandboxEnabled = p != nil
 	}
+	// Tell the tool registry sandbox is required so its host-shell exec
+	// fallback refuses to run when bindSession can't bind an executor.
+	// The two states (system prompt advertising /workspace + /skills,
+	// exec actually using sandbox) must agree — without this, a Docker
+	// daemon hiccup turns into "sh: python: command not found" on the
+	// host instead of a clear "sandbox required but unavailable" error.
+	if a.registry != nil {
+		a.registry.SetSandboxRequired(p != nil)
+	}
 }
 
 // bindSession wires per-turn session state into the tool registry: the
@@ -109,7 +118,12 @@ func (a *Agent) bindSession(ctx context.Context, sessionID string) {
 	}
 	ex, err := a.sandboxPool.Get(ctx, a.name, sessionID)
 	if err != nil {
-		slog.Warn("sandbox executor unavailable",
+		// Error level (not warn) — when sandbox is required and we
+		// can't bind, the next exec call will refuse with the
+		// "sandboxRequired but no executor" message; log here so the
+		// upstream cause (docker daemon down, image pull failed, …) is
+		// captured next to the user-facing error.
+		slog.Error("sandbox executor unavailable; exec will refuse host fallback",
 			"agent", a.name, "session", sessionID, "error", err)
 		return
 	}

@@ -16,11 +16,14 @@ import (
 )
 
 // MemoryStore is an optional interface for DB-backed memory persistence.
+// userID is the chatter — chat-time MEMORY.md / USER.md updates land in
+// that user's per-user override row so they don't pollute the shared
+// template that the agent owner edits via the Customize page.
 type MemoryStore interface {
-	GetMemory(ctx context.Context, agentID string) (string, error)
-	SaveMemory(ctx context.Context, agentID, content string) error
-	GetWorkspaceFile(ctx context.Context, agentID, filename string) ([]byte, error)
-	SaveWorkspaceFile(ctx context.Context, agentID, filename string, data []byte) error
+	GetMemory(ctx context.Context, agentID, userID string) (string, error)
+	SaveMemory(ctx context.Context, agentID, userID, content string) error
+	GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
+	SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error
 }
 
 type Memory struct {
@@ -34,18 +37,11 @@ func NewMemory(workspace string) *Memory {
 	return &Memory{workspace: workspace}
 }
 
-func NewMemoryWithStore(workspace string, st MemoryStore, agentID string) *Memory {
-	return NewMemoryWithStoreForUser(workspace, st, config.DefaultUserID, agentID)
-}
-
-// NewMemoryWithStoreForUser is the user-scoped constructor: store reads /
-// writes carry user_id so 10 users hitting the same agentID each get their
-// own MEMORY.md / USER.md without colliding. Callers that don't yet know
-// the user (CLI, heartbeat) should use NewMemoryWithStore which defaults
-// to config.DefaultUserID.
+// NewMemoryWithStoreForUser is the user-scoped constructor. userID must be
+// a real users.id resolved from auth.
 func NewMemoryWithStoreForUser(workspace string, st MemoryStore, userID, agentID string) *Memory {
 	if userID == "" {
-		userID = config.DefaultUserID
+		panic("agent.NewMemoryWithStoreForUser: userID is required")
 	}
 	return &Memory{workspace: workspace, store: st, userID: userID, agentID: agentID}
 }
@@ -74,7 +70,7 @@ func (m *Memory) historyPath() string {
 // LoadMemory reads the long-term memory.
 func (m *Memory) LoadMemory() string {
 	if m.store != nil {
-		content, err := m.store.GetMemory(m.ctx(), m.agentID)
+		content, err := m.store.GetMemory(m.ctx(), m.agentID, m.userID)
 		if err == nil {
 			return content
 		}
@@ -89,7 +85,7 @@ func (m *Memory) LoadMemory() string {
 // SaveMemory overwrites the long-term memory.
 func (m *Memory) SaveMemory(content string) error {
 	if m.store != nil {
-		return m.store.SaveMemory(m.ctx(), m.agentID, content)
+		return m.store.SaveMemory(m.ctx(), m.agentID, m.userID, content)
 	}
 	os.MkdirAll(m.workspace, 0o755)
 	return os.WriteFile(m.memoryPath(), []byte(content), 0o644)
@@ -216,7 +212,7 @@ func (m *Memory) SaveUserFile(content string) error {
 		}
 	}
 	if m.store != nil {
-		return m.store.SaveWorkspaceFile(m.ctx(), m.agentID, "USER.md", []byte(content))
+		return m.store.SaveWorkspaceFile(m.ctx(), m.agentID, m.userID, "USER.md", []byte(content))
 	}
 	os.MkdirAll(m.workspace, 0o755)
 	return os.WriteFile(filepath.Join(m.workspace, "USER.md"), []byte(content), 0o644)
@@ -225,7 +221,7 @@ func (m *Memory) SaveUserFile(content string) error {
 // LoadUserFile reads the USER.md file.
 func (m *Memory) LoadUserFile() string {
 	if m.store != nil {
-		data, err := m.store.GetWorkspaceFile(m.ctx(), m.agentID, "USER.md")
+		data, err := m.store.GetWorkspaceFile(m.ctx(), m.agentID, m.userID, "USER.md")
 		if err == nil {
 			return string(data)
 		}

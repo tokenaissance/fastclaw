@@ -54,6 +54,21 @@ type Registry struct {
 	// never be visible from the UI — so we route identity writes here
 	// when set.
 	systemFileStore SystemFileStore
+	// userID is the chatter — passed through to systemFileStore so
+	// chat-time writes (write_file on SOUL.md / USER.md / MEMORY.md)
+	// land in that user's per-user override row, not the shared
+	// template. Set once at agent boot via SetOwnerUserID.
+	userID string
+	// sandboxRequired is the runtime contract: when true, the exec tool
+	// MUST refuse to fall through to the host shell — even if sbCfg
+	// wasn't set at agent construction (cfg.Sandbox.Enabled was false at
+	// boot but the user later flipped it on, or attachSandboxToAgents
+	// wired a pool to this agent because a *sibling* agent wanted
+	// sandbox). Without this, a `pool.Get()` failure during bindSession
+	// silently falls through to host execution and the user sees a
+	// confusing "sh: python: command not found" instead of a clear
+	// "sandbox required but unavailable" error.
+	sandboxRequired bool
 	// envProvider + skillDirs cache the skill-env injection wiring set
 	// at agent boot via RegisterExecWithSkillEnv so a later
 	// SetExecutor (per-session) can re-register the sandboxed exec
@@ -67,11 +82,13 @@ type Registry struct {
 
 // SystemFileStore is the narrow slice of the DB store that write_file /
 // read_file need to keep identity files (SOUL.md, IDENTITY.md, …) in
-// sync across pods. It matches the shape of agent.MemoryStore (and
-// store.Store) intentionally so existing adapters can be reused.
+// sync across pods. Matches the shape of agent.MemoryStore (and
+// store.Store) intentionally so existing adapters can be reused. userID
+// is the chatter — chat-time writes land in that user's per-user
+// override row so they don't clobber the shared template.
 type SystemFileStore interface {
-	GetWorkspaceFile(ctx context.Context, agentID, filename string) ([]byte, error)
-	SaveWorkspaceFile(ctx context.Context, agentID, filename string, data []byte) error
+	GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
+	SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error
 }
 
 // SetWorkspaceStore installs a workspace store on the registry. File tools
@@ -93,6 +110,26 @@ func (r *Registry) SetSystemFileStore(s SystemFileStore, agentID string) {
 	if agentID != "" {
 		r.agentID = agentID
 	}
+}
+
+// SetOwnerUserID records the chatter so identity-file writes go through
+// the systemFileStore tagged with the right user_id (per-user override),
+// not the shared template. Set once at agent boot from the UserSpace's
+// owner; current architecture has one agent per user, so this is fixed
+// for the lifetime of the registry.
+func (r *Registry) SetOwnerUserID(userID string) {
+	r.userID = userID
+}
+
+// SetSandboxRequired flips the exec tool's host-shell fallback off. Call
+// with true whenever the runtime decides this agent must run inside a
+// sandbox executor (e.g., user enabled cfg.Sandbox after boot, so
+// attachSandboxToAgents wired a pool). With this set, the exec tool's
+// `useSandbox` check fires even when the agent was constructed with
+// sbCfg=nil, so a missing executor surfaces as an explicit error
+// instead of leaking onto the host shell.
+func (r *Registry) SetSandboxRequired(required bool) {
+	r.sandboxRequired = required
 }
 
 // SetSessionID scopes the registry's workspace.Store calls (write_file /

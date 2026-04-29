@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getStatus, getChatHistory, getChatSessions, sendChatStream, type AgentInfo, type ChatHistoryMessage, type ChatStreamEvent } from "@/lib/api";
+import { useAgentName } from "@/hooks/use-agent-name";
 import { Bot, Send, Copy, Check, SquarePen, MessageSquare, Wrench, ChevronDown, ChevronRight } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -269,6 +270,7 @@ export default function ChatPage() {
     new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   const currentAgent = agents.find((a) => a.id === selectedAgent);
+  const agentName = useAgentName(selectedAgent);
 
   return (
     <div className="flex h-[calc(100vh-3rem)] md:h-screen">
@@ -380,7 +382,7 @@ export default function ChatPage() {
                   <Bot className="h-8 w-8 text-muted-foreground" />
                 </div>
                 <p className="text-lg font-medium mb-1">
-                  Chat with {selectedAgent || "your agent"}
+                  Chat with {agentName || selectedAgent || "your agent"}
                 </p>
                 <p className="text-sm text-muted-foreground">
                   Send a message to start a conversation
@@ -470,7 +472,7 @@ export default function ChatPage() {
                 onKeyDown={handleKeyDown}
                 placeholder={
                   selectedAgent
-                    ? `Message ${selectedAgent}...`
+                    ? `Message ${agentName || selectedAgent}...`
                     : "Select an agent first"
                 }
                 disabled={!selectedAgent || sending}

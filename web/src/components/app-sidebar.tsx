@@ -97,7 +97,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   React.useEffect(() => {
     getAgents()
       .then((list) =>
-        setAgents(list.map((a) => ({ id: a.id, model: a.model }))),
+        setAgents(list.map((a) => ({ id: a.id, name: a.name, model: a.model }))),
       )
       .catch(() => {});
   }, []);
