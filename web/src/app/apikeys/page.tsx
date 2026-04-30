@@ -65,6 +65,7 @@ export default function ApikeysPage() {
   const [showToken, setShowToken] = useState<{ id: string; token: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
+  const [rotateTarget, setRotateTarget] = useState<ApiKey | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
 
   async function refresh() {
@@ -107,9 +108,11 @@ export default function ApikeysPage() {
     const res = await rotateApikey(id);
     if (res.error) {
       setError(res.error);
+      setRotateTarget(null);
       return;
     }
     if (res.token) setShowToken({ id, token: res.token });
+    setRotateTarget(null);
     refresh();
   }
 
@@ -142,9 +145,7 @@ export default function ApikeysPage() {
             <h2 className="text-2xl font-semibold tracking-tight">API Keys</h2>
           </div>
           <p className="text-sm text-muted-foreground mt-1">
-            Issue programmatic credentials. Each key is bound to a subset of your agents — the bearer can only call
-            <code className="mx-1 rounded bg-muted px-1.5 py-0.5 text-xs">/v1/chat/completions</code>
-            for those agents.
+            Issue programmatic credentials. Each key is scoped to a subset of your agents.
           </p>
         </div>
         <Button variant="outline" onClick={openCreateDialog}>
@@ -247,7 +248,7 @@ export default function ApikeysPage() {
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-1">
-                      <Button size="icon" variant="ghost" onClick={() => handleRotate(k.id)} title="Rotate">
+                      <Button size="icon" variant="ghost" onClick={() => setRotateTarget(k)} title="Rotate">
                         <RotateCw className="size-4" />
                       </Button>
                       <Button
@@ -344,6 +345,25 @@ export default function ApikeysPage() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => deleteTarget && handleDelete(deleteTarget)}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={rotateTarget !== null} onOpenChange={(o) => !o && setRotateTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Rotate API key?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The current token for{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{rotateTarget?.name || rotateTarget?.id}</code>{" "}
+              will stop working immediately. A new token will be issued and shown once.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => rotateTarget && handleRotate(rotateTarget.id)}>
+              Rotate
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

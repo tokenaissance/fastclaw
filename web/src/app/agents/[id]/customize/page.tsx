@@ -185,17 +185,20 @@ export default function AgentCustomizePage() {
         ))}
       </div>
 
-      {/* Active-tab status line */}
-      <div className="flex items-center gap-2 mb-2 text-xs text-muted-foreground">
-        {sourceBadge(active?.source)}
-        {active?.source === "db" && active.baseContent && (
-          <span>Override active — repo base is {active.baseContent.length} chars.</span>
-        )}
-        {active?.source === "fs" && (
-          <span>Loaded from <code>{`<agent home>/${activeTab}`}</code>. Editing creates a per-agent override.</span>
-        )}
-        {active?.source === "default" && <span>Empty — neither override nor repo base.</span>}
-      </div>
+      {/* Active-tab status line — only shows when there's something
+          actionable to say (override active / loaded from repo). The
+          "default" case (empty + no repo base) is silent. */}
+      {(active?.source === "db" || active?.source === "fs") && (
+        <div className="flex items-center gap-2 mb-2 text-xs text-muted-foreground">
+          {sourceBadge(active?.source)}
+          {active?.source === "db" && active.baseContent && (
+            <span>Override active — repo base is {active.baseContent.length} chars.</span>
+          )}
+          {active?.source === "fs" && (
+            <span>Loaded from <code>{`<agent home>/${activeTab}`}</code>. Editing creates a per-agent override.</span>
+          )}
+        </div>
+      )}
 
       {/* Editor */}
       <textarea
@@ -208,7 +211,7 @@ export default function AgentCustomizePage() {
         }
         spellCheck={false}
         className="w-full rounded-lg border border-border bg-card px-4 py-3 font-mono text-sm leading-relaxed outline-none focus:ring-1 focus:ring-primary/30 resize-none"
-        style={{ minHeight: 400 }}
+        style={{ height: "calc(100vh - 240px)", minHeight: 400 }}
         placeholder={`# ${activeTab}\n\nWrite your content here...`}
       />
     </div>

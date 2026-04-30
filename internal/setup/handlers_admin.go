@@ -94,6 +94,11 @@ type onboardRequest struct {
 	Model     string `json:"model"`
 
 	AgentName string `json:"agentName,omitempty"`
+
+	SandboxEnabled bool   `json:"sandboxEnabled,omitempty"`
+	SandboxBackend string `json:"sandboxBackend,omitempty"`
+	SandboxImage   string `json:"sandboxImage,omitempty"`
+	SandboxE2BKey  string `json:"sandboxE2BKey,omitempty"`
 }
 
 // handleOnboard creates the first super_admin + first system provider +
@@ -134,6 +139,14 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 			APIType:  req.APIType,
 			AuthType: req.AuthType,
 		}
+		// Seed the chosen model into Provider.Models so the Models /
+		// Providers admin pages show it right away — without this, users
+		// land on an "Edit Provider" dialog with an empty Models list
+		// and an inactive Test connection button, even though
+		// agents.defaults already names this model.
+		if req.Model != "" {
+			pcfg.Models = []config.ModelEntry{{ID: req.Model, Name: req.Model}}
+		}
 		if err := scope.SaveProvider(r.Context(), s.dataStore, scope.System, "", req.Provider, pcfg); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -161,6 +174,26 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 	if err := s.dataStore.SaveAgent(r.Context(), agentRec); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+	if req.SandboxEnabled {
+		backend := req.SandboxBackend
+		if backend == "" {
+			backend = "docker"
+		}
+		sandbox := map[string]interface{}{
+			"enabled": true,
+			"backend": backend,
+		}
+		if req.SandboxImage != "" {
+			sandbox["image"] = req.SandboxImage
+		}
+		if req.SandboxE2BKey != "" {
+			sandbox["e2bKey"] = req.SandboxE2BKey
+		}
+		if err := scope.SaveSetting(r.Context(), s.dataStore, scope.System, "", "sandbox", sandbox); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
 	}
 	cookie, err := s.authResolver.IssueSession(r.Context(), acct.ID)
 	if err == nil {

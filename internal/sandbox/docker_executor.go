@@ -37,6 +37,23 @@ func (d *DockerExecutor) Exec(ctx context.Context, command string, timeout time.
 		execCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
+	// docker is client/daemon — exec.CommandContext only SIGKILLs the local
+	// `docker exec` CLI, which just detaches the attached client; the inner
+	// process inside the container keeps running until natural completion.
+	// That's why "Stop" in the UI doesn't actually stop a running tool.
+	// Force-remove the container on cancel — the attached CLI returns
+	// immediately, the inner process dies with the container, and the next
+	// Exec call lazy-recreates the sandbox. Workspace is a host bind-mount
+	// so user files aren't affected.
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-execCtx.Done():
+			_ = d.sb.Close()
+		case <-done:
+		}
+	}()
+	defer close(done)
 	return d.sb.Exec(execCtx, command, "/workspace")
 }
 

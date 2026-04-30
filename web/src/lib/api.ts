@@ -15,6 +15,7 @@ export interface StatusResponse {
 
 export interface AgentInfo {
   id: string;
+  name?: string;
   model: string;
   workspace: string;
 }
@@ -250,6 +251,10 @@ export interface OnboardRequest {
   authType?: string;
   model?: string;
   agentName?: string;
+  sandboxEnabled?: boolean;
+  sandboxBackend?: string;
+  sandboxImage?: string;
+  sandboxE2BKey?: string;
 }
 
 export async function onboard(req: OnboardRequest): Promise<{ ok: boolean; error?: string }> {

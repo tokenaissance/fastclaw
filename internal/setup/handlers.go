@@ -315,14 +315,35 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := s.loadUserConfig(r)
 	if err == nil {
-		for name, prov := range cfg.Providers {
+		// Pick the provider that actually backs the default model. The
+		// model id is "<providerName>/<modelID>" (split on first slash —
+		// modelIDs themselves can contain slashes, e.g.
+		// "openrouter/xiaomi/mimo-v2-flash"). Falling back to "first
+		// provider in the map" produced a mismatched panel where the
+		// header said one provider but the default model belonged to
+		// another.
+		defaultModel := cfg.Agents.Defaults.Model
+		var provName string
+		if i := strings.IndexByte(defaultModel, '/'); i > 0 {
+			provName = defaultModel[:i]
+		}
+		if prov, ok := cfg.Providers[provName]; ok {
 			resp["provider"] = map[string]string{
-				"name":    name,
-				"model":   cfg.Agents.Defaults.Model,
+				"name":    provName,
+				"model":   defaultModel,
 				"apiBase": prov.APIBase,
 				"apiKey":  maskAPIKey(prov.APIKey),
 			}
-			break
+		} else {
+			for name, prov := range cfg.Providers {
+				resp["provider"] = map[string]string{
+					"name":    name,
+					"model":   defaultModel,
+					"apiBase": prov.APIBase,
+					"apiKey":  maskAPIKey(prov.APIKey),
+				}
+				break
+			}
 		}
 		var chs []map[string]string
 		for chType, ch := range cfg.Channels {
@@ -339,7 +360,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if len(allAgents) > 0 {
 		var agentList []map[string]string
 		for _, ag := range allAgents {
-			agentList = append(agentList, map[string]string{"id": ag.Name()})
+			id := ag.Name() // AgentHandle.Name() returns the agent id
+			entry := map[string]string{"id": id}
+			// Surface the human-friendly name from the agents row so the
+			// dashboard list reads "default" / "ImgAny" instead of
+			// "agt_…". Look-up failures fall back to id-only so a
+			// transient store error doesn't black out the panel.
+			if s.dataStore != nil {
+				if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
+					entry["name"] = rec.Name
+				}
+			}
+			agentList = append(agentList, entry)
 		}
 		resp["agents"] = agentList
 	}

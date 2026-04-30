@@ -20,7 +20,6 @@ import {
   Server,
   Brain,
   RefreshCw,
-  MessageSquare,
   ArrowRight,
   Settings,
 } from "lucide-react";
@@ -52,6 +51,13 @@ export default function OverviewPage() {
     );
   }
 
+  // Hide empty / not-yet-connected sections so the dashboard reflects
+  // what's actually configured: Channels stat when none connected,
+  // Model column when no agent reports a model.
+  const channelCount = status?.channels?.length || 0;
+  const showChannels = channelCount > 0;
+  const showAgentModel = (status?.agents || []).some((a) => a.model);
+
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       {/* Header */}
@@ -74,8 +80,12 @@ export default function OverviewPage() {
         </Button>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+      {/* Stats Cards — Channels card collapses out when nothing is
+          connected so the dashboard doesn't advertise an empty integration
+          on a fresh install. */}
+      <div
+        className={`grid gap-4 grid-cols-2 ${showChannels ? "md:grid-cols-4" : "md:grid-cols-3"}`}
+      >
         {/* Status */}
         <div className="rounded-lg border border-border bg-card p-5">
           <div className="flex items-center justify-between mb-3">
@@ -123,18 +133,18 @@ export default function OverviewPage() {
         </div>
 
         {/* Channels */}
-        <div className="rounded-lg border border-border bg-card p-5">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm text-muted-foreground">Channels</span>
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/10">
-              <Radio className="h-4 w-4 text-blue-500" />
+        {showChannels && (
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm text-muted-foreground">Channels</span>
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-500/10">
+                <Radio className="h-4 w-4 text-blue-500" />
+              </div>
             </div>
+            <p className="text-3xl font-semibold tracking-tight">{channelCount}</p>
+            <p className="text-xs text-muted-foreground mt-1">Connected</p>
           </div>
-          <p className="text-3xl font-semibold tracking-tight">
-            {status?.channels?.length || 0}
-          </p>
-          <p className="text-xs text-muted-foreground mt-1">Connected</p>
-        </div>
+        )}
 
         {/* Port */}
         <div className="rounded-lg border border-border bg-card p-5">
@@ -151,23 +161,9 @@ export default function OverviewPage() {
         </div>
       </div>
 
-      {/* Quick Actions */}
-      <div className="grid gap-3 md:grid-cols-3">
-        <Link href="/chat/">
-          <div className="group flex items-center gap-4 rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/50">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-500/10 transition-colors group-hover:bg-violet-500/15">
-              <MessageSquare className="h-5 w-5 text-violet-500" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium">Chat</p>
-              <p className="text-xs text-muted-foreground">
-                Talk to your agents
-              </p>
-            </div>
-            <ArrowRight className="h-4 w-4 text-muted-foreground/50 group-hover:text-muted-foreground transition-colors" />
-          </div>
-        </Link>
-
+      {/* Quick Actions — chat lives per-agent now (under /agents/<id>/chat),
+          so the standalone /chat shortcut is gone. */}
+      <div className="grid gap-3 md:grid-cols-2">
         <Link href="/agents/">
           <div className="group flex items-center gap-4 rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/50">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10 transition-colors group-hover:bg-blue-500/15">
@@ -218,7 +214,9 @@ export default function OverviewPage() {
                 <TableHeader>
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="text-muted-foreground h-9">Name</TableHead>
-                    <TableHead className="text-muted-foreground h-9">Model</TableHead>
+                    {showAgentModel && (
+                      <TableHead className="text-muted-foreground h-9">Model</TableHead>
+                    )}
                     <TableHead className="text-muted-foreground h-9 text-right">Status</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -229,13 +227,19 @@ export default function OverviewPage() {
                       className="hover:bg-muted/50 transition-colors"
                     >
                       <TableCell className="font-medium py-2.5">
-                        {agent.id}
+                        {agent.name || agent.id}
                       </TableCell>
-                      <TableCell className="py-2.5">
-                        <code className="bg-muted px-2 py-0.5 rounded font-mono text-xs">
-                          {agent.model}
-                        </code>
-                      </TableCell>
+                      {showAgentModel && (
+                        <TableCell className="py-2.5">
+                          {agent.model ? (
+                            <code className="bg-muted px-2 py-0.5 rounded font-mono text-xs">
+                              {agent.model}
+                            </code>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                      )}
                       <TableCell className="text-right py-2.5">
                         <Badge
                           variant="outline"

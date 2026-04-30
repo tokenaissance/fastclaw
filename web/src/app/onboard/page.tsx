@@ -14,6 +14,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
@@ -26,6 +28,7 @@ import {
   ArrowRight,
   Bot,
   Check,
+  Container,
   KeyRound,
   Loader2,
   PartyPopper,
@@ -39,6 +42,7 @@ const STEPS = [
   { id: "admin", label: "Admin", icon: UserPlus },
   { id: "provider", label: "Provider", icon: KeyRound },
   { id: "agent", label: "Agent", icon: Bot },
+  { id: "sandbox", label: "Sandbox", icon: Container },
   { id: "launch", label: "Launch", icon: Sparkles },
 ] as const;
 
@@ -121,6 +125,12 @@ export default function OnboardPage() {
   // Agent
   const [agentName, setAgentName] = useState("default");
 
+  // Sandbox (optional — disabled by default; user can flip and configure)
+  const [sandboxEnabled, setSandboxEnabled] = useState(false);
+  const [sandboxBackend, setSandboxBackend] = useState("docker");
+  const [sandboxImage, setSandboxImage] = useState("");
+  const [sandboxE2BKey, setSandboxE2BKey] = useState("");
+
   // Submit state
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -177,6 +187,10 @@ export default function OnboardPage() {
       authType,
       model,
       agentName,
+      sandboxEnabled,
+      sandboxBackend: sandboxEnabled ? sandboxBackend : undefined,
+      sandboxImage: sandboxEnabled && sandboxBackend === "docker" ? sandboxImage : undefined,
+      sandboxE2BKey: sandboxEnabled && sandboxBackend === "e2b" ? sandboxE2BKey : undefined,
     });
     setSubmitting(false);
     if (!res.ok) {
@@ -188,6 +202,13 @@ export default function OnboardPage() {
   }
 
   // Validation per step — drives the Next button's disabled state.
+  const sandboxValid =
+    !sandboxEnabled ||
+    (sandboxBackend === "docker"
+      ? sandboxImage.trim() !== ""
+      : sandboxBackend === "e2b"
+        ? sandboxE2BKey.trim() !== ""
+        : false);
   const stepValid: boolean[] = [
     true,
     username.trim() !== "" &&
@@ -196,6 +217,7 @@ export default function OnboardPage() {
       password === passwordConfirm,
     apiKey.trim() !== "" && model.trim() !== "" && apiBase.trim() !== "",
     agentName.trim() !== "",
+    sandboxValid,
     true,
   ];
 
@@ -247,7 +269,20 @@ export default function OnboardPage() {
           <AgentStep agentName={agentName} setAgentName={setAgentName} />
         )}
 
-        {step === 4 && <DoneStep onContinue={() => router.replace("/")} />}
+        {step === 4 && (
+          <SandboxStep
+            enabled={sandboxEnabled}
+            setEnabled={setSandboxEnabled}
+            backend={sandboxBackend}
+            setBackend={setSandboxBackend}
+            image={sandboxImage}
+            setImage={setSandboxImage}
+            e2bKey={sandboxE2BKey}
+            setE2BKey={setSandboxE2BKey}
+          />
+        )}
+
+        {step === 5 && <DoneStep onContinue={() => router.replace("/")} />}
 
         {submitError && (
           <Card className="border-destructive/40 bg-destructive/5">
@@ -645,6 +680,95 @@ function AgentStep(props: {
             this name is just for display.
           </p>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SandboxStep(props: {
+  enabled: boolean;
+  setEnabled: (v: boolean) => void;
+  backend: string;
+  setBackend: (v: string) => void;
+  image: string;
+  setImage: (v: string) => void;
+  e2bKey: string;
+  setE2BKey: (v: string) => void;
+}) {
+  const SANDBOX_BACKEND_LABELS: Record<string, string> = {
+    docker: "Docker",
+    e2b: "E2B (cloud)",
+  };
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Container className="size-5 text-primary" />
+          Sandbox (optional)
+        </CardTitle>
+        <CardDescription>
+          Run agent-executed code in an isolated environment. Skip this if
+          you&apos;re unsure — you can flip it on later from Settings.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium">Enable sandbox</p>
+            <p className="text-xs text-muted-foreground">
+              Off by default — code runs in the agent&apos;s own workspace.
+            </p>
+          </div>
+          <Switch checked={props.enabled} onCheckedChange={props.setEnabled} />
+        </div>
+        {props.enabled && (
+          <>
+            <Separator />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Backend</Label>
+                <Select
+                  value={props.backend}
+                  onValueChange={(v) => v && props.setBackend(v)}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue>
+                      {(v: unknown) =>
+                        SANDBOX_BACKEND_LABELS[v as string] ?? (v as string) ?? ""
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="docker">Docker</SelectItem>
+                    <SelectItem value="e2b">E2B (cloud)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {props.backend === "e2b" ? (
+                <div className="space-y-1.5">
+                  <Label>E2B API Key</Label>
+                  <Input
+                    type="password"
+                    value={props.e2bKey}
+                    onChange={(e) => props.setE2BKey(e.target.value)}
+                    placeholder="e2b_…"
+                    className="font-mono text-sm"
+                  />
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label>Docker Image</Label>
+                  <Input
+                    value={props.image}
+                    onChange={(e) => props.setImage(e.target.value)}
+                    placeholder="python:3.12-slim"
+                    className="font-mono text-sm"
+                  />
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );
