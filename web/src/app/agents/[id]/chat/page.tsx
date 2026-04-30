@@ -212,6 +212,17 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
         }
         i++;
       }
+      // Defensive: any tool_use that still has no result by the time
+      // we leave the tool-result run got orphaned (client aborted, server
+      // crashed mid-turn, persistence path raced). Mark them stopped so
+      // the UI shows a terminal state instead of spinning forever.
+      // Newer turns will have these padded server-side via
+      // padOrphanToolResults; this catches sessions that pre-date the fix.
+      for (const c of calls) {
+        if (c.result === undefined) {
+          c.result = "(stopped)";
+        }
+      }
       // Show as tool-group
       msgs.push({
         id: `h-tool-${i}`,
@@ -801,6 +812,22 @@ export default function AgentChatPage() {
       // turn — the user just got their answer; we shouldn't tack on
       // a confusing failure bubble.
       if (isAbort) {
+        // Resolve any in-flight tools in the current tool-group so they
+        // stop spinning. Server-side padOrphanToolResults will write a
+        // matching record on its end; this just keeps the UI consistent
+        // until the next history fetch overwrites it.
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.role === "tool-group" && m.toolCalls
+              ? {
+                  ...m,
+                  toolCalls: m.toolCalls.map((tc) =>
+                    tc.result === undefined ? { ...tc, result: "(stopped)" } : tc,
+                  ),
+                }
+              : m,
+          ),
+        );
         setMessages((prev) => [
           ...prev,
           { id: `e-${Date.now()}`, role: "agent", content: "(Stopped)", timestamp: Date.now() },
@@ -1001,7 +1028,7 @@ export default function AgentChatPage() {
                     <div
                       className={`rounded-2xl px-4 py-2.5 ${
                         msg.role === "user"
-                          ? "bg-primary text-primary-foreground rounded-br-md"
+                          ? "bg-sidebar text-sidebar-foreground rounded-br-md"
                           : "bg-muted rounded-bl-md"
                       }`}
                     >
@@ -1042,7 +1069,7 @@ export default function AgentChatPage() {
                             ) : (
                               <div
                                 key={i}
-                                className="flex items-center gap-2 rounded-md bg-primary-foreground/10 px-2 py-1.5 text-xs"
+                                className="flex items-center gap-2 rounded-md bg-sidebar-foreground/10 px-2 py-1.5 text-xs"
                               >
                                 <Paperclip className="h-3 w-3 opacity-70" />
                                 <span className="truncate">{att.name}</span>
@@ -1053,15 +1080,7 @@ export default function AgentChatPage() {
                       )}
                       {msg.content && (
                         <div
-                          className={`text-[15px] leading-relaxed prose prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 ${
-                            // User bubble always sits on bg-primary, so prose
-                            // must always invert to stay readable — without
-                            // this the default prose-gray text renders dark
-                            // on the orange bubble in light mode.
-                            msg.role === "user"
-                              ? "prose-invert"
-                              : "dark:prose-invert"
-                          }`}
+                          className={`text-[15px] leading-relaxed prose prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 dark:prose-invert`}
                         >
                           {renderContentWithDataImages(
                             msg.content,
@@ -1345,8 +1364,13 @@ function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
         setDraft(title);
         setEditing(true);
       }}
-      className="group flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-sm text-foreground hover:bg-muted/50"
-      title="Click to rename"
+      // Cap the title width responsively so a long auto-summary doesn't
+      // push the whole header off-screen on small viewports. The
+      // arbitrary `min(...)` keeps narrow widths on phones (60vw) while
+      // capping at ~32rem on desktop; sm:/md: bumps give intermediate
+      // breakpoints a deterministic width too.
+      className="group flex min-w-0 max-w-[min(60vw,18rem)] sm:max-w-[24rem] md:max-w-[28rem] lg:max-w-[32rem] items-center gap-1.5 rounded-md px-2 py-1 text-sm text-foreground hover:bg-muted/50"
+      title={title || fallback}
     >
       <span className="truncate">{title || fallback}</span>
       <Pencil className="h-3 w-3 shrink-0 text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100" />

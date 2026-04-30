@@ -102,7 +102,7 @@ Click an agent to enter its management panel:
 
 ### Tools & Sandbox
 - Built-in: exec, read_file, write_file, list_dir, web_fetch, web_search, memory_search
-- E2B cloud sandbox or Docker sandbox
+- E2B cloud sandbox or Docker sandbox — automatic skill + workspace hydrate, post-exec sync (sandbox-side files mirrored back to the durable store after every tool call)
 - MCP server support
 - Plugin system (JSON-RPC subprocess)
 

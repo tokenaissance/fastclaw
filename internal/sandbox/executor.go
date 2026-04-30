@@ -54,6 +54,17 @@ type WorkspaceSnapshotter interface {
 	SnapshotWorkspace(ctx context.Context) (map[string][]byte, error)
 }
 
+// RemoteWorkspace marks executors whose /workspace is NOT shared with the
+// host filesystem (no bind mount). Implementers need an explicit sync
+// after every successful exec — otherwise files the skill writes
+// inside the sandbox (e.g. image-tool's /workspace/gen_xxx.webp) never
+// become visible to the host's workspace.Store and the UI breaks
+// surfacing them. Docker doesn't implement this (its /workspace is a
+// bind mount, files are on host the moment exec returns); E2B does.
+type RemoteWorkspace interface {
+	IsRemoteWorkspace()
+}
+
 // PoolConfig holds configuration for creating sandbox pools.
 type PoolConfig struct {
 	Backend   string // "docker", "e2b" (future)

@@ -518,6 +518,16 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// session-private container.
 	a.bindSession(ctx, msg.ChatID)
 
+	// Safety net for client-aborted turns: if the loop exits with a
+	// tool_use that never got its matching tool_result appended (the
+	// user clicked Stop while a long-running exec was in flight, the
+	// SDK returned no response for it, etc.), pad the orphan so the
+	// session history stays well-formed. Without this, the tool keeps
+	// rendering as a forever-spinning "running" entry on history
+	// rebuild and the next turn's API call gets a 400 from Anthropic
+	// for orphaned tool_use ids.
+	defer padOrphanToolResults(sess)
+
 	// Hook: BeforeSystemPrompt
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
@@ -785,6 +795,51 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	a.runPostTurn(ctx, messages, totalToolCalls)
 	slog.Warn("max tool iterations reached", "agent", a.name, "max", a.maxToolIterations)
 	return "I've reached the maximum number of tool iterations. Here's what I have so far."
+}
+
+// padOrphanToolResults walks the session and appends a synthetic
+// tool_result for any tool_use id from the latest assistant message that
+// doesn't already have a matching tool_result. Earlier rounds aren't
+// scanned — once the loop has moved past them they're already
+// well-formed, otherwise the previous turn's API call would have failed.
+//
+// Triggered by HandleMessage's defer so a client-side Stop (or any other
+// premature exit) can't leave the conversation in a state where the next
+// turn's API call gets a 400 for orphan tool_use ids and the UI keeps
+// spinning a "Running tools" indicator that will never resolve.
+func padOrphanToolResults(sess *session.Session) {
+	msgs := sess.GetMessages()
+	// Walk back to the latest assistant message; if it has no tool_calls
+	// or all tool_calls already have results after it, nothing to do.
+	lastAssistantIdx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && len(msgs[i].ToolCalls) > 0 {
+			lastAssistantIdx = i
+			break
+		}
+	}
+	if lastAssistantIdx < 0 {
+		return
+	}
+	resolved := make(map[string]bool)
+	for _, m := range msgs[lastAssistantIdx+1:] {
+		if m.Role == "tool" && m.ToolCallID != "" {
+			resolved[m.ToolCallID] = true
+		}
+	}
+	for _, tc := range msgs[lastAssistantIdx].ToolCalls {
+		if resolved[tc.ID] {
+			continue
+		}
+		slog.Warn("padding orphan tool_use with stopped result",
+			"toolCallID", tc.ID, "tool", tc.Function.Name)
+		sess.Append(provider.Message{
+			Role:       "tool",
+			ToolCallID: tc.ID,
+			Name:       tc.Function.Name,
+			Content:    "(stopped — execution was interrupted before the tool returned)",
+		})
+	}
 }
 
 // runPostTurn fires PostTurn hooks and handles auto-persist and skills learning.

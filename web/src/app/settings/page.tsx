@@ -25,7 +25,8 @@ export default function SettingsPage() {
 
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [sandboxBackend, setSandboxBackend] = useState("docker");
-  const [sandboxImage, setSandboxImage] = useState("");
+  const [sandboxDockerImage, setSandboxDockerImage] = useState("");
+  const [sandboxE2BTemplate, setSandboxE2BTemplate] = useState("base");
   const [sandboxE2BKey, setSandboxE2BKey] = useState("");
 
   useEffect(() => {
@@ -34,8 +35,22 @@ export default function SettingsPage() {
       .then((cfg) => {
         setConfig(cfg);
         setSandboxEnabled(cfg.sandbox?.enabled || false);
-        setSandboxBackend(cfg.sandbox?.backend || "docker");
-        setSandboxImage(cfg.sandbox?.image || "");
+        const backend = cfg.sandbox?.backend || "docker";
+        setSandboxBackend(backend);
+        // The same `image` config field stores the Docker image OR the
+        // E2B template — split it back into separate states by backend so
+        // switching tabs doesn't cross-contaminate (e.g. a leftover
+        // "python:3.12-slim" leaking into the E2B template request).
+        // E2B template IDs are bare slugs; anything with `:` or `/` is a
+        // Docker image left over from a prior backend choice — ignore it
+        // and fall back to the default template.
+        const savedImage = cfg.sandbox?.image || "";
+        if (backend === "e2b") {
+          const looksLikeDockerImage = savedImage.includes(":") || savedImage.includes("/");
+          setSandboxE2BTemplate(looksLikeDockerImage || !savedImage ? "base" : savedImage);
+        } else {
+          setSandboxDockerImage(savedImage);
+        }
         setSandboxE2BKey(cfg.sandbox?.e2bKey || "");
       })
       .catch(() => {})
@@ -44,13 +59,13 @@ export default function SettingsPage() {
 
   const handleSave = async () => {
     setSaving(true);
-    // storage is read-only here — it's bootstrap config from FASTCLAW_*,
-    // not a DB-editable namespace. Don't round-trip it.
+    const image =
+      sandboxBackend === "e2b" ? sandboxE2BTemplate : sandboxDockerImage;
     await updateConfig({
       sandbox: {
         enabled: sandboxEnabled,
         backend: sandboxBackend,
-        image: sandboxImage || undefined,
+        image: image || undefined,
         e2bKey: sandboxE2BKey || undefined,
       },
     });
@@ -125,7 +140,13 @@ export default function SettingsPage() {
                 <Label>Backend</Label>
                 <Select value={sandboxBackend} onValueChange={(v) => v && setSandboxBackend(v)}>
                   <SelectTrigger>
-                    <SelectValue />
+                    <SelectValue>
+                      {(v: unknown) =>
+                        ({ docker: "Docker", e2b: "E2B (cloud)" } as Record<string, string>)[
+                          v as string
+                        ] ?? (v as string) ?? ""
+                      }
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="docker">Docker</SelectItem>
@@ -134,22 +155,33 @@ export default function SettingsPage() {
                 </Select>
               </div>
               {sandboxBackend === "e2b" ? (
-                <div className="space-y-2">
-                  <Label>E2B API Key</Label>
-                  <Input
-                    type="password"
-                    value={sandboxE2BKey}
-                    onChange={(e) => setSandboxE2BKey(e.target.value)}
-                    placeholder="e2b_..."
-                    className="font-mono text-sm"
-                  />
-                </div>
+                <>
+                  <div className="space-y-2">
+                    <Label>E2B API Key</Label>
+                    <Input
+                      type="password"
+                      value={sandboxE2BKey}
+                      onChange={(e) => setSandboxE2BKey(e.target.value)}
+                      placeholder="e2b_..."
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>E2B Template</Label>
+                    <Input
+                      value={sandboxE2BTemplate}
+                      onChange={(e) => setSandboxE2BTemplate(e.target.value)}
+                      placeholder="base"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                </>
               ) : (
                 <div className="space-y-2">
                   <Label>Docker Image</Label>
                   <Input
-                    value={sandboxImage}
-                    onChange={(e) => setSandboxImage(e.target.value)}
+                    value={sandboxDockerImage}
+                    onChange={(e) => setSandboxDockerImage(e.target.value)}
                     placeholder="python:3.12-slim"
                     className="font-mono text-sm"
                   />

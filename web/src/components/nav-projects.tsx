@@ -38,8 +38,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { MoreHorizontalIcon, PencilIcon, Trash2Icon } from "lucide-react";
+import { MoreHorizontalIcon, PencilIcon, Trash2Icon, MoreHorizontal } from "lucide-react";
 import { deleteChatSession, renameChatSession } from "@/lib/api";
+
+// Cap the sidebar list so a chatty agent doesn't push every other nav
+// item off-screen. The full list lives at /agents/<id>/chats with
+// pagination — the trailing "More…" row links there.
+const MAX_SIDEBAR_SESSIONS = 10;
 
 export interface SessionItem {
   id: string;
@@ -102,7 +107,7 @@ export function NavSessions({
       <SidebarGroup className="group-data-[collapsible=icon]:hidden">
         <SidebarGroupLabel>Chats</SidebarGroupLabel>
         <SidebarMenu>
-          {sessions.map((s) => {
+          {sessions.slice(0, MAX_SIDEBAR_SESSIONS).map((s) => {
             const href = `${chatBase}?session=${encodeURIComponent(s.id)}`;
             const active =
               pathname.startsWith(chatBase) &&
@@ -119,6 +124,18 @@ export function NavSessions({
               />
             );
           })}
+          {sessions.length > MAX_SIDEBAR_SESSIONS && (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                onClick={() => router.push(`/agents/${agentId}/chats`)}
+                tooltip="See all chats"
+                className="text-muted-foreground"
+              >
+                <MoreHorizontal className="size-4" />
+                <span>More</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
           {sessions.length === 0 && (
             <SidebarMenuItem>
               <div className="px-2 py-1.5 text-xs text-muted-foreground">

@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -9,11 +11,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // E2B API: https://e2b.dev/docs
@@ -29,6 +37,15 @@ type E2BExecutor struct {
 	sandboxID   string
 	accessToken string
 	client      *http.Client
+	template    string        // remembered for recreate() so the new sandbox uses the same template
+	timeout     time.Duration // remembered for recreate()
+	// hydrate sources — set by the pool after creation so recreate()
+	// can rebuild /skills + /workspace without reaching back into the
+	// pool. Workspace store is optional; skill dirs may be empty.
+	skillDirs []string
+	workspace workspace.Store
+	agentID   string
+	sessionID string
 }
 
 func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.Duration) (*E2BExecutor, error) {
@@ -39,13 +56,31 @@ func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.D
 		timeout = 30 * time.Minute
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	// No global Client.Timeout: it covers the entire round-trip
+	// including streaming the body, which silently cut long execs
+	// (image generation, etc.) at 60s and made tools return empty
+	// output with no error. We rely on per-request context.WithTimeout
+	// at the call site instead — execOnce derives ctx from the user-
+	// supplied tool timeout, and create-sandbox below uses an
+	// explicit short ctx.
+	client := &http.Client{}
 
+	// Field name is `templateID` (camelCase) — verified by server's
+	// validation error: `Error at "/templateID": property "templateID"
+	// is missing` when the field was renamed to snake_case. The
+	// snake_case form shows up in some SDK source code but the
+	// production REST API rejects it.
 	body, _ := json.Marshal(map[string]interface{}{
 		"templateID": template,
 		"timeout":    int(timeout.Seconds()),
 	})
-	req, err := http.NewRequestWithContext(ctx, "POST", e2bBaseURL+"/sandboxes", bytes.NewReader(body))
+	// Bound the create-sandbox call to 60s — the call itself usually
+	// completes in 1–2s; if it's hanging past that there's a control-
+	// plane problem and we'd rather surface a clear timeout than wait
+	// indefinitely on a request that inherits no deadline from ctx.
+	createCtx, cancelCreate := context.WithTimeout(ctx, 60*time.Second)
+	defer cancelCreate()
+	req, err := http.NewRequestWithContext(createCtx, "POST", e2bBaseURL+"/sandboxes", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -78,6 +113,8 @@ func newE2BExecutor(ctx context.Context, apiKey, template string, timeout time.D
 		sandboxID:   result.SandboxID,
 		accessToken: result.EnvdAccessToken,
 		client:      client,
+		template:    template,
+		timeout:     timeout,
 	}, nil
 }
 
@@ -85,16 +122,247 @@ func (e *E2BExecutor) envdURL() string {
 	return fmt.Sprintf("https://%s-%s.e2b.app", e2bEnvdPort, e.sandboxID)
 }
 
-// recreate destroys the current sandbox and creates a new one.
+// recreate destroys the current sandbox and creates a new one. The same
+// template / timeout the executor was originally built with are reused —
+// hardcoding "base" here would silently demote a custom-template sandbox
+// once it idled out. The full hydrate (skills + workspace) is replayed so
+// /skills/<name>/ and /workspace/ stay populated across recreations.
 func (e *E2BExecutor) recreate(ctx context.Context) error {
 	slog.Info("e2b sandbox expired, recreating", "oldSandboxID", e.sandboxID)
-	newEx, err := newE2BExecutor(ctx, e.apiKey, "base", 30*time.Minute)
+	newEx, err := newE2BExecutor(ctx, e.apiKey, e.template, e.timeout)
 	if err != nil {
 		return err
 	}
 	e.sandboxID = newEx.sandboxID
 	e.accessToken = newEx.accessToken
+	if err := e.Hydrate(ctx); err != nil {
+		slog.Warn("e2b hydrate after recreate failed", "sandboxID", e.sandboxID, "error", err)
+	}
 	return nil
+}
+
+// SetHydrationSources records the inputs Hydrate() should pull from on
+// the next call. Called by the pool right after sandbox creation; the
+// executor then carries them so recreate() can replay everything without
+// asking the pool. Pass nil/empty for any source you don't have.
+func (e *E2BExecutor) SetHydrationSources(skillDirs []string, ws workspace.Store, agentID, sessionID string) {
+	e.skillDirs = append(e.skillDirs[:0], skillDirs...)
+	e.workspace = ws
+	e.agentID = agentID
+	e.sessionID = sessionID
+}
+
+// Hydrate populates the sandbox with everything the agent's tools expect
+// to find on disk:
+//   - /skills/<name>/...   from each configured skill dir (per-agent +
+//     global, first-wins precedence to match the docker bind-mount layer)
+//   - /workspace/...       from the agent's workspace.Store (so files
+//     written via write_file in past sessions survive sandbox restarts,
+//     same contract as the existing per-file hydrateWorkspace)
+//
+// Implementation: pack everything into one tar.gz, base64-inline it into
+// a single `exec` invocation, and let `tar -xz -C /` create paths in
+// place. We deliberately bypass the envd /files API here even though the
+// docs document multipart/form-data uploads — past attempts to hydrate
+// via that endpoint produced 200 OK responses while files silently
+// landed off-path, and the user-facing failure mode (skill scripts
+// "No such file or directory" at exec time) was painful to debug. The
+// exec channel is the same one the agent already uses, so if Hydrate
+// works the rest of the tooling does too.
+//
+// Size note: shell ARG_MAX on Linux is typically >=128KB. A typical
+// skill bundle is a few KB and a fresh agent's workspace is empty, so
+// a single round-trip works for the common case. If a workspace ever
+// grows past ~80KB-of-base64 we should switch to a stdin-piped exec.
+func (e *E2BExecutor) Hydrate(ctx context.Context) error {
+	bundle := newTarBundle()
+
+	skillCount := 0
+	skillFileCount := 0
+	seen := make(map[string]bool) // per-skill: first dir wins
+	for _, dir := range e.skillDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			n, err := bundle.addLocalDir(filepath.Join(dir, name), "skills/"+name)
+			if err != nil {
+				slog.Warn("e2b hydrate: skill tar", "skill", name, "error", err)
+				continue
+			}
+			skillCount++
+			skillFileCount += n
+		}
+	}
+
+	workspaceCount := 0
+	if e.workspace != nil {
+		objs, err := e.workspace.List(ctx, e.agentID, e.sessionID)
+		if err != nil {
+			slog.Warn("e2b hydrate: workspace list", "agent", e.agentID, "session", e.sessionID, "error", err)
+		} else {
+			for _, obj := range objs {
+				rc, err := e.workspace.Get(ctx, e.agentID, e.sessionID, obj.Path)
+				if err != nil {
+					slog.Warn("e2b hydrate: workspace get", "path", obj.Path, "error", err)
+					continue
+				}
+				data, rerr := io.ReadAll(rc)
+				rc.Close()
+				if rerr != nil {
+					slog.Warn("e2b hydrate: workspace read", "path", obj.Path, "error", rerr)
+					continue
+				}
+				rel := strings.TrimPrefix(obj.Path, "/")
+				if err := bundle.addBytes("workspace/"+rel, data, 0o644, obj.ModTime); err != nil {
+					slog.Warn("e2b hydrate: workspace tar", "path", obj.Path, "error", err)
+					continue
+				}
+				workspaceCount++
+			}
+		}
+	}
+
+	if err := bundle.close(); err != nil {
+		return fmt.Errorf("close tar: %w", err)
+	}
+
+	// Why every word here matters:
+	// - We ALWAYS run the mkdir+chown step, even when there are no
+	//   files to push. /workspace and /skills must exist and be
+	//   writable by `user` regardless — image-tool / write_file /
+	//   anything that writes there fails with ENOENT or EACCES if the
+	//   dirs are missing. This was the failure mode on a fresh session
+	//   with empty workspace: no files → previous code returned early
+	//   → /workspace never created → "mkdir: Permission denied" when
+	//   the LLM tried to make it itself as the non-root `user`.
+	// - `sudo`: E2B's "base" template runs as `user`, who has no
+	//   write access to /. The default user has passwordless sudo per
+	//   e2b's published Dockerfile; custom templates that strip sudo
+	//   either need to keep it or pre-create /skills + /workspace
+	//   chowned to user.
+	// - tmp file instead of pipe: `sudo cmd | sudo cmd` can prompt
+	//   on the second sudo even with NOPASSWD; one sudo at a time
+	//   stays well-behaved.
+	// - chown after extract: tar-as-root lands files root-owned, so
+	//   re-chown after extract; agent's subsequent writes run as user.
+	cmdParts := []string{
+		"set -e",
+		"sudo mkdir -p /skills /workspace",
+		"sudo chown user:user /skills /workspace",
+	}
+	if bundle.fileCount > 0 {
+		encoded := base64.StdEncoding.EncodeToString(bundle.gz.Bytes())
+		cmdParts = append(cmdParts,
+			"echo '"+encoded+"' | base64 -d > /tmp/fc-hydrate.tar.gz",
+			"sudo tar -xzf /tmp/fc-hydrate.tar.gz -C /",
+			"sudo chown -R user:user /skills /workspace",
+			"rm -f /tmp/fc-hydrate.tar.gz",
+		)
+	}
+	cmd := strings.Join(cmdParts, "; ")
+	out, err := e.execOnce(ctx, cmd, 60*time.Second)
+	if err != nil {
+		slog.Warn("e2b hydrate extract failed", "sandboxID", e.sandboxID, "error", err, "out", out)
+		return fmt.Errorf("hydrate sandbox dirs: %w (output: %s)", err, out)
+	}
+	slog.Info("e2b sandbox hydrated",
+		"sandboxID", e.sandboxID,
+		"skills", skillCount,
+		"skillFiles", skillFileCount,
+		"workspaceFiles", workspaceCount,
+		"tarBytes", bundle.gz.Len())
+	return nil
+}
+
+// tarBundle is a small helper around archive/tar + gzip so the Hydrate
+// path doesn't have to repeat the writer-close dance. All paths in the
+// bundle are sandbox-relative (no leading slash); callers pick the
+// extraction root.
+type tarBundle struct {
+	gz        bytes.Buffer
+	gw        *gzip.Writer
+	tw        *tar.Writer
+	fileCount int
+}
+
+func newTarBundle() *tarBundle {
+	b := &tarBundle{}
+	b.gw = gzip.NewWriter(&b.gz)
+	b.tw = tar.NewWriter(b.gw)
+	return b
+}
+
+// addBytes adds an in-memory file to the bundle. tar -xz auto-creates
+// parent dirs from the entry path, so we don't need explicit dir
+// entries — verified by a roundtrip test on the host.
+func (b *tarBundle) addBytes(name string, data []byte, mode int64, modTime time.Time) error {
+	if modTime.IsZero() {
+		modTime = time.Now()
+	}
+	if err := b.tw.WriteHeader(&tar.Header{
+		Name:     strings.TrimPrefix(name, "/"),
+		Mode:     mode,
+		Size:     int64(len(data)),
+		Typeflag: tar.TypeReg,
+		ModTime:  modTime,
+	}); err != nil {
+		return err
+	}
+	if _, err := b.tw.Write(data); err != nil {
+		return err
+	}
+	b.fileCount++
+	return nil
+}
+
+// addLocalDir walks a host directory and adds every regular file under
+// it to the bundle, rooted at sandboxPrefix. Symlinks / sockets / etc.
+// are skipped — a skill bundle should be plain files.
+func (b *tarBundle) addLocalDir(localRoot, sandboxPrefix string) (int, error) {
+	count := 0
+	err := filepath.Walk(localRoot, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(localRoot, p)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		name := sandboxPrefix + "/" + filepath.ToSlash(rel)
+		if err := b.addBytes(name, data, int64(info.Mode().Perm()), info.ModTime()); err != nil {
+			return err
+		}
+		count++
+		return nil
+	})
+	return count, err
+}
+
+func (b *tarBundle) close() error {
+	if err := b.tw.Close(); err != nil {
+		return err
+	}
+	return b.gw.Close()
 }
 
 // isSandboxGone checks if the error indicates the sandbox was destroyed.
@@ -160,8 +428,16 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 
 	enveloped := connectEnvelope(payload)
 
+	// Per-request deadline: timeout (the user-supplied tool budget) plus
+	// a 30s slack so the server has room to flush trailing frames before
+	// our side gives up. Critical because the underlying http.Client now
+	// has no global timeout — without this the request would hang
+	// forever if envd died mid-stream.
+	execCtx, cancelExec := context.WithTimeout(ctx, timeout+30*time.Second)
+	defer cancelExec()
+
 	reqURL := e.envdURL() + "/process.Process/Start"
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(enveloped))
+	req, err := http.NewRequestWithContext(execCtx, "POST", reqURL, bytes.NewReader(enveloped))
 	if err != nil {
 		return "", err
 	}
@@ -178,7 +454,17 @@ func (e *E2BExecutor) execOnce(ctx context.Context, command string, timeout time
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	// Don't drop ReadAll's error — when the connection is severed
+	// mid-stream (e.g. our deadline hit before the process finished
+	// streaming back its output), this is the only signal we have that
+	// the bytes we got are incomplete. Previously we silently kept the
+	// partial body, the parser saw zero complete frames, and the tool
+	// returned empty stdout — exactly the symptom we just hit with
+	// long-running exec calls.
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return string(body), fmt.Errorf("e2b exec body read: %w (got %d bytes)", readErr, len(body))
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("e2b exec HTTP %d: %s", resp.StatusCode, string(body))
@@ -264,7 +550,7 @@ func (e *E2BExecutor) ReadFile(ctx context.Context, path string) (string, error)
 }
 
 func (e *E2BExecutor) readFileOnce(ctx context.Context, path string) (string, error) {
-	reqURL := fmt.Sprintf("%s/files?path=%s", e.envdURL(), url.QueryEscape(path))
+	reqURL := fmt.Sprintf("%s/files?path=%s&username=user", e.envdURL(), url.QueryEscape(path))
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return "", err
@@ -297,13 +583,35 @@ func (e *E2BExecutor) WriteFile(ctx context.Context, path, content string) (stri
 	return result, err
 }
 
-func (e *E2BExecutor) writeFileOnce(ctx context.Context, path, content string) (string, error) {
-	reqURL := fmt.Sprintf("%s/files?path=%s", e.envdURL(), url.QueryEscape(path))
-	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(content))
+func (e *E2BExecutor) writeFileOnce(ctx context.Context, filePath, content string) (string, error) {
+	// E2B envd's POST /files expects multipart/form-data with a `file`
+	// field, NOT a raw octet-stream body. The earlier raw-body version
+	// returned 200 OK but silently dropped the upload, leaving the file
+	// non-existent inside the sandbox — caught when uploaded skills
+	// failed with "No such file or directory" at exec time.
+	reqURL := fmt.Sprintf("%s/files?path=%s&username=user",
+		e.envdURL(), url.QueryEscape(filePath))
+
+	// envd: the destination path comes from the `path` query param;
+	// the multipart `filename` is just metadata, so basename is fine.
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", path.Base(filePath))
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	if _, err := fw.Write([]byte(content)); err != nil {
+		return "", err
+	}
+	if err := mw.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, &buf)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
 	if e.accessToken != "" {
 		req.Header.Set("X-Access-Token", e.accessToken)
 	}
@@ -314,16 +622,96 @@ func (e *E2BExecutor) writeFileOnce(ctx context.Context, path, content string) (
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("e2b write HTTP %d: %s", resp.StatusCode, string(body))
 	}
-	return fmt.Sprintf("Wrote %d bytes to %s", len(content), path), nil
+	return fmt.Sprintf("Wrote %d bytes to %s", len(content), filePath), nil
 }
 
 func (e *E2BExecutor) ListDir(ctx context.Context, path string) (string, error) {
 	// Use exec to list directory since the files API doesn't have a list endpoint
 	return e.Exec(ctx, fmt.Sprintf("ls -la %s", path), 10*time.Second)
+}
+
+// IsRemoteWorkspace marks this executor as cloud-hosted so the
+// LifecyclePool runs syncSnapshot after every exec instead of only on
+// idle eviction. See sandbox.RemoteWorkspace.
+func (e *E2BExecutor) IsRemoteWorkspace() {}
+
+// SnapshotWorkspace tars /workspace and ships the bytes back as base64 over
+// stdout. This is the inverse of Hydrate's tar+base64 push — used by the
+// LifecyclePool to flush sandbox-side files back to the durable
+// workspace.Store after every successful exec, so files that the skill
+// wrote inside the sandbox (image-tool's /workspace/gen_xxx.webp etc.)
+// end up reachable from the host's UI / signed URL paths.
+//
+// Returns map of /workspace-relative path → contents. Skips silently
+// when /workspace is empty or doesn't exist.
+func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte, error) {
+	// `2>/dev/null` swallows the "tar: ./: directory not found" noise
+	// when /workspace doesn't exist yet; we still want to proceed with
+	// an empty result. base64 -w0 keeps output on a single line so
+	// envd's frame parser doesn't fight whitespace folding. Falls back
+	// to the empty tar if /workspace is missing entirely.
+	cmd := "if [ -d /workspace ]; then " +
+		"tar -czf - -C /workspace . 2>/dev/null | base64 -w0; " +
+		"fi"
+	out, err := e.execOnce(ctx, cmd, 60*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot workspace exec: %w (output: %s)", err, out)
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	gz, err := base64.StdEncoding.DecodeString(out)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot workspace decode: %w", err)
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		return nil, fmt.Errorf("snapshot workspace gunzip: %w", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	out2 := make(map[string][]byte)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return out2, fmt.Errorf("snapshot workspace tar read: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		// Tar names start with "./" because we tarred `.` from inside
+		// /workspace; strip it so callers see the same agent-relative
+		// path layout the workspace.Store uses.
+		name := strings.TrimPrefix(hdr.Name, "./")
+		name = strings.TrimPrefix(name, "/")
+		if name == "" {
+			continue
+		}
+		// Skip macOS resource forks (`._foo`) in case anyone ever runs
+		// this against a BSD-tar template — Linux/E2B's GNU tar
+		// doesn't emit these, but they'd otherwise pollute the store.
+		base := name
+		if i := strings.LastIndex(base, "/"); i >= 0 {
+			base = base[i+1:]
+		}
+		if strings.HasPrefix(base, "._") {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return out2, fmt.Errorf("snapshot workspace read entry %s: %w", name, err)
+		}
+		out2[name] = data
+	}
+	return out2, nil
 }
 
 func (e *E2BExecutor) Close() error {
@@ -346,15 +734,32 @@ type E2BExecutorPool struct {
 	apiKey    string
 	template  string
 	timeout   time.Duration
+	home      string          // workspace root used to resolve per-agent skill dirs
+	workspace workspace.Store // optional — when set, /workspace is hydrated alongside /skills
 }
 
-func NewE2BExecutorPool(apiKey, template string, timeout time.Duration) *E2BExecutorPool {
+// NewE2BExecutorPool — `home` is the FASTCLAW_HOME the docker backend
+// would have used for `-v` mounts; the pool uses it to resolve which
+// skill dirs to push into each fresh sandbox.
+func NewE2BExecutorPool(apiKey, template, home string, timeout time.Duration) *E2BExecutorPool {
 	return &E2BExecutorPool{
 		executors: make(map[string]*E2BExecutor),
 		apiKey:    apiKey,
 		template:  template,
 		timeout:   timeout,
+		home:      home,
 	}
+}
+
+// SetWorkspace plugs in the workspace.Store whose contents should be
+// mirrored to /workspace inside every fresh sandbox. Optional — when
+// nil, only /skills is hydrated. Called by the gateway after
+// LifecyclePool's own workspace is wired so the inner pool and the
+// lifecycle layer see the same source of truth.
+func (p *E2BExecutorPool) SetWorkspace(ws workspace.Store) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.workspace = ws
 }
 
 func (p *E2BExecutorPool) Get(ctx context.Context, agentID, sessionID string) (Executor, error) {
@@ -367,6 +772,10 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, sessionID string) (E
 	ex, err := newE2BExecutor(ctx, p.apiKey, p.template, p.timeout)
 	if err != nil {
 		return nil, err
+	}
+	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, sessionID)
+	if err := ex.Hydrate(ctx); err != nil {
+		slog.Warn("e2b hydrate failed", "agent", agentID, "session", sessionID, "error", err)
 	}
 	p.executors[key] = ex
 	return ex, nil
@@ -394,6 +803,8 @@ func (p *E2BExecutorPool) CloseAll() {
 }
 
 var (
-	_ Executor     = (*E2BExecutor)(nil)
-	_ ExecutorPool = (*E2BExecutorPool)(nil)
+	_ Executor             = (*E2BExecutor)(nil)
+	_ ExecutorPool         = (*E2BExecutorPool)(nil)
+	_ WorkspaceSnapshotter = (*E2BExecutor)(nil)
+	_ RemoteWorkspace      = (*E2BExecutor)(nil)
 )

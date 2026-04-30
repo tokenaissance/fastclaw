@@ -144,7 +144,8 @@ export default function OnboardPage() {
   // Sandbox (optional — disabled by default; user can flip and configure)
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [sandboxBackend, setSandboxBackend] = useState("docker");
-  const [sandboxImage, setSandboxImage] = useState("python:3.12-slim");
+  const [sandboxDockerImage, setSandboxDockerImage] = useState("python:3.12-slim");
+  const [sandboxE2BTemplate, setSandboxE2BTemplate] = useState("base");
   const [sandboxE2BKey, setSandboxE2BKey] = useState("");
 
   // Submit state
@@ -205,7 +206,13 @@ export default function OnboardPage() {
       agentName,
       sandboxEnabled,
       sandboxBackend: sandboxEnabled ? sandboxBackend : undefined,
-      sandboxImage: sandboxEnabled && sandboxBackend === "docker" ? sandboxImage : undefined,
+      sandboxImage: sandboxEnabled
+        ? sandboxBackend === "docker"
+          ? sandboxDockerImage
+          : sandboxBackend === "e2b"
+            ? sandboxE2BTemplate
+            : undefined
+        : undefined,
       sandboxE2BKey: sandboxEnabled && sandboxBackend === "e2b" ? sandboxE2BKey : undefined,
     });
     setSubmitting(false);
@@ -221,9 +228,9 @@ export default function OnboardPage() {
   const sandboxValid =
     !sandboxEnabled ||
     (sandboxBackend === "docker"
-      ? sandboxImage.trim() !== ""
+      ? sandboxDockerImage.trim() !== ""
       : sandboxBackend === "e2b"
-        ? sandboxE2BKey.trim() !== ""
+        ? sandboxE2BKey.trim() !== "" && sandboxE2BTemplate.trim() !== ""
         : false);
   const stepValid: boolean[] = [
     true,
@@ -291,8 +298,10 @@ export default function OnboardPage() {
             setEnabled={setSandboxEnabled}
             backend={sandboxBackend}
             setBackend={setSandboxBackend}
-            image={sandboxImage}
-            setImage={setSandboxImage}
+            dockerImage={sandboxDockerImage}
+            setDockerImage={setSandboxDockerImage}
+            e2bTemplate={sandboxE2BTemplate}
+            setE2BTemplate={setSandboxE2BTemplate}
             e2bKey={sandboxE2BKey}
             setE2BKey={setSandboxE2BKey}
           />
@@ -706,8 +715,10 @@ function SandboxStep(props: {
   setEnabled: (v: boolean) => void;
   backend: string;
   setBackend: (v: string) => void;
-  image: string;
-  setImage: (v: string) => void;
+  dockerImage: string;
+  setDockerImage: (v: string) => void;
+  e2bTemplate: string;
+  setE2BTemplate: (v: string) => void;
   e2bKey: string;
   setE2BKey: (v: string) => void;
 }) {
@@ -761,22 +772,33 @@ function SandboxStep(props: {
                 </Select>
               </div>
               {props.backend === "e2b" ? (
-                <div className="space-y-1.5">
-                  <Label>E2B API Key</Label>
-                  <Input
-                    type="password"
-                    value={props.e2bKey}
-                    onChange={(e) => props.setE2BKey(e.target.value)}
-                    placeholder="e2b_…"
-                    className="font-mono text-sm"
-                  />
-                </div>
+                <>
+                  <div className="space-y-1.5">
+                    <Label>E2B API Key</Label>
+                    <Input
+                      type="password"
+                      value={props.e2bKey}
+                      onChange={(e) => props.setE2BKey(e.target.value)}
+                      placeholder="e2b_…"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>E2B Template</Label>
+                    <Input
+                      value={props.e2bTemplate}
+                      onChange={(e) => props.setE2BTemplate(e.target.value)}
+                      placeholder="base"
+                      className="font-mono text-sm"
+                    />
+                  </div>
+                </>
               ) : (
                 <div className="space-y-1.5">
                   <Label>Docker Image</Label>
                   <Input
-                    value={props.image}
-                    onChange={(e) => props.setImage(e.target.value)}
+                    value={props.dockerImage}
+                    onChange={(e) => props.setDockerImage(e.target.value)}
                     placeholder="python:3.12-slim"
                     className="font-mono text-sm"
                   />

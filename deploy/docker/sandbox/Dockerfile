@@ -33,7 +33,9 @@ RUN apt-get update \
 
 # Common Python deps the python:3.12-slim users picked up by reflex.
 # Skipping anything heavy (numpy/pandas) — install on demand from skills.
-RUN pip install --break-system-packages --no-cache-dir \
+# Jammy's system python isn't PEP 668 externally-managed, and the
+# bundled pip predates --break-system-packages, so we install plainly.
+RUN pip install --no-cache-dir \
         requests \
         pillow \
         beautifulsoup4 \

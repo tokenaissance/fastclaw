@@ -559,7 +559,7 @@ export async function getChatHistory(agentId: string, sessionId: string): Promis
   return Array.isArray(data) ? data : [];
 }
 
-export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string; thumbnailUrl?: string }[]> {
+export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string; thumbnailUrl?: string; createdAt?: number; updatedAt?: number }[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
   if (!res.ok) return [];
   const data = await res.json();

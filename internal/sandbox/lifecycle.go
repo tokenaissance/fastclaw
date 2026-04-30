@@ -84,7 +84,26 @@ func NewLifecyclePool(inner ExecutorPool, idleTTL, sweep time.Duration) *Lifecyc
 // SetWorkspace installs the durable blob store used to bootstrap each
 // sandbox on first tool call. Pass nil to disable hydrate (sandboxes start
 // with empty /workspace).
-func (p *LifecyclePool) SetWorkspace(ws workspace.Store) { p.workspace = ws }
+//
+// Pools that hydrate themselves at create time (E2B uses one tar+exec
+// round-trip for skills + workspace; see E2BExecutorPool.Get → Hydrate)
+// receive the same store via SetWorkspace on the inner pool so they
+// have a chance to fold it into the bulk upload — that's much faster
+// and more reliable than the per-file fallback we still keep here for
+// docker.
+func (p *LifecyclePool) SetWorkspace(ws workspace.Store) {
+	p.workspace = ws
+	if sw, ok := p.inner.(workspaceAware); ok {
+		sw.SetWorkspace(ws)
+	}
+}
+
+// workspaceAware is implemented by inner pools that fold workspace
+// hydration into their own create-time bulk upload (so LifecyclePool
+// shouldn't double-hydrate via the per-file path).
+type workspaceAware interface {
+	SetWorkspace(ws workspace.Store)
+}
 
 // Start the idle sweep goroutine. Safe to call multiple times; only the
 // first start actually kicks off the loop.
@@ -151,8 +170,8 @@ func (p *LifecyclePool) evictIdle() {
 
 // flushIfSupported snapshots the sandbox workspace and uploads anything
 // that isn't already in the durable store. Skips silently when the backend
-// doesn't implement WorkspaceSnapshotter (E2B / future backends) or when
-// no workspace.Store is configured.
+// doesn't implement WorkspaceSnapshotter (docker is the only current
+// implementer besides E2B) or when no workspace.Store is configured.
 func (p *LifecyclePool) flushIfSupported(sc sandboxScope) {
 	if p.workspace == nil {
 		return
@@ -161,32 +180,43 @@ func (p *LifecyclePool) flushIfSupported(sc sandboxScope) {
 	if err != nil {
 		return
 	}
+	p.syncSnapshot(context.Background(), sc, ex, "evict")
+}
+
+// syncSnapshot does the actual snapshot+diff+Put work. Pulled out of
+// flushIfSupported so post-exec sync (lazyExecutor.Exec) can reuse it
+// without re-fetching the executor through the inner pool. `cause` is a
+// log tag so we can tell evict-flushes from per-exec syncs in slog.
+func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Executor, cause string) {
+	if p.workspace == nil {
+		return
+	}
 	snapper, ok := ex.(WorkspaceSnapshotter)
 	if !ok {
 		return
 	}
-	files, err := snapper.SnapshotWorkspace(context.Background())
+	files, err := snapper.SnapshotWorkspace(ctx)
 	if err != nil {
-		slog.Warn("sandbox flush: snapshot failed", "agent", sc.agentID, "session", sc.sessionID, "error", err)
+		slog.Warn("sandbox sync: snapshot failed", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "error", err)
 		return
 	}
 	written := 0
 	for path, data := range files {
 		// Skip files that the store already has with identical size —
-		// avoids rewriting every file every eviction when nothing
-		// changed. Content equality would be stricter but requires a
-		// full round-trip per file; size is usually enough.
-		if info, err := p.workspace.Stat(context.Background(), sc.agentID, sc.sessionID, path); err == nil && info.Size == int64(len(data)) {
+		// avoids rewriting every file every sync when nothing changed.
+		// Content equality would be stricter but requires a full
+		// round-trip per file; size is usually enough.
+		if info, err := p.workspace.Stat(ctx, sc.agentID, sc.sessionID, path); err == nil && info.Size == int64(len(data)) {
 			continue
 		}
-		if err := p.workspace.Put(context.Background(), sc.agentID, sc.sessionID, path, bytesReader(data), int64(len(data)), ""); err != nil {
-			slog.Warn("sandbox flush: put failed", "agent", sc.agentID, "session", sc.sessionID, "path", path, "error", err)
+		if err := p.workspace.Put(ctx, sc.agentID, sc.sessionID, path, bytesReader(data), int64(len(data)), ""); err != nil {
+			slog.Warn("sandbox sync: put failed", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "path", path, "error", err)
 			continue
 		}
 		written++
 	}
 	if written > 0 {
-		slog.Info("sandbox flushed to workspace store", "agent", sc.agentID, "session", sc.sessionID, "files", written)
+		slog.Info("sandbox synced to workspace store", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "files", written)
 	}
 }
 
@@ -255,8 +285,14 @@ func (p *LifecyclePool) getInner(ctx context.Context, sc sandboxScope) (Executor
 		p.mu.Unlock()
 		return nil, err
 	}
+	// Skip the per-file fallback when the inner pool already pushed
+	// /workspace as part of its own bulk hydrate (E2B does this — one
+	// tar.gz over exec covers /skills and /workspace in one shot).
+	// Otherwise (docker), copy each object via ex.WriteFile.
 	if needsHydrate && p.workspace != nil {
-		hydrateWorkspace(ctx, p.workspace, ex, sc.agentID, sc.sessionID, defaultSandboxRoot)
+		if _, selfHydrates := p.inner.(workspaceAware); !selfHydrates {
+			hydrateWorkspace(ctx, p.workspace, ex, sc.agentID, sc.sessionID, defaultSandboxRoot)
+		}
 	}
 	return ex, nil
 }
@@ -274,7 +310,20 @@ func (l *lazyExecutor) Exec(ctx context.Context, command string, timeout time.Du
 	if err != nil {
 		return "", err
 	}
-	return ex.Exec(ctx, command, timeout)
+	out, execErr := ex.Exec(ctx, command, timeout)
+	// Post-exec sync only for cloud sandboxes (RemoteWorkspace marker).
+	// Docker's /workspace is bind-mounted to host so files appear
+	// instantly with no sync needed; rerunning the snapshot+Put cycle
+	// after every exec would just churn the workspace.Store
+	// (especially expensive when it's S3-backed). E2B's /workspace
+	// lives inside the cloud sandbox; without this pull, files the
+	// skill writes (image-tool's /workspace/gen_xxx.webp) never
+	// reach the host and the UI shows broken images.
+	// Best-effort — never overrides the exec result.
+	if _, remote := ex.(RemoteWorkspace); remote {
+		l.pool.syncSnapshot(ctx, l.scope, ex, "post-exec")
+	}
+	return out, execErr
 }
 
 func (l *lazyExecutor) ReadFile(ctx context.Context, path string) (string, error) {

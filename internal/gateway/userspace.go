@@ -107,7 +107,8 @@ func attachSandboxToAgents(
 				if template == "" {
 					template = "base"
 				}
-				pool = sandbox.NewE2BExecutorPool(apiKey, template, 30*time.Minute)
+				home, _ := config.HomeDir()
+				pool = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute)
 				slog.Info("sandbox executor pool created",
 					"user", userID, "backend", "e2b", "template", template)
 			default:
