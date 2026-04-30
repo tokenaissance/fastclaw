@@ -2,19 +2,24 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getStatus } from "@/lib/api";
-import { isLoggedIn, login, logout } from "@/lib/auth";
+import { getStatus, getMe, login as loginApi } from "@/lib/api";
+import { logout } from "@/lib/auth";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 export default function RootPage() {
   const router = useRouter();
   const [showLogin, setShowLogin] = useState(false);
-  const [token, setToken] = useState("");
+  const [loginField, setLoginField] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     getStatus()
-      .then((status) => {
+      .then(async (status) => {
         // Never trust a stale localStorage token when the backend reports
         // the system is unconfigured — that token belongs to a previous
         // deployment and would otherwise short-circuit onboarding.
@@ -23,7 +28,8 @@ export default function RootPage() {
           router.replace("/onboard/");
           return;
         }
-        if (isLoggedIn()) {
+        const me = await getMe().catch(() => null);
+        if (me?.ok && me.user) {
           router.replace("/overview/");
         } else {
           setShowLogin(true);
@@ -35,21 +41,22 @@ export default function RootPage() {
       });
   }, [router]);
 
-  const handleLogin = async () => {
-    if (!token.trim()) return;
+  const handleLogin = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!loginField.trim() || !password) return;
     setError("");
-    login(token.trim());
+    setSubmitting(true);
     try {
-      const status = await getStatus();
-      if (status.isAdmin) {
-        router.replace("/overview/");
-      } else {
-        setError("Invalid admin token");
-        login("");
+      const res = await loginApi(loginField.trim(), password);
+      if (!res.ok) {
+        setError(res.error || "Invalid username or password");
+        return;
       }
+      router.replace("/overview/");
     } catch {
       setError("Connection failed");
-      login("");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -68,30 +75,40 @@ export default function RootPage() {
           <div className="flex flex-col items-center gap-3">
             <img src="/logo.png" alt="FastClaw" className="h-12 w-12" />
             <h1 className="text-xl font-bold">FastClaw</h1>
-            <p className="text-sm text-muted-foreground">
-              Enter your admin token to sign in
-            </p>
+            <p className="text-sm text-muted-foreground">Sign in to continue</p>
           </div>
 
-          <div className="space-y-4">
-            <input
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleLogin()}
-              placeholder="Paste your gateway token"
-              autoFocus
-              className="w-full rounded-lg border border-border bg-card px-4 py-3 font-mono text-sm outline-none focus:ring-1 focus:ring-primary/30"
-            />
-            {error && <p className="text-sm text-red-500">{error}</p>}
-            <button
-              onClick={handleLogin}
-              disabled={!token.trim()}
-              className="w-full rounded-lg bg-primary px-4 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="login-field">Username or email</Label>
+              <Input
+                id="login-field"
+                value={loginField}
+                onChange={(e) => setLoginField(e.target.value)}
+                autoComplete="username"
+                autoFocus
+                placeholder="alice"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="login-password">Password</Label>
+              <Input
+                id="login-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+              />
+            </div>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <Button
+              type="submit"
+              disabled={!loginField.trim() || !password || submitting}
+              className="w-full"
             >
-              Sign In
-            </button>
-          </div>
+              {submitting ? "Signing in…" : "Sign In"}
+            </Button>
+          </form>
         </div>
       </div>
     );

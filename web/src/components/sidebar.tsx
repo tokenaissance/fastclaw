@@ -7,9 +7,6 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-import { isLoggedIn } from "@/lib/auth";
-import { getStatus } from "@/lib/api";
-
 // Page-header slot: pages call `usePageHeader(<jsx/>)` to render content
 // to the right of the sidebar-trigger in the global sticky header. When
 // the page unmounts the slot empties. Chat uses this to show an editable
@@ -33,27 +30,6 @@ export function usePageHeader(node: React.ReactNode, deps: React.DependencyList 
 
 export function SidebarLayout({ children }: { children: React.ReactNode }) {
   const [headerNode, setHeaderNode] = React.useState<React.ReactNode>(null);
-
-  // Auth / configuration gate — runs once on mount. Mirrors the behaviour
-  // the old hand-rolled sidebar had: bounce unconfigured deploys to the
-  // onboarding wizard and logged-out users back to the login screen.
-  React.useEffect(() => {
-    getStatus()
-      .then((s) => {
-        if (!s.configured && !window.location.pathname.startsWith("/onboard")) {
-          window.location.href = "/onboard/";
-          return;
-        }
-        if (
-          s.configured &&
-          !isLoggedIn() &&
-          !window.location.pathname.startsWith("/onboard")
-        ) {
-          window.location.href = "/";
-        }
-      })
-      .catch(() => {});
-  }, []);
 
   const headerCtx = React.useMemo<PageHeaderContextValue>(
     () => ({ setNode: setHeaderNode }),

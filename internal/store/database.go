@@ -68,6 +68,81 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateSkillsAgentEntriesSplit(ctx); err != nil {
 		return fmt.Errorf("migrate skills.agentEntries split: %w", err)
 	}
+	if err := d.migrateAgentFilesDropTemplate(ctx); err != nil {
+		return fmt.Errorf("migrate agent_files drop template: %w", err)
+	}
+	return nil
+}
+
+// migrateAgentFilesDropTemplate clears the legacy user_id='' template
+// rows from agent_files. Each row is reparented to the agent's owner
+// when no per-user row already exists for that (agent_id, filename) —
+// preserves existing content as the owner's personal copy. After this
+// pass the table holds (agent_id, real_user_id, filename) tuples only;
+// any "shared SOUL.md across all users" use case should live in a local
+// FS file at <agent_home>/<name>, which the runtime falls back to.
+// Idempotent: re-runs find no user_id='' rows and exit clean.
+func (d *DBStore) migrateAgentFilesDropTemplate(ctx context.Context) error {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT agent_files.agent_id, agent_files.filename, agent_files.content, agents.user_id
+			FROM agent_files
+			LEFT JOIN agents ON agents.id = agent_files.agent_id
+			WHERE agent_files.user_id = ''`)
+	if err != nil {
+		return fmt.Errorf("scan template rows: %w", err)
+	}
+	type tmpl struct {
+		agentID, filename, content string
+		ownerID                    sql.NullString
+	}
+	var pending []tmpl
+	for rows.Next() {
+		var t tmpl
+		if err := rows.Scan(&t.agentID, &t.filename, &t.content, &t.ownerID); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, t)
+	}
+	rows.Close()
+	now := time.Now().UTC()
+	for _, t := range pending {
+		if t.ownerID.Valid && t.ownerID.String != "" {
+			// Reparent only when the owner has no row of their own
+			// for this (agent_id, filename) — never clobber an
+			// existing personal copy.
+			var exists int
+			row := d.db.QueryRowContext(ctx,
+				fmt.Sprintf(`SELECT 1 FROM agent_files
+					WHERE agent_id = %s AND user_id = %s AND filename = %s LIMIT 1`,
+					d.ph(1), d.ph(2), d.ph(3)),
+				t.agentID, t.ownerID.String, t.filename)
+			if err := row.Scan(&exists); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("probe existing row: %w", err)
+			}
+			if exists != 1 {
+				if d.dialect == "postgres" {
+					if _, err := d.db.ExecContext(ctx,
+						`INSERT INTO agent_files (agent_id, user_id, filename, content, updated_at)
+							VALUES ($1, $2, $3, $4, $5)`,
+						t.agentID, t.ownerID.String, t.filename, t.content, now); err != nil {
+						return fmt.Errorf("reparent template row: %w", err)
+					}
+				} else {
+					if _, err := d.db.ExecContext(ctx,
+						`INSERT INTO agent_files (agent_id, user_id, filename, content, updated_at)
+							VALUES (?, ?, ?, ?, ?)`,
+						t.agentID, t.ownerID.String, t.filename, t.content, now); err != nil {
+						return fmt.Errorf("reparent template row: %w", err)
+					}
+				}
+			}
+		}
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`DELETE FROM agent_files WHERE user_id = ''`); err != nil {
+		return fmt.Errorf("delete template rows: %w", err)
+	}
 	return nil
 }
 
@@ -944,38 +1019,26 @@ func (d *DBStore) RenameSession(ctx context.Context, userID, agentID, sessionKey
 // --- Agent files ---
 //
 // SOUL.md / IDENTITY.md / MEMORY.md / AGENTS.md / BOOTSTRAP.md / etc.
-// Keyed on (agent_id, user_id, filename); user_id="" is the shared
-// template, user_id=u_xxx is that user's personal override.
+// Keyed on (agent_id, user_id, filename). Every row carries a real
+// user_id — there is no shared template row. A user with no override
+// for a given (agent_id, filename) gets nothing back; the agent runtime
+// optionally falls through to a local FS file at <agent_home>/<name>
+// for installs that want a global default for an agent.
 
-// GetAgentFile resolves "what content does this user see for this
-// file?" by picking the most-specific row available — the user's own
-// override row when present, otherwise the shared template (user_id="").
-// Pass userID="" to read the template row directly (Customize page edit
-// view uses that).
+// GetAgentFile returns the (agent_id, user_id, filename) row exactly.
+// userID is required — there is no shared template fallback.
 func (d *DBStore) GetAgentFile(ctx context.Context, agentID, userID, filename string) ([]byte, error) {
 	if agentID == "" {
 		return nil, errors.New("store: GetAgentFile requires agent_id")
 	}
 	if userID == "" {
-		row := d.db.QueryRowContext(ctx,
-			fmt.Sprintf(`SELECT content FROM agent_files WHERE agent_id = %s AND user_id = '' AND filename = %s`,
-				d.ph(1), d.ph(2)),
-			agentID, filename)
-		var content string
-		if err := row.Scan(&content); err != nil {
-			return nil, scanErr(err)
-		}
-		return []byte(content), nil
+		return nil, errors.New("store: GetAgentFile requires user_id")
 	}
-	// `IN (?, '') ORDER BY user_id DESC LIMIT 1` puts the user's own row
-	// ahead of the template when both exist; only one of the two can be
-	// present in practice but the ORDER BY makes the precedence explicit.
 	row := d.db.QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT content FROM agent_files
-			WHERE agent_id = %s AND filename = %s AND user_id IN (%s, '')
-			ORDER BY user_id DESC LIMIT 1`,
+			WHERE agent_id = %s AND user_id = %s AND filename = %s`,
 			d.ph(1), d.ph(2), d.ph(3)),
-		agentID, filename, userID)
+		agentID, userID, filename)
 	var content string
 	if err := row.Scan(&content); err != nil {
 		return nil, scanErr(err)
@@ -984,12 +1047,14 @@ func (d *DBStore) GetAgentFile(ctx context.Context, agentID, userID, filename st
 }
 
 // SaveAgentFile writes to the (agent_id, user_id, filename) row exactly.
-// Customize page (template editing) calls with userID=""; chat-time
-// runtime writes (write_file tool, MEMORY autopersist, USER.md updates)
-// pass the chatter's user_id so they don't pollute the template.
+// userID is required — every write is per-user. Use a local FS file
+// at <agent_home>/<name> if you want one shared default for the agent.
 func (d *DBStore) SaveAgentFile(ctx context.Context, agentID, userID, filename string, data []byte) error {
 	if agentID == "" {
 		return errors.New("store: SaveAgentFile requires agent_id")
+	}
+	if userID == "" {
+		return errors.New("store: SaveAgentFile requires user_id")
 	}
 	now := time.Now().UTC()
 	if d.dialect == "postgres" {
@@ -1010,6 +1075,12 @@ func (d *DBStore) SaveAgentFile(ctx context.Context, agentID, userID, filename s
 }
 
 func (d *DBStore) DeleteAgentFile(ctx context.Context, agentID, userID, filename string) error {
+	if agentID == "" {
+		return errors.New("store: DeleteAgentFile requires agent_id")
+	}
+	if userID == "" {
+		return errors.New("store: DeleteAgentFile requires user_id")
+	}
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM agent_files WHERE agent_id = %s AND user_id = %s AND filename = %s`,
 			d.ph(1), d.ph(2), d.ph(3)),
@@ -1017,33 +1088,18 @@ func (d *DBStore) DeleteAgentFile(ctx context.Context, agentID, userID, filename
 	return err
 }
 
-// ListAgentFiles returns the union of filenames the given user can see:
-// their own override rows plus any template files they don't have a
-// personal copy of. With userID="" it returns only template filenames.
+// ListAgentFiles returns the filenames stored for (agent_id, user_id).
+// userID is required — there is no shared template fallback.
 func (d *DBStore) ListAgentFiles(ctx context.Context, agentID, userID string) ([]string, error) {
+	if agentID == "" {
+		return nil, errors.New("store: ListAgentFiles requires agent_id")
+	}
 	if userID == "" {
-		rows, err := d.db.QueryContext(ctx,
-			fmt.Sprintf(`SELECT filename FROM agent_files
-				WHERE agent_id = %s AND user_id = '' ORDER BY filename`,
-				d.ph(1)),
-			agentID)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		var files []string
-		for rows.Next() {
-			var f string
-			if err := rows.Scan(&f); err != nil {
-				return nil, err
-			}
-			files = append(files, f)
-		}
-		return files, rows.Err()
+		return nil, errors.New("store: ListAgentFiles requires user_id")
 	}
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT DISTINCT filename FROM agent_files
-			WHERE agent_id = %s AND user_id IN (%s, '') ORDER BY filename`,
+		fmt.Sprintf(`SELECT filename FROM agent_files
+			WHERE agent_id = %s AND user_id = %s ORDER BY filename`,
 			d.ph(1), d.ph(2)),
 		agentID, userID)
 	if err != nil {

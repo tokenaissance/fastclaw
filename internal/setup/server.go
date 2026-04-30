@@ -181,6 +181,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Agents
 	mux.HandleFunc("GET /api/agents", auth(s.handleListAgents))
 	mux.HandleFunc("POST /api/agents", auth(s.handleCreateAgent))
+	mux.HandleFunc("GET /api/agents/{id}", auth(s.handleGetAgent))
 	mux.HandleFunc("PUT /api/agents/{id}", auth(s.handleUpdateAgent))
 	mux.HandleFunc("GET /api/agents/{id}/config", auth(s.handleGetAgentConfig))
 	mux.HandleFunc("DELETE /api/agents/{id}", auth(s.handleDeleteAgent))
@@ -245,6 +246,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("PUT /api/admin/users/{id}", admin(s.handleAdminUpdateUser))
 	mux.HandleFunc("DELETE /api/admin/users/{id}", admin(s.handleAdminDeleteUser))
 	mux.HandleFunc("POST /api/admin/users/{id}/password", admin(s.handleAdminResetPassword))
+	mux.HandleFunc("GET /api/admin/agents", admin(s.handleAdminListAgents))
 	mux.HandleFunc("GET /api/admin/usage", admin(s.handleGetUsage))
 
 	// OpenAI-compatible API and WebSocket gateway.

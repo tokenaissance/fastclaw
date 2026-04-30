@@ -13,25 +13,6 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-// readIdentityFile / writeIdentityFile / deleteIdentityFile are thin
-// pass-throughs to the agent_files **template** layer: SOUL.md /
-// IDENTITY.md / MEMORY.md etc. The Customize page is the template
-// editor — it always reads and writes the user_id="" row that every
-// chatter falls back to. Per-user overrides only exist as a side-effect
-// of chat-time write_file / memory autopersist (which thread the
-// chatter's userID through tools).
-func (s *Server) readIdentityFile(r *http.Request, agentID, filename string) ([]byte, error) {
-	return s.dataStore.GetAgentFile(r.Context(), agentID, "", filename)
-}
-
-func (s *Server) writeIdentityFile(r *http.Request, agentID, filename string, data []byte) error {
-	return s.dataStore.SaveAgentFile(r.Context(), agentID, "", filename, data)
-}
-
-func (s *Server) deleteIdentityFile(r *http.Request, agentID, filename string) error {
-	return s.dataStore.DeleteAgentFile(r.Context(), agentID, "", filename)
-}
-
 // loadAgentFileConfig returns an agent's per-row override JSON from the
 // agents.config column.
 func (s *Server) loadAgentFileConfig(r *http.Request, agentID string) (*config.AgentFileConfig, error) {

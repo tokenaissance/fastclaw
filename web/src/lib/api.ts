@@ -11,6 +11,7 @@ export interface StatusResponse {
   plugins?: number;
   userId?: string;
   isAdmin?: boolean;
+  users?: number;
 }
 
 export interface AgentInfo {
@@ -271,6 +272,11 @@ export async function onboard(req: OnboardRequest): Promise<{ ok: boolean; error
 
 export async function adminListUsers() {
   const res = await apiFetch("/api/admin/users");
+  return res.json();
+}
+
+export async function adminListAgents() {
+  const res = await apiFetch("/api/admin/agents");
   return res.json();
 }
 
@@ -620,7 +626,15 @@ export async function sendChatStream(
     body: JSON.stringify({ agentId, sessionId, message, imageUrls: imageUrls ?? [] }),
     signal,
   });
-  if (!res.ok || !res.body) throw new Error("stream failed");
+  if (!res.ok) {
+    let msg = `stream failed: ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data?.error) msg = String(data.error);
+    } catch { /* non-JSON body — keep status fallback */ }
+    throw new Error(msg);
+  }
+  if (!res.body) throw new Error("stream failed: no body");
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -688,6 +702,17 @@ export async function getAgents(): Promise<AgentDetail[]> {
   // older handler is still around.
   if (Array.isArray(data?.agents)) return data.agents as AgentDetail[];
   return Array.isArray(data) ? (data as AgentDetail[]) : [];
+}
+
+// Single-agent detail. Falls back through the same permission rules as
+// the rest of /api/agents/{id} — owner or super_admin can fetch. Used
+// by the chat header to resolve a name when the agent isn't in the
+// caller's own list (admin viewing another user's agent).
+export async function getAgent(id: string): Promise<AgentDetail | null> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(id)}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data?.agent as AgentDetail) || null;
 }
 
 export async function createAgent(agent: Partial<AgentDetail>) {

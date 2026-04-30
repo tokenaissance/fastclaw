@@ -21,12 +21,16 @@ import {
   PlusIcon,
   SettingsIcon,
   SparklesIcon,
+  UsersIcon,
   Wand2Icon,
 } from "lucide-react";
 import {
+  getAgent,
   getAgents,
   getChatSessions,
+  getMe,
   getStatus,
+  type MeResponse,
   type StatusResponse,
 } from "@/lib/api";
 
@@ -40,11 +44,20 @@ function extractAgentId(pathname: string): string | null {
   return match ? match[1] : null;
 }
 
-const PLATFORM_NAV: NavItem[] = [
+// Platform nav for regular users — kept minimal so non-admins only see
+// what they can actually do (chat with their agents). Models / Skills /
+// API Keys / Settings are admin-only platform plumbing.
+const USER_NAV: NavItem[] = [
+  { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
+  { title: "Agents", url: "/agents/", icon: BotIcon },
+];
+
+const ADMIN_NAV: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
+  { title: "Users", url: "/admin/users/", icon: UsersIcon },
   { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
   { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
@@ -81,6 +94,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const hasOpenSession = !!searchParams?.get("session");
 
   const [status, setStatus] = React.useState<StatusResponse | null>(null);
+  const [me, setMe] = React.useState<MeResponse | null>(null);
   const [agents, setAgents] = React.useState<AgentSwitcherItem[]>([]);
   const [sessions, setSessions] = React.useState<SessionItem[]>([]);
 
@@ -93,6 +107,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     return () => clearInterval(iv);
   }, []);
 
+  // Fetch current user once so the footer can show their name + role.
+  React.useEffect(() => {
+    getMe().then(setMe).catch(() => {});
+  }, []);
+
   // Agent list drives the switcher dropdown at the top of the sidebar.
   React.useEffect(() => {
     getAgents()
@@ -101,6 +120,29 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       )
       .catch(() => {});
   }, []);
+
+  // When the active agent isn't in the caller's owned list — e.g. a
+  // super_admin chatting with another user's agent — fetch its name
+  // separately and splice it in so the switcher header shows the real
+  // name instead of falling back to "FastClaw".
+  React.useEffect(() => {
+    if (!activeAgentId) return;
+    if (agents.some((a) => a.id === activeAgentId)) return;
+    let aborted = false;
+    getAgent(activeAgentId)
+      .then((a) => {
+        if (aborted || !a) return;
+        setAgents((prev) =>
+          prev.some((x) => x.id === a.id)
+            ? prev
+            : [...prev, { id: a.id, name: a.name, model: a.model }],
+        );
+      })
+      .catch(() => {});
+    return () => {
+      aborted = true;
+    };
+  }, [activeAgentId, agents]);
 
   // Sessions only matter while a specific agent is selected. We re-run
   // whenever the active agent changes *or* the chat page broadcasts a
@@ -138,7 +180,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   }, [activeAgentId]);
 
   const isAdmin = status?.isAdmin ?? false;
-  const platformItems = PLATFORM_NAV;
+  const platformItems = isAdmin ? ADMIN_NAV : USER_NAV;
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -155,8 +197,12 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       </SidebarContent>
       <SidebarFooter>
         <NavUser
-          name={isAdmin ? "Admin" : "User"}
-          subtitle={status?.running ? "Gateway running" : "Gateway stopped"}
+          name={
+            me?.user?.displayName ||
+            me?.user?.username ||
+            (isAdmin ? "Admin" : "User")
+          }
+          subtitle={me?.user?.role || (isAdmin ? "super_admin" : "user")}
         />
       </SidebarFooter>
       <SidebarRail />

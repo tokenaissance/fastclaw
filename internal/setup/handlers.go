@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
+	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
 type agentChatEvent = agent.ChatEvent
@@ -239,7 +241,12 @@ func authIdentity(r *http.Request) (auth.Identity, bool) {
 
 // resolveAgent returns the AgentHandle for the given agent within the
 // caller's user space. Apikey callers are additionally checked against
-// their access list before the handle is returned.
+// their access list before the handle is returned. super_admin without
+// an actAs override gets the foreign agent injected into their OWN
+// UserSpace — sessions, memory, and provider scope stay caller-keyed
+// (admin doesn't see the owner's chats), while the agent's persistent
+// identity (system prompt, agent-scope config, skills, files — all
+// keyed by agent_id) is reused.
 func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
 	ident, ok := auth.FromContext(r.Context())
 	if !ok {
@@ -251,11 +258,19 @@ func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
 	if s.userResolver == nil {
 		return nil
 	}
-	space, err := s.userResolver.UserSpaceFor(ident.EffectiveUserID())
+	uid := ident.EffectiveUserID()
+	space, err := s.userResolver.UserSpaceFor(uid)
 	if err != nil || space == nil || space.Agents == nil {
 		return nil
 	}
 	ag := space.Agents.AgentByID(agentID)
+	if ag == nil && ident.Role == users.RoleSuperAdmin && !ident.IsActingAs() {
+		if injector, ok := s.userResolver.(api.AgentInjector); ok {
+			if err := injector.EnsureAgent(r.Context(), uid, agentID); err == nil {
+				ag = space.Agents.AgentByID(agentID)
+			}
+		}
+	}
 	if ag == nil {
 		return nil
 	}
@@ -308,6 +323,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp["userId"] = ident.UserID
 	resp["role"] = ident.Role
 	resp["isAdmin"] = ident.Role == "super_admin"
+	if resp["isAdmin"].(bool) && s.accounts != nil {
+		if n, err := s.accounts.Count(r.Context()); err == nil {
+			resp["users"] = n
+		}
+	}
 
 	if !configured {
 		jsonResponse(w, http.StatusOK, resp)

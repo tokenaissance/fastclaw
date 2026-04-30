@@ -255,6 +255,85 @@ type UserSpace struct {
 	Provider    provider.Provider
 	Agents      *agent.Manager
 	SandboxPool sandbox.ExecutorPool
+
+	mu sync.Mutex
+}
+
+// EnsureAgent attaches an agent the user does not own to this UserSpace.
+// Used by super_admin chat: the admin operates on a foreign agent under
+// their own user_id namespace (sessions, memory, mem0 scope all stay
+// caller-keyed) while the agent's persistent identity — system prompt,
+// agent-scope config (`agents.defaults`), skills, and agent_files —
+// is reused because those are agent_id-keyed in the store, not
+// user_id-keyed.
+//
+// Idempotent: returns nil if the agent is already loaded.
+func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.MessageBus, ws workspace.Store, agentID string) error {
+	if sp == nil || sp.Agents == nil {
+		return fmt.Errorf("EnsureAgent: nil UserSpace")
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.Agents.AgentByID(agentID) != nil {
+		return nil
+	}
+	if st == nil {
+		return fmt.Errorf("EnsureAgent: store required")
+	}
+	rec, err := st.GetAgent(ctx, agentID)
+	if err != nil || rec == nil {
+		return fmt.Errorf("EnsureAgent: agent %q not found", agentID)
+	}
+	resolved := config.ResolveAgents(sp.Config, []config.AgentEntry{{ID: rec.ID, UserID: rec.UserID}})
+	if len(resolved) != 1 {
+		return fmt.Errorf("EnsureAgent: ResolveAgents returned %d entries", len(resolved))
+	}
+	rc := resolved[0]
+	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, rc.ID, "agents.defaults"); err == nil && cfgRec != nil {
+		var ovr config.AgentDefaults
+		blob, _ := json.Marshal(cfgRec.Data)
+		_ = json.Unmarshal(blob, &ovr)
+		if ovr.Model != "" {
+			rc.Model = ovr.Model
+		}
+		if ovr.MaxTokens > 0 {
+			rc.MaxTokens = ovr.MaxTokens
+		}
+		if ovr.Temperature > 0 {
+			rc.Temperature = ovr.Temperature
+		}
+		if ovr.MaxToolIterations > 0 {
+			rc.MaxToolIterations = ovr.MaxToolIterations
+		}
+		if ovr.Thinking != "" {
+			rc.Thinking = ovr.Thinking
+		}
+		if ovr.PolicyPreset != "" {
+			rc.PolicyPreset = ovr.PolicyPreset
+		}
+	}
+	ensureAgentHome(rc)
+	if ws != nil {
+		if err := skills.HydrateSkillsDown(ctx, ws, rc.ID, filepath.Join(rc.Home, "skills")); err != nil {
+			slog.Warn("skill hydrate failed", "agent", rc.ID, "error", err)
+		}
+	}
+	if err := sp.Agents.AddAgent(rc, sp.Provider, mb); err != nil {
+		return fmt.Errorf("EnsureAgent: add agent: %w", err)
+	}
+	if sp.SandboxPool != nil {
+		if ag := sp.Agents.AgentByID(rc.ID); ag != nil {
+			ag.SetSandboxPool(sp.SandboxPool)
+		}
+	} else if rc.Workspace != "" {
+		_ = os.MkdirAll(rc.Workspace, 0o755)
+		if ag := sp.Agents.AgentByID(rc.ID); ag != nil {
+			ag.ToolRegistry().SetSandboxRoot(rc.Workspace)
+		}
+	}
+	slog.Info("agent injected into foreign user space",
+		"caller", sp.UserID, "agent", rc.ID, "owner", rec.UserID)
+	return nil
 }
 
 // loadUserSpace builds a UserSpace by:

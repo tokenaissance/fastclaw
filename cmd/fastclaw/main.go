@@ -40,6 +40,10 @@ func (a *apiResolver) LocalAgentManager() *agent.Manager { return a.gw.LocalAgen
 func (a *apiResolver) IsCloudMode() bool                 { return a.gw.IsCloudMode() }
 func (a *apiResolver) InvalidateUser(userID string)      { a.gw.InvalidateUser(userID) }
 
+func (a *apiResolver) EnsureAgent(ctx context.Context, userID, agentID string) error {
+	return a.gw.EnsureAgent(ctx, userID, agentID)
+}
+
 // ReloadAgents drops every cached UserSpace so each one reloads on the
 // next request. setup.invalidateScope's system-scope branch type-
 // asserts the resolver to this interface — without the method the

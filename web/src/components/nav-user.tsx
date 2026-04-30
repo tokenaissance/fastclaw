@@ -23,7 +23,7 @@ import {
   SunIcon,
 } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
-import { logout as doLogout, isLoggedIn } from "@/lib/auth";
+import { logout as doLogout } from "@/lib/auth";
 
 export function NavUser({
   name = "Admin",
@@ -34,17 +34,6 @@ export function NavUser({
 }) {
   const { isMobile } = useSidebar();
   const { theme, toggleTheme } = useTheme();
-
-  // Resolve login state on the client only — calling isLoggedIn() during
-  // render hits localStorage, which is fine in the browser but the Base UI
-  // Menu primitive cached its children on first render. If loggedIn flipped
-  // after hydration (for example when the admin logs in), the children
-  // array length changed and the menu threw on next open. Fix: track it in
-  // state and re-mount the menu when it transitions.
-  const [loggedIn, setLoggedIn] = React.useState(false);
-  React.useEffect(() => {
-    setLoggedIn(isLoggedIn());
-  }, []);
 
   const initials = name.slice(0, 2).toUpperCase();
 
@@ -104,9 +93,7 @@ export function NavUser({
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              disabled={!loggedIn}
               onClick={() => {
-                if (!loggedIn) return;
                 doLogout();
                 window.location.href = "/";
               }}

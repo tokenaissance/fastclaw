@@ -233,10 +233,13 @@ export default function ChatPage() {
         }
       });
       loadSessions(selectedAgent);
-    } catch {
+    } catch (err) {
+      const errMsg = err instanceof Error && err.message
+        ? err.message
+        : "Failed to get a response. Is the gateway running?";
       setMessages((prev) => [
         ...prev,
-        { id: `e-${Date.now()}`, role: "agent", content: "Failed to get a response. Is the gateway running?", timestamp: Date.now() },
+        { id: `e-${Date.now()}`, role: "agent", content: errMsg, timestamp: Date.now() },
       ]);
     } finally {
       setSending(false);

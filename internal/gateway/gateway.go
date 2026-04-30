@@ -305,6 +305,17 @@ func (g *Gateway) UserSpaceForCtx(ctx context.Context, userID string) (*UserSpac
 // UserSpaceFor.
 func (g *Gateway) LocalAgentManager() *agent.Manager { return nil }
 
+// EnsureAgent loads an agent that does not belong to userID into that
+// user's UserSpace. Used by super_admin chat handlers — see
+// UserSpace.EnsureAgent.
+func (g *Gateway) EnsureAgent(ctx context.Context, userID, agentID string) error {
+	sp, err := g.UserSpaceForCtx(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return sp.EnsureAgent(ctx, g.store, g.bus, g.workspace, agentID)
+}
+
 // IsCloudMode is retained for a few callers that still branch on it but
 // always returns true now: multi-user is unconditional.
 func (g *Gateway) IsCloudMode() bool { return true }

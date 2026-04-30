@@ -226,6 +226,31 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGetAgent returns the basic AgentRecord (id, name, description,
+// userId) for one agent. Used by the chat header / sidebar switcher to
+// resolve a display name when the agent isn't in the caller's own
+// list — e.g. super_admin viewing another user's agent. Permission is
+// the same as the rest of the agent endpoints: owner or super_admin.
+func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rec := s.requireAgentOwner(w, r, id)
+	if rec == nil {
+		return
+	}
+	desc, _ := rec.Config["description"].(string)
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"agent": map[string]any{
+			"id":          rec.ID,
+			"name":        rec.Name,
+			"description": desc,
+			"userId":      rec.UserID,
+			"model":       s.agentScopeModel(r, rec.ID),
+			"avatarUrl":   "/api/agents/" + rec.ID + "/files/avatar.png",
+			"createdAt":   rec.CreatedAt,
+		},
+	})
+}
+
 func (s *Server) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rec := s.requireAgentOwner(w, r, id)
@@ -267,6 +292,16 @@ var agentSystemFileAllowlist = map[string]bool{
 	"HEARTBEAT.md": true, "USER.md": true, "agent.json": true,
 }
 
+// systemFileUserScope returns the user_id to use for Customize page
+// CRUD on system files. Every read/write is keyed by the caller's
+// effective user_id; a user with no override on a given (agent_id,
+// filename) gets an empty content blob from the API. The agent runtime
+// transparently falls back to a local FS file at <agent_home>/<name>
+// for installs that want a global default for an agent.
+func (s *Server) systemFileUserScope(r *http.Request) string {
+	return s.effectiveUserID(r)
+}
+
 func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	name := r.PathValue("name")
@@ -274,7 +309,7 @@ func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	data, err := s.dataStore.GetAgentFile(r.Context(), id, "", name)
+	data, err := s.dataStore.GetAgentFile(r.Context(), id, s.systemFileUserScope(r), name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			jsonResponse(w, http.StatusOK, map[string]any{"content": ""})
@@ -303,7 +338,7 @@ func (s *Server) handlePutAgentSystemFile(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.dataStore.SaveAgentFile(r.Context(), id, "", name, []byte(body.Content)); err != nil {
+	if err := s.dataStore.SaveAgentFile(r.Context(), id, s.systemFileUserScope(r), name, []byte(body.Content)); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -321,7 +356,7 @@ func (s *Server) handleDeleteAgentSystemFile(w http.ResponseWriter, r *http.Requ
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	if err := s.dataStore.DeleteAgentFile(r.Context(), id, "", name); err != nil {
+	if err := s.dataStore.DeleteAgentFile(r.Context(), id, s.systemFileUserScope(r), name); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -423,22 +458,39 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+	// The chat client sends one form field "file" per attachment, so the
+	// multipart payload often carries several entries under the same key.
+	// r.FormFile only returns the first — iterate over MultipartForm.File
+	// so multi-attach uploads land all of their files, not just one.
+	headers := r.MultipartForm.File["file"]
+	if len(headers) == 0 {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "no file"})
 		return
 	}
-	defer file.Close()
-	data, err := io.ReadAll(file)
-	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
+	// sessionId scopes the upload to the sandbox mount the agent actually
+	// sees (<agent>/sessions/<sid>/). Without it, files land at the agent
+	// root and list_dir on /workspace can't find them.
+	sessionID := r.URL.Query().Get("sessionId")
+	saved := make([]map[string]any, 0, len(headers))
+	for _, h := range headers {
+		fh, err := h.Open()
+		if err != nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		data, err := io.ReadAll(fh)
+		fh.Close()
+		if err != nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if err := s.workspaceStore.Put(r.Context(), id, sessionID, h.Filename, strings.NewReader(string(data)), int64(len(data)), ""); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		saved = append(saved, map[string]any{"name": h.Filename, "size": len(data)})
 	}
-	if err := s.workspaceStore.Put(r.Context(), id, "", header.Filename, strings.NewReader(string(data)), int64(len(data)), ""); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "name": header.Filename})
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "files": saved})
 }
 
 func defaultIfEmpty(v, fallback string) string {

@@ -287,6 +287,57 @@ func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleAdminListAgents returns every agent across every user, with
+// the owner's username/email joined in for the admin "Agents" view.
+// Scoped variants (handleListAgents) stay tenant-isolated; this one is
+// gated behind requireSuperAdmin in the router.
+func (s *Server) handleAdminListAgents(w http.ResponseWriter, r *http.Request) {
+	if s.dataStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})
+		return
+	}
+	records, err := s.dataStore.ListAllAgents(r.Context())
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// Resolve owner usernames once per unique userID — N agents could
+	// belong to a handful of users, so a per-row lookup would re-hit the
+	// store for the same id repeatedly.
+	ownerCache := map[string]*users.Account{}
+	resolveOwner := func(uid string) *users.Account {
+		if uid == "" {
+			return nil
+		}
+		if a, ok := ownerCache[uid]; ok {
+			return a
+		}
+		a, _ := s.accounts.Get(r.Context(), uid)
+		ownerCache[uid] = a
+		return a
+	}
+	out := make([]map[string]any, 0, len(records))
+	for _, ar := range records {
+		desc, _ := ar.Config["description"].(string)
+		entry := map[string]any{
+			"id":          ar.ID,
+			"name":        ar.Name,
+			"description": desc,
+			"userId":      ar.UserID,
+			"createdAt":   ar.CreatedAt,
+		}
+		if owner := resolveOwner(ar.UserID); owner != nil {
+			entry["ownerUsername"] = owner.Username
+			entry["ownerEmail"] = owner.Email
+			if owner.DisplayName != "" {
+				entry["ownerDisplayName"] = owner.DisplayName
+			}
+		}
+		out = append(out, entry)
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
+}
+
 // --- Apikey CRUD (per-user) ---
 
 type createAPIKeyReq struct {

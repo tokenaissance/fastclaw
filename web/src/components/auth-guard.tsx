@@ -9,6 +9,29 @@ interface AuthGuardProps {
   children: React.ReactNode;
 }
 
+// Routes that require an admin (super_admin) role. Server APIs enforce this
+// authoritatively; the client gate just stops non-admins from landing on a
+// page that would render an empty / 403'd shell.
+const ADMIN_PATH_PREFIXES = [
+  "/admin/",
+  "/models",
+  "/skills",
+  "/apikeys",
+  "/settings",
+  "/providers",
+  "/channels",
+  "/channels-config",
+  "/plugins",
+  "/tools",
+  "/cron",
+];
+
+function isAdminPath(pathname: string): boolean {
+  return ADMIN_PATH_PREFIXES.some(
+    (p) => pathname === p || pathname === p.replace(/\/$/, "") || pathname.startsWith(p + (p.endsWith("/") ? "" : "/")),
+  );
+}
+
 export function AuthGuard({ children }: AuthGuardProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -47,7 +70,11 @@ export function AuthGuard({ children }: AuthGuardProps) {
 
       try {
         const me = await getMe();
-        if (me.ok) {
+        if (me.ok && me.user) {
+          if (isAdminPath(pathname) && me.user.role !== "super_admin") {
+            router.replace("/overview/");
+            return;
+          }
           setAuthed(true);
         }
       } catch {

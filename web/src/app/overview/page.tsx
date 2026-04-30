@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -17,11 +16,9 @@ import {
   Activity,
   Bot,
   Radio,
-  Server,
   Brain,
   RefreshCw,
-  ArrowRight,
-  Settings,
+  Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -57,6 +54,9 @@ export default function OverviewPage() {
   const channelCount = status?.channels?.length || 0;
   const showChannels = channelCount > 0;
   const showAgentModel = (status?.agents || []).some((a) => a.model);
+  // Non-admins only need to see their agents — gateway plumbing (status,
+  // port, provider config, settings shortcut) is admin-only.
+  const isAdmin = status?.isAdmin ?? false;
 
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
@@ -80,11 +80,16 @@ export default function OverviewPage() {
         </Button>
       </div>
 
-      {/* Stats Cards — Channels card collapses out when nothing is
-          connected so the dashboard doesn't advertise an empty integration
-          on a fresh install. */}
+      {/* Stats Cards — Status + Agents shown to everyone; Users +
+          Channels are gateway-management surfaces, admin-only. */}
       <div
-        className={`grid gap-4 grid-cols-2 ${showChannels ? "md:grid-cols-4" : "md:grid-cols-3"}`}
+        className={`grid gap-4 grid-cols-2 ${
+          isAdmin
+            ? showChannels
+              ? "md:grid-cols-4"
+              : "md:grid-cols-3"
+            : "md:grid-cols-2"
+        }`}
       >
         {/* Status */}
         <div className="rounded-lg border border-border bg-card p-5">
@@ -132,8 +137,24 @@ export default function OverviewPage() {
           <p className="text-xs text-muted-foreground mt-1">Active agents</p>
         </div>
 
-        {/* Channels */}
-        {showChannels && (
+        {/* Users — admin-only */}
+        {isAdmin && (
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm text-muted-foreground">Users</span>
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-cyan-500/10">
+                <Users className="h-4 w-4 text-cyan-500" />
+              </div>
+            </div>
+            <p className="text-3xl font-semibold tracking-tight">
+              {status?.users ?? 0}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">Registered</p>
+          </div>
+        )}
+
+        {/* Channels — admin-only */}
+        {isAdmin && showChannels && (
           <div className="rounded-lg border border-border bg-card p-5">
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm text-muted-foreground">Channels</span>
@@ -146,57 +167,11 @@ export default function OverviewPage() {
           </div>
         )}
 
-        {/* Port */}
-        <div className="rounded-lg border border-border bg-card p-5">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm text-muted-foreground">Port</span>
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/10">
-              <Server className="h-4 w-4 text-amber-500" />
-            </div>
-          </div>
-          <p className="text-3xl font-semibold tracking-tight font-mono">
-            {status?.port || "\u2014"}
-          </p>
-          <p className="text-xs text-muted-foreground mt-1">Gateway port</p>
-        </div>
       </div>
 
-      {/* Quick Actions — chat lives per-agent now (under /agents/<id>/chat),
-          so the standalone /chat shortcut is gone. */}
-      <div className="grid gap-3 md:grid-cols-2">
-        <Link href="/agents/">
-          <div className="group flex items-center gap-4 rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/50">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10 transition-colors group-hover:bg-blue-500/15">
-              <Bot className="h-5 w-5 text-blue-500" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium">Agents</p>
-              <p className="text-xs text-muted-foreground">
-                Manage agent configs
-              </p>
-            </div>
-            <ArrowRight className="h-4 w-4 text-muted-foreground/50 group-hover:text-muted-foreground transition-colors" />
-          </div>
-        </Link>
-
-        <Link href="/settings/">
-          <div className="group flex items-center gap-4 rounded-lg border border-border bg-card p-4 transition-colors hover:bg-muted/50">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-500/10 transition-colors group-hover:bg-amber-500/15">
-              <Settings className="h-5 w-5 text-amber-500" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium">Settings</p>
-              <p className="text-xs text-muted-foreground">
-                Gateway configuration
-              </p>
-            </div>
-            <ArrowRight className="h-4 w-4 text-muted-foreground/50 group-hover:text-muted-foreground transition-colors" />
-          </div>
-        </Link>
-      </div>
-
-      {/* Agents & Provider */}
-      <div className="grid gap-4 md:grid-cols-2">
+      {/* Agents & Provider — Provider is admin-only (LLM creds), so non-admins
+          see just the Agents card spanning full width. */}
+      <div className={`grid gap-4 ${isAdmin ? "md:grid-cols-2" : ""}`}>
         {/* Agents */}
         <div className="rounded-lg border border-border bg-card">
           <div className="p-5 pb-3">
@@ -258,53 +233,55 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        {/* Provider */}
-        <div className="rounded-lg border border-border bg-card">
-          <div className="p-5 pb-3">
-            <div className="flex items-center gap-2 mb-1">
-              <Brain className="h-4 w-4 text-amber-500" />
-              <h3 className="font-medium">Provider</h3>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              LLM provider configuration
-            </p>
-          </div>
-          <div className="px-5 pb-5">
-            {status?.provider ? (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">Provider</span>
-                  <span className="text-sm capitalize">
-                    {status.provider.name || "default"}
-                  </span>
-                </div>
-                <Separator />
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">Model</span>
-                  <code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">
-                    {status.provider.model}
-                  </code>
-                </div>
-                <Separator />
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">API Base</span>
-                  <span className="text-sm font-mono truncate max-w-48">
-                    {status.provider.apiBase}
-                  </span>
-                </div>
-                <Separator />
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">API Key</span>
-                  <span className="text-sm font-mono">
-                    {status.provider.apiKey}
-                  </span>
-                </div>
+        {/* Provider — admin-only: surfaces gateway-wide LLM creds. */}
+        {isAdmin && (
+          <div className="rounded-lg border border-border bg-card">
+            <div className="p-5 pb-3">
+              <div className="flex items-center gap-2 mb-1">
+                <Brain className="h-4 w-4 text-amber-500" />
+                <h3 className="font-medium">Provider</h3>
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">No provider configured</p>
-            )}
+              <p className="text-sm text-muted-foreground">
+                LLM provider configuration
+              </p>
+            </div>
+            <div className="px-5 pb-5">
+              {status?.provider ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">Provider</span>
+                    <span className="text-sm capitalize">
+                      {status.provider.name || "default"}
+                    </span>
+                  </div>
+                  <Separator />
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">Model</span>
+                    <code className="text-sm font-mono bg-muted px-2 py-0.5 rounded">
+                      {status.provider.model}
+                    </code>
+                  </div>
+                  <Separator />
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">API Base</span>
+                    <span className="text-sm font-mono truncate max-w-48">
+                      {status.provider.apiBase}
+                    </span>
+                  </div>
+                  <Separator />
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-muted-foreground">API Key</span>
+                    <span className="text-sm font-mono">
+                      {status.provider.apiKey}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No provider configured</p>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

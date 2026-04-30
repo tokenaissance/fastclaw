@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,6 +16,17 @@ type UserResolver interface {
 	UserSpaceFor(userID string) (*UserSpaceView, error)
 	LocalAgentManager() *agent.Manager
 	IsCloudMode() bool
+}
+
+// AgentInjector is the optional capability for resolvers that can
+// dynamically attach a foreign agent_id into a caller's UserSpace.
+// Used by super_admin chat handlers so the admin operates on the agent
+// (which lives in the owner's account) under the admin's own user_id —
+// sessions, memory, provider scope all stay admin-keyed, while the
+// agent's persistent identity (system prompt, agent-scope config,
+// skills) is reused. Implementations MUST be idempotent.
+type AgentInjector interface {
+	EnsureAgent(ctx context.Context, userID, agentID string) error
 }
 
 // UserSpaceView is the subset of gateway.UserSpace that the API layer needs.

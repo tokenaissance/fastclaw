@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,7 +35,7 @@ import {
   Sparkles,
   UserPlus,
 } from "lucide-react";
-import { onboard, testProvider } from "@/lib/api";
+import { getStatus, onboard, testProvider } from "@/lib/api";
 
 const STEPS = [
   { id: "welcome", label: "Welcome", icon: PartyPopper },
@@ -102,6 +102,22 @@ export default function OnboardPage() {
   const router = useRouter();
   const [step, setStep] = useState(0);
 
+  // Already-onboarded probe — /api/status returns configured=true once
+  // any account exists, in which case the wizard has nothing to do and
+  // we kick the visitor to the dashboard. Redirect via router.replace so
+  // Back doesn't bounce them back into onboard.
+  useEffect(() => {
+    let cancelled = false;
+    getStatus()
+      .then((s) => {
+        if (!cancelled && s?.configured) router.replace("/overview/");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
   // Admin
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -128,7 +144,7 @@ export default function OnboardPage() {
   // Sandbox (optional — disabled by default; user can flip and configure)
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [sandboxBackend, setSandboxBackend] = useState("docker");
-  const [sandboxImage, setSandboxImage] = useState("");
+  const [sandboxImage, setSandboxImage] = useState("python:3.12-slim");
   const [sandboxE2BKey, setSandboxE2BKey] = useState("");
 
   // Submit state
@@ -215,7 +231,7 @@ export default function OnboardPage() {
       email.trim() !== "" &&
       password.length >= 6 &&
       password === passwordConfirm,
-    apiKey.trim() !== "" && model.trim() !== "" && apiBase.trim() !== "",
+    apiKey.trim() !== "" && model.trim() !== "" && apiBase.trim() !== "" && testStatus === "ok",
     agentName.trim() !== "",
     sandboxValid,
     true,

@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgents, getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
+import { getAgent, getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -264,6 +264,24 @@ export default function AgentChatPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string>("");
   const [attachments, setAttachments] = useState<File[]>([]);
+  // Lightbox for clicking either an attachment thumbnail (compose box)
+  // or an inline image in a sent message bubble. `null` = closed.
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  // Object URLs for image attachments in the compose box. Keyed by file
+  // index so we can revoke on remove without re-computing for every
+  // chip on every keystroke. Re-derived whenever `attachments` changes.
+  const attachmentPreviews = useMemo(
+    () =>
+      attachments.map((f) =>
+        f.type.startsWith("image/") ? URL.createObjectURL(f) : null,
+      ),
+    [attachments],
+  );
+  useEffect(() => {
+    return () => {
+      for (const url of attachmentPreviews) if (url) URL.revokeObjectURL(url);
+    };
+  }, [attachmentPreviews]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -286,15 +304,16 @@ export default function AgentChatPage() {
 
   // Resolve the agent's display name once. The chat title and any
   // future header bits should show "Chat with My Helper", not the
-  // opaque agt_xxx id.
+  // opaque agt_xxx id. Uses /api/agents/{id} (owner or super_admin) so
+  // an admin viewing another user's agent still gets the real name —
+  // /api/agents (list) is owner-scoped and would miss it.
   useEffect(() => {
     if (!selectedAgent) return;
     let aborted = false;
-    getAgents()
-      .then((list) => {
+    getAgent(selectedAgent)
+      .then((a) => {
         if (aborted) return;
-        const me = list.find((a) => a.id === selectedAgent);
-        setAgentName(me?.name || me?.id || selectedAgent);
+        setAgentName(a?.name || a?.id || selectedAgent);
       })
       .catch(() => {
         if (!aborted) setAgentName(selectedAgent);
@@ -543,11 +562,19 @@ export default function AgentChatPage() {
         )
       ).filter((s): s is string => !!s);
     }
-    // Send only the user's prose. Images travel as `imageUrls` and reach
-    // the model as `image_url` content parts; the old `[Attached: …]`
-    // textual breadcrumb was redundant for the model and showed up as
-    // ugly chrome in user bubbles + sidebar titles after a refresh.
-    const fullText = text;
+    // Build the prompt actually sent to the model. Images travel as
+    // `imageUrls` for vision, but the model also needs the on-disk path
+    // for skills like image-tool that take `input: "/workspace/<file>"`.
+    // We prepend `[Attached: /workspace/<name>]` lines for that — the
+    // server's StripAttachedPrefix removes them on history read so user
+    // bubbles, page titles, and sidebar previews stay clean.
+    const attachedPaths = filesToUpload.map((f) => `/workspace/${f.name}`);
+    const breadcrumb = attachedPaths
+      .map((p) => `[Attached: ${p}]`)
+      .join("\n");
+    const fullText = breadcrumb
+      ? (text ? `${breadcrumb}\n${text}` : breadcrumb)
+      : text;
 
     setInput("");
     setMessages((prev) => [
@@ -787,12 +814,15 @@ export default function AgentChatPage() {
               .some((m) => m.role === "agent" || m.role === "tool-group");
             if (replyAfter) return prev; // turn already produced output
           }
+          const errMsg = err instanceof Error && err.message
+            ? err.message
+            : "Failed to get a response. Is the gateway running?";
           return [
             ...prev,
             {
               id: `e-${Date.now()}`,
               role: "agent",
-              content: "Failed to get a response. Is the gateway running?",
+              content: errMsg,
               timestamp: Date.now(),
             },
           ];
@@ -995,13 +1025,20 @@ export default function AgentChatPage() {
                         <div className="space-y-2 mb-2">
                           {msg.attachments.map((att, i) =>
                             att.isImage && att.previewUrl ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img
+                              <button
                                 key={i}
-                                src={att.previewUrl}
-                                alt={att.name}
-                                className="rounded-lg max-w-full h-auto"
-                              />
+                                type="button"
+                                onClick={() => setLightboxSrc(att.previewUrl!)}
+                                className="block cursor-zoom-in"
+                                aria-label={`Preview ${att.name}`}
+                              >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={att.previewUrl}
+                                  alt={att.name}
+                                  className="rounded-lg max-w-full h-auto"
+                                />
+                              </button>
                             ) : (
                               <div
                                 key={i}
@@ -1100,24 +1137,57 @@ export default function AgentChatPage() {
             )}
             <div className="rounded-xl border border-border bg-card px-4 py-3 focus-within:ring-2 focus-within:ring-ring/20 transition-shadow">
               {attachments.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mb-2 pb-2 border-b border-border/60">
-                  {attachments.map((f, i) => (
-                    <div
-                      key={`${f.name}-${i}`}
-                      className="flex items-center gap-1.5 rounded-md bg-muted/60 pl-2 pr-1 py-1 text-xs"
-                    >
-                      <Paperclip className="h-3 w-3 text-muted-foreground" />
-                      <span className="max-w-[160px] truncate">{f.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => removeAttachment(i)}
-                        className="p-0.5 rounded hover:bg-muted-foreground/15 text-muted-foreground hover:text-foreground"
-                        aria-label="Remove attachment"
+                <div className="flex flex-wrap gap-2 mb-2 pb-2 border-b border-border/60">
+                  {attachments.map((f, i) => {
+                    const preview = attachmentPreviews[i];
+                    if (preview) {
+                      return (
+                        <div
+                          key={`${f.name}-${i}`}
+                          className="group relative h-14 w-14 overflow-hidden rounded-md border border-border bg-muted"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setLightboxSrc(preview)}
+                            className="block h-full w-full cursor-zoom-in"
+                            aria-label={`Preview ${f.name}`}
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={preview}
+                              alt={f.name}
+                              className="h-full w-full object-cover"
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => removeAttachment(i)}
+                            className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-background/80 text-muted-foreground opacity-0 transition group-hover:opacity-100 hover:text-foreground"
+                            aria-label="Remove attachment"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={`${f.name}-${i}`}
+                        className="flex items-center gap-1.5 rounded-md bg-muted/60 pl-2 pr-1 py-1 text-xs"
                       >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ))}
+                        <Paperclip className="h-3 w-3 text-muted-foreground" />
+                        <span className="max-w-[160px] truncate">{f.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(i)}
+                          className="p-0.5 rounded hover:bg-muted-foreground/15 text-muted-foreground hover:text-foreground"
+                          aria-label="Remove attachment"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               <div className="flex items-center gap-2">
@@ -1182,6 +1252,31 @@ export default function AgentChatPage() {
             </p>
           </div>
         </div>
+        {lightboxSrc && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6 cursor-zoom-out"
+            onClick={() => setLightboxSrc(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Image preview"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={lightboxSrc}
+              alt="Preview"
+              className="max-h-full max-w-full rounded-lg shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            />
+            <button
+              type="button"
+              onClick={() => setLightboxSrc(null)}
+              className="absolute right-4 top-4 flex h-9 w-9 items-center justify-center rounded-full bg-background/80 text-foreground hover:bg-background"
+              aria-label="Close preview"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        )}
     </div>
   );
 }

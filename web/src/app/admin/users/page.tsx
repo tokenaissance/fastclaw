@@ -8,6 +8,44 @@ import {
   adminDeleteUser,
   adminResetPassword,
 } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent } from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Users, KeyRound, Trash2, Plus } from "lucide-react";
 
 interface UserRow {
   id: string;
@@ -21,16 +59,28 @@ interface UserRow {
 export default function AdminUsersPage() {
   const [users, setUsers] = useState<UserRow[]>([]);
   const [error, setError] = useState("");
-  const [showCreate, setShowCreate] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [form, setForm] = useState({
+    username: "",
+    email: "",
+    password: "",
+    displayName: "",
+    role: "user",
+  });
 
-  const [form, setForm] = useState({ username: "", email: "", password: "", displayName: "", role: "user" });
+  const [deleteTarget, setDeleteTarget] = useState<UserRow | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
+  const [resetPwd, setResetPwd] = useState("");
 
   async function refresh() {
+    setError("");
     const res = await adminListUsers();
     if (res.users) setUsers(res.users);
     if (res.error) setError(res.error);
   }
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+  }, []);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -40,7 +90,7 @@ export default function AdminUsersPage() {
       setError(res.error);
       return;
     }
-    setShowCreate(false);
+    setCreateOpen(false);
     setForm({ username: "", email: "", password: "", displayName: "", role: "user" });
     refresh();
   }
@@ -59,90 +109,302 @@ export default function AdminUsersPage() {
     refresh();
   }
 
-  async function resetPwd(u: UserRow) {
-    const newPwd = prompt(`New password for ${u.username}:`);
-    if (!newPwd) return;
-    const res = await adminResetPassword(u.id, newPwd);
-    if (res.error) setError(res.error);
+  async function handleResetPassword() {
+    if (!resetTarget || !resetPwd.trim()) return;
+    const res = await adminResetPassword(resetTarget.id, resetPwd);
+    if (res.error) {
+      setError(res.error);
+      return;
+    }
+    setResetTarget(null);
+    setResetPwd("");
   }
 
-  async function deleteUser(u: UserRow) {
-    if (!confirm(`Delete user ${u.username}? This wipes all their agents/sessions/keys.`)) return;
+  async function handleDelete(u: UserRow) {
     const res = await adminDeleteUser(u.id);
     if (res.error) setError(res.error);
+    setDeleteTarget(null);
     refresh();
   }
 
+  function openCreateDialog() {
+    setForm({ username: "", email: "", password: "", displayName: "", role: "user" });
+    setError("");
+    setCreateOpen(true);
+  }
+
   return (
-    <div className="p-8 text-zinc-100">
-      <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Users</h1>
-        <button
-          onClick={() => setShowCreate((v) => !v)}
-          className="rounded bg-violet-600 px-4 py-2 text-sm hover:bg-violet-500"
-        >
-          {showCreate ? "Cancel" : "+ New user"}
-        </button>
+    <div className="p-6 space-y-6 max-w-5xl mx-auto">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <Users className="size-5 text-muted-foreground" />
+            <h2 className="text-2xl font-semibold tracking-tight">Users</h2>
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">
+            Manage platform members. Each user gets isolated agents, sessions, and keys.
+          </p>
+        </div>
+        <Button variant="outline" onClick={openCreateDialog}>
+          <Plus className="h-4 w-4 mr-2" />
+          Add User
+        </Button>
       </div>
 
-      {showCreate && (
-        <form onSubmit={handleCreate} className="mb-6 space-y-3 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-          <div className="grid grid-cols-2 gap-3">
-            <input required value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="username" className="rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
-            <input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="email" className="rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
-          </div>
-          <input required type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="password" className="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
-          <div className="grid grid-cols-2 gap-3">
-            <input value={form.displayName} onChange={(e) => setForm({ ...form, displayName: e.target.value })} placeholder="display name (optional)" className="rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
-            <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} className="rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm">
-              <option value="user">user</option>
-              <option value="super_admin">super_admin</option>
-            </select>
-          </div>
-          <button type="submit" className="rounded bg-violet-600 px-4 py-2 text-sm">Create</button>
-        </form>
+      {error && (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardContent className="pt-6">
+            <p className="text-sm text-destructive">{error}</p>
+          </CardContent>
+        </Card>
       )}
 
-      {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
+      {users.length === 0 ? (
+        <div className="rounded-lg border border-border bg-card">
+          <div className="flex flex-col items-center justify-center py-16">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
+              <Users className="h-7 w-7 text-primary" />
+            </div>
+            <p className="text-sm text-muted-foreground mb-1">No users yet</p>
+            <p className="text-xs text-muted-foreground/60 mb-4">
+              Add a user to give them their own scoped workspace
+            </p>
+            <Button variant="outline" size="sm" onClick={openCreateDialog}>
+              <Plus className="h-4 w-4 mr-2" />
+              Add User
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-border bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Username</TableHead>
+                <TableHead>Email</TableHead>
+                <TableHead>Role</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {users.map((u) => (
+                <TableRow key={u.id}>
+                  <TableCell className="font-medium">
+                    <div>{u.username}</div>
+                    {u.displayName && (
+                      <div className="text-xs text-muted-foreground">{u.displayName}</div>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">{u.email}</TableCell>
+                  <TableCell>
+                    <Select value={u.role} onValueChange={(v) => v && setRole(u, v)}>
+                      <SelectTrigger size="sm" className="w-36">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="user">user</SelectItem>
+                        <SelectItem value="super_admin">super_admin</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </TableCell>
+                  <TableCell>
+                    <Select value={u.status} onValueChange={(v) => v && setStatus(u, v)}>
+                      <SelectTrigger size="sm" className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="active">active</SelectItem>
+                        <SelectItem value="disabled">disabled</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => {
+                          setResetPwd("");
+                          setResetTarget(u);
+                        }}
+                        title="Reset password"
+                      >
+                        <KeyRound className="size-4" />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => setDeleteTarget(u)}
+                        title="Delete"
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
-      <table className="w-full text-sm">
-        <thead className="text-left text-zinc-400">
-          <tr>
-            <th className="py-2">Username</th>
-            <th>Email</th>
-            <th>Role</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((u) => (
-            <tr key={u.id} className="border-t border-zinc-800">
-              <td className="py-3">
-                <div className="font-medium">{u.username}</div>
-                {u.displayName && <div className="text-xs text-zinc-500">{u.displayName}</div>}
-              </td>
-              <td>{u.email}</td>
-              <td>
-                <select value={u.role} onChange={(e) => setRole(u, e.target.value)} className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs">
-                  <option value="user">user</option>
-                  <option value="super_admin">super_admin</option>
-                </select>
-              </td>
-              <td>
-                <select value={u.status} onChange={(e) => setStatus(u, e.target.value)} className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs">
-                  <option value="active">active</option>
-                  <option value="disabled">disabled</option>
-                </select>
-              </td>
-              <td className="space-x-2 text-right">
-                <button onClick={() => resetPwd(u)} className="text-xs text-violet-400 hover:underline">reset password</button>
-                <button onClick={() => deleteUser(u)} className="text-xs text-red-400 hover:underline">delete</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add User</DialogTitle>
+            <DialogDescription>
+              Create a new platform member. They&apos;ll get their own scoped agents, sessions, and keys.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleCreate} className="space-y-4 py-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="user-username">Username</Label>
+                <Input
+                  id="user-username"
+                  required
+                  value={form.username}
+                  onChange={(e) => setForm({ ...form, username: e.target.value })}
+                  placeholder="e.g. alice"
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="user-email">Email</Label>
+                <Input
+                  id="user-email"
+                  required
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  placeholder="alice@example.com"
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="user-password">Password</Label>
+              <Input
+                id="user-password"
+                required
+                type="password"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+                placeholder="Initial password"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="user-display">Display name</Label>
+                <Input
+                  id="user-display"
+                  value={form.displayName}
+                  onChange={(e) => setForm({ ...form, displayName: e.target.value })}
+                  placeholder="Optional"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Role</Label>
+                <Select
+                  value={form.role}
+                  onValueChange={(v) => v && setForm({ ...form, role: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="user">user</SelectItem>
+                    <SelectItem value="super_admin">super_admin</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={!form.username.trim() || !form.email.trim() || !form.password.trim()}
+              >
+                Create user
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={resetTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) {
+            setResetTarget(null);
+            setResetPwd("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reset password</DialogTitle>
+            <DialogDescription>
+              Set a new password for{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                {resetTarget?.username}
+              </code>
+              . They&apos;ll need this to log in next time.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5 py-2">
+            <Label htmlFor="reset-pwd">New password</Label>
+            <Input
+              id="reset-pwd"
+              type="password"
+              value={resetPwd}
+              onChange={(e) => setResetPwd(e.target.value)}
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setResetTarget(null);
+                setResetPwd("");
+              }}
+            >
+              Cancel
+            </Button>
+            <Button onClick={handleResetPassword} disabled={!resetPwd.trim()}>
+              Reset password
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete user?</AlertDialogTitle>
+            <AlertDialogDescription>
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                {deleteTarget?.username}
+              </code>{" "}
+              will be removed along with all of their agents, sessions, and API keys. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => deleteTarget && handleDelete(deleteTarget)}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
