@@ -84,6 +84,7 @@ func main() {
 	rootCmd.AddCommand(policyCmd())
 	rootCmd.AddCommand(daemonCmd())
 	rootCmd.AddCommand(adminCmd())
+	rootCmd.AddCommand(agentsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -164,7 +165,7 @@ func runGateway(port int) error {
 	url := fmt.Sprintf("http://localhost:%d", port)
 	slog.Info("web UI available", "url", url)
 	// Auto-open the browser when this looks like a fresh install.
-	if n, _ := countUsersSafe(gw); n == 0 {
+	if n, _ := countUsersSafe(gw); n == 0 && os.Getenv("FASTCLAW_NO_OPEN") == "" && os.Getenv("FASTCLAW_NO_BROWSER") == "" {
 		go openBrowser(url)
 	}
 
