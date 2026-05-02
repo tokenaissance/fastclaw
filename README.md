@@ -174,128 +174,100 @@ Click an agent to enter its management panel:
 ./fastclaw gateway
 ```
 
-### Local agent instances
+### Manage agents from the CLI (`fastclaw agents …`)
 
-For temporary local agents, run isolated gateway instances by name. Each
-instance has its own sqlite database, config, users, agents, workspaces, and
-logs.
+The `fastclaw agents` subcommand is a thin convenience wrapper around the
+same store the dashboard uses. Agents you create here show up in the web
+UI and vice-versa — there's only ever one fastclaw deployment per
+`FASTCLAW_HOME`.
 
 ```bash
-# Create a local instance and seed its provider/model config.
-fastclaw agents init scratch \
+# Create an agent (or update an existing one with the same name).
+fastclaw agents init alpha \
   --provider openai \
-  --model openai/gpt-4.1 \
+  --model openai/gpt-4o-mini \
   --api-key-env OPENAI_API_KEY
 
-# Configure runtime settings directly from the CLI.
-fastclaw agents config scratch set sandbox.enabled true
-fastclaw agents config scratch set temperature 0.2
+# Set per-agent overrides (model, temperature, sandbox, …).
+fastclaw agents config alpha set temperature 0.7
+fastclaw agents config alpha set sandbox.enabled true
 
-# Customize identity files.
-fastclaw agents files put scratch SOUL.md ./SOUL.md
-fastclaw agents files put scratch IDENTITY.md ./IDENTITY.md
+# Upload the agent's identity files.
+fastclaw agents files put alpha SOUL.md ./SOUL.md
+fastclaw agents files put alpha IDENTITY.md ./IDENTITY.md
 
-# Run and inspect the instance.
-fastclaw agents start scratch
+# Inspect.
 fastclaw agents ls
-fastclaw agents status scratch
-fastclaw agents log scratch
-fastclaw agents log scratch -f -n 200
-fastclaw agents restart scratch
-fastclaw agents stop scratch
+fastclaw agents config alpha get
+fastclaw agents files ls alpha
 
-# Tear it down. Default keeps the home dir + logs so a later `init` recovers.
-fastclaw agents rm scratch
-fastclaw agents rm scratch --purge   # also wipe ~/.fastclaw/local-agents/scratch and the log file
-fastclaw agents rm scratch --force   # stop the agent first if it is still running
+# Tear down.
+fastclaw agents rm alpha
 ```
 
-`agents init` writes the local sqlite store directly, so provider/model
-defaults and system files can be configured without opening the dashboard.
-When the local DB has no users, it creates a super admin account. If
-`--password` is omitted, a password is generated and printed once. When the
-DB already has users, passing `--username` requires that account to exist —
-the command refuses to silently bind the agent to a different user.
+The CLI opens the operator's store directly (sqlite at
+`~/.fastclaw/fastclaw.db`, or whatever `FASTCLAW_STORAGE_DSN` points
+at). It does not require the gateway to be running. When the gateway
+**is** running, the CLI prints a hint reminding you to restart it for
+the new state to apply (`fastclaw daemon restart`).
 
-Re-running `agents init` against the same name is non-destructive: the agent
-record's `Config` map, the agent system files, and existing model entry
-metadata (context window, max tokens, cost) are preserved. Provider fields
-that are not explicitly overridden also keep their previous values.
+#### Resolving agents
 
-Provider presets are available for `openai`, `openrouter`, `anthropic`,
-`ollama`, `groq`, `deepseek`, and `mistral`. Use `--api-key-env` instead of
-placing API keys directly on the command line:
+CLI commands accept either a display name or an `agt_…` id:
+
+- `fastclaw agents config alpha get` — by display name (must be unique)
+- `fastclaw agents config agt_d3c4a5… get` — by id (always unambiguous)
+
+When you create an agent via `agents init <name>`, the name is the
+display name and the id is auto-generated. To update an agent that was
+created via the dashboard, pass its id explicitly:
 
 ```bash
-fastclaw agents init scratch --provider openai --model openai/gpt-4.1 --api-key-env OPENAI_API_KEY
-fastclaw agents init local-llama --provider ollama --model llama3.1
+fastclaw agents init "Cool Agent" --id agt_d3c4a5...
 ```
 
-Configuration can be read or updated by key. Common keys include `model`,
-`temperature`, `maxTokens`, `thinking`, `policy`, `sandbox.enabled`,
-`sandbox.backend`, and provider fields such as `provider.openai.apiBase`,
-`provider.openai.apiType`, and `provider.openai.apiKeyEnv`.
+#### Configuration keys
+
+Per-agent (saved at `scope=agent` under the agent's id):
+
+- `model`, `temperature`, `maxTokens`, `thinking`, `policy`
+- `sandbox`, `sandbox.enabled`, `sandbox.backend`, `sandbox.image`, `sandbox.network`
+
+System-wide (saved at `scope=system`):
+
+- `plugins`, `plugins.<name>`
+- `skills.install`, `skills.entries`, `skillsLearner`
+- `tools.providers`, `tools.categories`
+- `objectstore`, `taskqueue`, `heartbeat`, `memory`, `privacy`, `hooks`, `teams`, `bindings`
+
+Provider configs live in `scope=system` and are addressed as
+`provider.<name>.<field>`:
 
 ```bash
-fastclaw agents config scratch get
-fastclaw agents config scratch get model
-fastclaw agents config scratch get sandbox
-fastclaw agents config scratch set model openai/gpt-4.1-mini
-fastclaw agents config scratch set provider.openai.apiKeyEnv OPENAI_API_KEY
-fastclaw agents config scratch set sandbox '{"enabled":true,"backend":"docker"}'
+fastclaw agents config alpha set provider.openai.apiKeyEnv OPENAI_API_KEY
+fastclaw agents config alpha set provider.openrouter.apiBase https://openrouter.ai/api/v1
+fastclaw agents config alpha set provider.openai.model gpt-4o      # adds; idempotent
+fastclaw agents config alpha set provider.openai.models '[]'        # explicit clear
 ```
 
-System files are stored in the local instance database under the configured
-agent/user scope. Supported filenames are `SOUL.md`, `IDENTITY.md`, `USER.md`,
-`BOOTSTRAP.md`, `MEMORY.md`, `HEARTBEAT.md`, `AGENTS.md`, `TOOLS.md`, and
-`agent.json`:
+Provider presets ship for `openai`, `openrouter`, `anthropic`, `ollama`,
+`groq`, `deepseek`, `mistral` — `--api-key-env` populates `apiKey` from
+the named environment variable, the rest comes from the preset.
 
-```bash
-fastclaw agents files ls scratch
-fastclaw agents files get scratch SOUL.md
-fastclaw agents files get scratch SOUL.md ./SOUL.md
-fastclaw agents files put scratch SOUL.md ./SOUL.md
-```
+#### Agent system files
 
-Each instance gets its own `FASTCLAW_HOME` under `~/.fastclaw/local-agents/<name>`,
-with process metadata in `~/.fastclaw/agent-runs/` and logs in
-`~/.fastclaw/logs/agents/`. Use `--port` or `--home` on `agents start` when you
-need an explicit port or home directory. CLI config writes do not hot-reload a
-running gateway; use `agents restart <name>` after `agents init`, `agents
-config set`, or `agents files put` if the instance is already running.
-
-A few sharp edges worth knowing:
-
-- `agents start <name>` does not require `agents init` first. A bare `start`
-  boots a gateway with an empty database; the web setup wizard at the printed
-  URL will walk you through provider/admin configuration.
-- `agents rm` keeps `~/.fastclaw/local-agents/<name>/` and the log file by
-  default so a later `agents init <name>` can recover prior data. Pass
-  `--purge` to wipe them too. `--force` only stops a running agent before
-  removal — it does not imply `--purge`.
-- On Unix, `agents stop` SIGTERMs the whole gateway process group (sandbox
-  runners, plugin subprocesses, etc.) and escalates to SIGKILL after 5
-  seconds. On Windows, the gateway is detached with `CREATE_NEW_PROCESS_GROUP`
-  and `agents stop` sends `CTRL_BREAK_EVENT`, falling back to a hard kill if
-  the gateway does not handle it.
-- `agents init` reuse rules: re-running against the same `<name>` preserves
-  the agent record's `Config` map, system files, existing model entry
-  metadata, and provider fields not explicitly overridden. The agent is
-  bound to the existing owner — passing `--username` for a different
-  account refuses rather than silently rebinding.
+The CLI reads and writes the same `agent_files` table the dashboard's
+file editor uses. Allowlisted filenames: `SOUL.md`, `IDENTITY.md`,
+`USER.md`, `BOOTSTRAP.md`, `MEMORY.md`, `HEARTBEAT.md`, `AGENTS.md`,
+`TOOLS.md`, `agent.json`.
 
 | Subcommand | Purpose |
 |---|---|
-| `agents init <name>` | Create or update an instance's sqlite config (provider, model, sandbox, admin user) |
-| `agents start <name>` | Launch the gateway as a detached background process |
-| `agents stop <name>` | SIGTERM (then SIGKILL after 5s) the running instance |
-| `agents restart <name>` | Stop (if running) and start, optionally with new `--port` / `--home` |
-| `agents ls` | List all known instances with status/PID/port/uptime |
-| `agents status <name>` | Show one instance's status, URL, log path, uptime |
-| `agents rm <name>` | Remove instance metadata; pass `--purge` to wipe sqlite + logs, `--force` to stop first |
-| `agents log <name> [-f] [-n N]` | Show / follow the instance's log file (no `tail` binary required) |
-| `agents config <name> get\|set [key] [value]` | Read or update saved provider/setting values |
-| `agents files ls\|put\|get <name>` | Read / write the agent's system files (SOUL.md, IDENTITY.md, …) |
+| `agents init <name>` | Create or update an agent (provider/model/sandbox/files) |
+| `agents ls` | List all agents in the store |
+| `agents config <name> get\|set [key] [value]` | Read or update a config value |
+| `agents files ls\|put\|get <name>` | Read / write the agent's system files |
+| `agents rm <name>` | Delete the agent record and its system files |
 
 ### Docker
 ```bash
