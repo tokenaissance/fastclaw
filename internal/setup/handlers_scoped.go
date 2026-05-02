@@ -44,6 +44,17 @@ func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scop
 			jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "cannot manage other users' configs"})
 			return false
 		}
+		// app_user accounts are end-users provisioned by a downstream
+		// app — they shouldn't be able to redirect their LLM provider
+		// or fork channel bindings out from under the calling app.
+		// Reads are still allowed (so the agent runtime can see what
+		// the upstream stack configured for them); only mutating
+		// callers reach this path via requireWritable, but we hard-
+		// reject up front to be unambiguous.
+		if ident.Role == users.RoleAppUser {
+			jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "app_user cannot manage user-scope configs"})
+			return false
+		}
 		return true
 	case scope.Agent:
 		// Must own the agent. We do an inexpensive store lookup to verify.

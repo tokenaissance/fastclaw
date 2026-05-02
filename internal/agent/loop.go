@@ -104,15 +104,18 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 }
 
 // bindSession wires per-turn session state into the tool registry: the
-// session-scoped sandbox executor (when a pool is configured) and the
-// sessionID workspace.Store calls use to namespace artifacts. Called at
-// the top of HandleMessage / HandleMessageStream before any tool runs.
+// session-scoped sandbox executor (when a pool is configured), the
+// sessionID workspace.Store calls use to namespace artifacts, and the
+// (channel, chatID) bus address so deferred-work tools (create_cron_job)
+// can stamp it onto persisted rows for later replay. Called at the top
+// of HandleMessage / HandleMessageStream before any tool runs.
 //
 // Mutating the shared registry across concurrent chats would race, but
 // the current invariant is one chat-in-flight per agent — the gateway
 // serializes per-agent turns. Documenting it here in case that changes.
-func (a *Agent) bindSession(ctx context.Context, sessionID string) {
+func (a *Agent) bindSession(ctx context.Context, channel, sessionID string) {
 	a.registry.SetSessionID(sessionID)
+	a.registry.SetMessageContext(channel, sessionID)
 	if a.sandboxPool == nil {
 		return
 	}
@@ -516,7 +519,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// + writes get session-scoped paths and (when a sandbox pool is
 	// wired) the executor used by exec/read_file/list_dir is tied to a
 	// session-private container.
-	a.bindSession(ctx, msg.ChatID)
+	a.bindSession(ctx, msg.Channel, msg.ChatID)
 
 	// Safety net for client-aborted turns: if the loop exits with a
 	// tool_use that never got its matching tool_result appended (the
@@ -901,7 +904,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	a.refreshSkillsFromStore()
 	sess := a.sessions.Get(msg.Channel, msg.ChatID)
-	a.bindSession(ctx, msg.ChatID)
+	a.bindSession(ctx, msg.Channel, msg.ChatID)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})

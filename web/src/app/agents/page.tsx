@@ -316,7 +316,13 @@ export default function AgentsPage() {
                 </Badge>
               </div>
               <p className="text-base font-medium mb-1 truncate">{agent.name || agent.id}</p>
-              <p className="font-mono text-xs text-muted-foreground truncate">{agent.id}</p>
+              <p
+                className={`font-mono text-xs text-muted-foreground truncate ${
+                  agent.description ? "" : "mb-3"
+                }`}
+              >
+                {agent.id}
+              </p>
               {agent.description && (
                 <p className="mt-2 mb-3 text-sm text-muted-foreground line-clamp-2">
                   {agent.description}
@@ -380,7 +386,11 @@ export default function AgentsPage() {
                   <p className="text-base font-medium mb-1 truncate">
                     {agent.name || agent.id}
                   </p>
-                  <p className="font-mono text-xs text-muted-foreground truncate">
+                  <p
+                    className={`font-mono text-xs text-muted-foreground truncate ${
+                      agent.description ? "" : "mb-3"
+                    }`}
+                  >
                     {agent.id}
                   </p>
                   {agent.description && (

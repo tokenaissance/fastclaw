@@ -16,6 +16,7 @@ import { NavUser } from "@/components/nav-user";
 import {
   BotIcon,
   BrainIcon,
+  ClockIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   PlusIcon,
@@ -40,7 +41,7 @@ import {
 // index keeps the Platform nav instead of flipping to Agent nav.
 function extractAgentId(pathname: string): string | null {
   const match = pathname.match(
-    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats)/,
+    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler)/,
   );
   return match ? match[1] : null;
 }
@@ -87,6 +88,7 @@ const AGENT_NAV = (
     { title: "Models", url: `/agents/${agentId}/models/`, icon: BrainIcon },
     { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
     { title: "Channels", url: `/agents/${agentId}/channels/`, icon: RadioIcon },
+    { title: "Scheduler", url: `/agents/${agentId}/scheduler/`, icon: ClockIcon },
   ];
 };
 

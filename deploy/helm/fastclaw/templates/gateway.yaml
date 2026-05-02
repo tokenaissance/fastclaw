@@ -6,6 +6,9 @@ metadata:
     {{- include "fastclaw.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.gateway.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
     matchLabels:
       app: {{ include "fastclaw.fullname" . }}-gateway
@@ -14,70 +17,77 @@ spec:
       labels:
         app: {{ include "fastclaw.fullname" . }}-gateway
     spec:
-      initContainers:
-      - name: init-config
-        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-        command: ["sh", "-c"]
-        args:
-        - |
-          mkdir -p /data/.fastclaw/users/local
-          if [ ! -f /data/.fastclaw/users/local/fastclaw.json ]; then
-            cp /config/fastclaw.json /data/.fastclaw/users/local/fastclaw.json
-            sed -i "s|\"dsn\": \"\"|\"dsn\": \"$STORAGE_DSN\"|" /data/.fastclaw/users/local/fastclaw.json
-            sed -i "s|\"token\": \"\"|\"token\": \"$ADMIN_TOKEN\"|" /data/.fastclaw/users/local/fastclaw.json
-          fi
-        env:
-        - name: HOME
-          value: /data
-        - name: STORAGE_DSN
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "fastclaw.fullname" . }}-admin
-              key: dsn
-        - name: ADMIN_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "fastclaw.fullname" . }}-admin
-              key: token
-        volumeMounts:
-        - name: data
-          mountPath: /data/.fastclaw
-        - name: config
-          mountPath: /config
+      {{- with .Values.image.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: gateway
         image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
-        args: ["gateway"]
-        env:
-        - name: HOME
-          value: /data
         ports:
         - containerPort: {{ .Values.gateway.port }}
           name: http
+        envFrom:
+        - configMapRef:
+            name: {{ include "fastclaw.fullname" . }}-config
+        env:
+        - name: FASTCLAW_HOME
+          value: "/data/.fastclaw"
+        - name: FASTCLAW_STORAGE_DSN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastclaw.fullname" . }}-secrets
+              key: STORAGE_DSN
+        {{- if and (ne .Values.objectStore.type "local") .Values.objectStore.accessKey }}
+        - name: FASTCLAW_OBJECT_STORE_ACCESSKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastclaw.fullname" . }}-secrets
+              key: OBJECT_STORE_ACCESSKEY
+        - name: FASTCLAW_OBJECT_STORE_SECRETKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastclaw.fullname" . }}-secrets
+              key: OBJECT_STORE_SECRETKEY
+        {{- end }}
+        {{- if and .Values.sandbox.enabled .Values.sandbox.e2bApiKey }}
+        - name: E2B_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastclaw.fullname" . }}-secrets
+              key: E2B_API_KEY
+        {{- end }}
         volumeMounts:
         - name: data
           mountPath: /data/.fastclaw
         resources:
           {{- toYaml .Values.gateway.resources | nindent 10 }}
+        # /readyz and /livez bypass auth — they probe reliably both before
+        # and after onboard. Don't switch to /api/status: that path 401s
+        # once onboard is complete.
         readinessProbe:
           httpGet:
-            path: /api/status
-            port: {{ .Values.gateway.port }}
-          initialDelaySeconds: 3
-          periodSeconds: 10
+            path: /readyz
+            port: http
+          periodSeconds: 5
+          failureThreshold: 3
         livenessProbe:
           httpGet:
-            path: /api/status
-            port: {{ .Values.gateway.port }}
-          initialDelaySeconds: 10
+            path: /livez
+            port: http
+          initialDelaySeconds: 30
           periodSeconds: 30
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep {{ .Values.gateway.preStopSleepSeconds }}"]
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
       volumes:
+      # /data/.fastclaw only holds pod-local ephemeral state; workspace
+      # artifacts go to the object store.
       - name: data
         emptyDir: {}
-      - name: config
-        configMap:
-          name: {{ include "fastclaw.fullname" . }}-config
 ---
 apiVersion: v1
 kind: Service
@@ -86,8 +96,54 @@ metadata:
   labels:
     {{- include "fastclaw.labels" . | nindent 4 }}
 spec:
+  type: ClusterIP
   selector:
     app: {{ include "fastclaw.fullname" . }}-gateway
+  # SSE/WS connections must stick to the same pod under multi-replica.
+  # The Ingress already does cookie affinity; ClientIP here is a fallback
+  # for load balancers that hit the Service directly.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
   ports:
   - port: {{ .Values.gateway.port }}
+    targetPort: http
     name: http
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "fastclaw.fullname" . }}-gateway
+  labels:
+    {{- include "fastclaw.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "fastclaw.fullname" . }}-gateway
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if .Values.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "fastclaw.fullname" . }}-gateway
+  labels:
+    {{- include "fastclaw.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: {{ include "fastclaw.fullname" . }}-gateway
+{{- end }}

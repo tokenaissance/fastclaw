@@ -8,14 +8,23 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 )
 
 // chatCompletionRequest mirrors the OpenAI chat completion request.
+//
+// User is OpenAI's standard "end-user identifier" field. When the
+// request authenticates with an api_key, a non-empty value triggers
+// rebinding the request identity to a fastclaw app_user keyed on
+// (apikey_id, user) so sessions and agent_files partition per
+// end-user. Clients that prefer a header-only contract can use
+// X-Fastclaw-End-User instead — both arrive at the same code path.
 type chatCompletionRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
 	Stream   *bool         `json:"stream,omitempty"`
+	User     string        `json:"user,omitempty"`
 }
 
 type chatMessage struct {
@@ -80,6 +89,21 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			"error": map[string]string{"message": "messages is required", "type": "invalid_request_error"},
 		})
 		return
+	}
+
+	// OpenAI's `user` body field, when present on an api_key call,
+	// rebinds the identity to the corresponding app_user (lazy mint).
+	// Header X-Fastclaw-End-User does the same job pre-handler in the
+	// auth middleware; we run this *after* the middleware so the body
+	// value wins iff both are present (the body field is more
+	// specific to this call than a static header). Errors here are
+	// non-fatal — request continues under the unswitched identity.
+	if req.User != "" && s.authResolver != nil {
+		if ident, ok := auth.FromContext(r.Context()); ok {
+			if next, swErr := s.authResolver.SwitchToAppUser(r.Context(), ident, req.User); swErr == nil {
+				r = r.WithContext(auth.WithIdentity(r.Context(), next))
+			}
+		}
 	}
 
 	// Resolve the caller's user space (set by authMiddleware) and pick an

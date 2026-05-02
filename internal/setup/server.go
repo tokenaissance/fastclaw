@@ -13,6 +13,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
+	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -57,6 +58,7 @@ type Server struct {
 	apikeys        *users.APIKeys
 	dataStore      store.Store
 	workspaceStore workspace.Store
+	webChan        *channels.WebChannel
 	usage          usage.Meter
 	startedAt      time.Time
 }
@@ -114,6 +116,15 @@ func (s *Server) SetUsageMeter(m usage.Meter) {
 // SetAuth installs the auth resolver. Required.
 func (s *Server) SetAuth(resolver *auth.Resolver) {
 	s.authResolver = resolver
+}
+
+// SetWebChannel installs the in-process fan-out used by the SSE
+// subscription endpoint. When set, /api/chat/subscribe holds an SSE
+// stream open per (agent, session) pair and forwards every outbound
+// message routed to channel="web" — this is what surfaces cron-fired
+// agent replies live in the dashboard chat panel.
+func (s *Server) SetWebChannel(wc *channels.WebChannel) {
+	s.webChan = wc
 }
 
 // authMiddleware wraps the auth.Resolver's Middleware. Required for every
@@ -177,6 +188,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/chat/sessions", auth(s.handleChatSessions))
 	mux.HandleFunc("PUT /api/chat/sessions/{key}", auth(s.handleRenameSession))
 	mux.HandleFunc("DELETE /api/chat/sessions/{key}", auth(s.handleDeleteSession))
+	// Long-lived SSE subscription so cron-fired (and other async)
+	// messages reach the open chat panel without a manual refresh.
+	mux.HandleFunc("GET /api/chat/subscribe", auth(s.handleChatSubscribe))
 
 	// Agents
 	mux.HandleFunc("GET /api/agents", auth(s.handleListAgents))
@@ -187,6 +201,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("DELETE /api/agents/{id}", auth(s.handleDeleteAgent))
 
 	mux.HandleFunc("GET /api/agents/{id}/files", auth(s.handleAgentFileList))
+	mux.HandleFunc("GET /api/agents/{id}/files.zip", auth(s.handleAgentFilesZip))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
 
@@ -231,11 +246,17 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("PUT /api/scoped-channels/{id}", auth(s.handleUpdateScopedChannel))
 	mux.HandleFunc("DELETE /api/scoped-channels/{id}", auth(s.handleDeleteScopedChannel))
 
-	// Cron jobs (per-user)
+	// Cron jobs (per-user, config-defined catalog)
 	mux.HandleFunc("GET /api/cron", auth(s.handleListCronJobs))
 	mux.HandleFunc("POST /api/cron", auth(s.handleCreateCronJob))
 	mux.HandleFunc("PUT /api/cron/{id}", auth(s.handleUpdateCronJob))
 	mux.HandleFunc("DELETE /api/cron/{id}", auth(s.handleDeleteCronJob))
+
+	// Per-agent cron jobs (DB-backed, includes anything the agent
+	// scheduled itself via create_cron_job at runtime).
+	mux.HandleFunc("GET /api/agents/{id}/cron", auth(s.handleListAgentCronJobs))
+	mux.HandleFunc("DELETE /api/agents/{id}/cron/{jobId}", auth(s.handleDeleteAgentCronJob))
+	mux.HandleFunc("PUT /api/agents/{id}/cron/{jobId}", auth(s.handleToggleAgentCronJob))
 
 	// Tasks
 	mux.HandleFunc("GET /api/tasks", auth(s.handleListTasks))

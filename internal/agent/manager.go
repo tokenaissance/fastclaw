@@ -5,10 +5,12 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
@@ -42,6 +44,7 @@ type managerOpts struct {
 	sessionStore    session.SessionStore
 	memoryStore     MemoryStore
 	workspaceStore  workspace.Store
+	dataStore       store.Store
 	userID          string
 	globalSkillsCfg config.SkillsCfg
 }
@@ -66,6 +69,16 @@ func WithUserID(userID string) ManagerOption {
 // shared storage instead of pod-local filesystem.
 func WithWorkspaceStore(ws workspace.Store) ManagerOption {
 	return func(o *managerOpts) { o.workspaceStore = ws }
+}
+
+// WithDataStore exposes the platform's relational store to agents. The
+// cron tool needs it to persist scheduled jobs that the cron.Scheduler
+// later picks up; without it create_cron_job is omitted from the
+// agent's tool list and time-bound requests fall back to natural-
+// language reminders in HEARTBEAT.md (which only get a lazy 30-minute
+// review and are wrong for short-fuse reminders).
+func WithDataStore(st store.Store) ManagerOption {
+	return func(o *managerOpts) { o.dataStore = st }
 }
 
 // WithGlobalSkillsCfg propagates cfg.Skills (entries + agentEntries
@@ -173,6 +186,13 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// NewAgent pass loaded only the filesystem, missing anything that
 		// lives only in OSS.
 		ag.ReloadWorkspaceFiles()
+	}
+	if m.opts.dataStore != nil {
+		// Cron tools need the relational store to persist scheduled
+		// jobs; the closure also reads channel/chatID off the registry
+		// at execute time (bindSession stamps them per-turn) so the
+		// fired message routes back to the originating chat.
+		tools.RegisterCronTools(ag.registry, m.opts.dataStore, m.uid, rc.ID)
 	}
 	return ag
 }

@@ -219,6 +219,36 @@ func (r *Resolver) ResolveBearer(ctx context.Context, token string) (Identity, e
 	}, nil
 }
 
+// SwitchToAppUser rebinds ident to the app_user associated with
+// (ident.APIKeyID, externalID), minting that row the first time it's
+// seen. APIKeyID + APIKeyAgents are preserved — only UserID and Role
+// flip — so the apikey's agent ACL still gates access. Pass through
+// empty externalID untouched. Only valid for AuthMethod=="apikey";
+// session callers stay as-is.
+func (r *Resolver) SwitchToAppUser(ctx context.Context, ident Identity, externalID string) (Identity, error) {
+	if externalID == "" {
+		return ident, nil
+	}
+	if ident.AuthMethod != "apikey" || ident.APIKeyID == "" {
+		return ident, errors.New("auth.SwitchToAppUser: api_key auth required")
+	}
+	acc, err := r.accounts.EnsureAppUser(ctx, ident.APIKeyID, externalID, "")
+	if err != nil {
+		return ident, err
+	}
+	ident.UserID = acc.ID
+	ident.Role = acc.Role
+	return ident, nil
+}
+
+// EndUserHeader is the per-request header that names the calling app's
+// end-user. When set on an api_key authenticated request, the auth
+// middleware will lazily mint (or look up) a fastclaw user for
+// (apikey, header) and switch the request identity to it. Sessions and
+// agent_files written under that identity then partition cleanly per
+// end-user instead of piling up under the api_key owner.
+const EndUserHeader = "X-Fastclaw-End-User"
+
 // ErrUnauthorized is returned when no valid credential is present.
 var ErrUnauthorized = errors.New("unauthorized")
 
@@ -292,6 +322,18 @@ done:
 	if act := req.URL.Query().Get("actAs"); act != "" {
 		if ident.AuthMethod == "session" && ident.Role == users.RoleSuperAdmin {
 			ident.ActAsUserID = act
+		}
+	}
+	// If the calling app named an end-user via X-Fastclaw-End-User on an
+	// api_key request, rebind to the corresponding app_user (lazy mint).
+	// We swallow errors here so a malformed header can't 401 a request —
+	// the request just stays under the api_key owner. The OpenAI
+	// /v1/chat/completions handler also honors `user` in the request
+	// body for clients that prefer the OpenAI shape; that path calls
+	// SwitchToAppUser explicitly after parsing the body.
+	if eu := strings.TrimSpace(req.Header.Get(EndUserHeader)); eu != "" {
+		if next, swErr := r.SwitchToAppUser(req.Context(), ident, eu); swErr == nil {
+			ident = next
 		}
 	}
 	return ident, nil

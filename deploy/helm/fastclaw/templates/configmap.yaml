@@ -5,42 +5,43 @@ metadata:
   labels:
     {{- include "fastclaw.labels" . | nindent 4 }}
 data:
-  fastclaw.json: |
-    {
-      "providers": {
-        {{- if .Values.provider.name }}
-        "{{ .Values.provider.name }}": {
-          "apiKey": "{{ .Values.provider.apiKey }}",
-          "apiBase": "{{ .Values.provider.apiBase }}"
-        }
-        {{- end }}
-      },
-      "agents": {
-        "defaults": {
-          "model": "gpt-4o",
-          "maxTokens": 8192,
-          "temperature": 0.7,
-          "maxToolIterations": 20
-        },
-        "list": []
-      },
-      "channels": {},
-      "gateway": {
-        "mode": "{{ .Values.gateway.mode }}",
-        "bind": "all",
-        "port": {{ .Values.gateway.port }},
-        "auth": { "mode": "token", "token": "" },
-        "rateLimit": { "rpm": {{ .Values.gateway.rateLimit.rpm }} },
-        "http": {
-          "endpoints": {
-            "chatCompletions": { "enabled": true },
-            "agents": { "enabled": true }
-          }
-        }
-      },
-      "storage": {
-        "type": "postgres",
-        "dsn": "",
-        "autoMigrate": true
-      }
-    }
+  FASTCLAW_PORT: {{ .Values.gateway.port | quote }}
+  FASTCLAW_BIND: "all"
+  FASTCLAW_STORAGE_TYPE: "postgres"
+  FASTCLAW_STORAGE_AUTO_MIGRATE: "true"
+
+  ## Object store
+  FASTCLAW_OBJECT_STORE_TYPE: {{ .Values.objectStore.type | quote }}
+  {{- with .Values.objectStore.bucket }}
+  FASTCLAW_OBJECT_STORE_BUCKET: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.region }}
+  FASTCLAW_OBJECT_STORE_REGION: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.endpoint }}
+  FASTCLAW_OBJECT_STORE_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.accountId }}
+  FASTCLAW_OBJECT_STORE_ACCOUNTID: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.objectStore.prefix }}
+  FASTCLAW_OBJECT_STORE_PREFIX: {{ . | quote }}
+  {{- end }}
+  FASTCLAW_OBJECT_STORE_USESSL: {{ .Values.objectStore.useSSL | quote }}
+  {{- if .Values.objectStore.aliyunInternal }}
+  FASTCLAW_OBJECT_STORE_ALIYUN_INTERNAL: "true"
+  {{- end }}
+
+  ## Sandbox
+  {{- if .Values.sandbox.enabled }}
+  FASTCLAW_SANDBOX_BACKEND: {{ .Values.sandbox.backend | quote }}
+  {{- with .Values.sandbox.image }}
+  FASTCLAW_SANDBOX_IMAGE: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+
+  {{- with .Values.extraEnv }}
+  {{- range $k, $v := . }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  {{- end }}

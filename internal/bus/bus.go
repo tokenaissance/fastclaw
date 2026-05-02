@@ -41,6 +41,7 @@ type MediaItem struct {
 type OutboundMessage struct {
 	Channel      string             // target channel type
 	AccountID    string             // target account within the channel
+	AgentID      string             // originating agent — used by the WebChannel to route SSE events to the right (agent, session) pair; harmless for IM channels (which key on AccountID).
 	ChatID       string             // target chat identifier
 	Text         string             // message text
 	ReplyToMsgID string             // reply to specific message

@@ -52,6 +52,7 @@ Click an agent to enter its management panel:
 - **Skills** — Agent-private skills
 - **Models** — Agent-specific provider + model overrides (shadow system entries by name; agent-scope `agents.defaults.model` overrides the system default)
 - **Channels** — Connect IM bots (Telegram, Discord, Slack) so end-users can chat with the agent on their platform of choice
+- **Scheduler** — Inspect and manage cron jobs the agent created via `create_cron_job` ("每天 9 点提醒我", "5 分钟后叫我"); pause / delete from the UI
 - **Sessions** — Conversation history
 
 ## Architecture
@@ -124,11 +125,14 @@ Click an agent to enter its management panel:
 ### API
 - OpenAI-compatible `/v1/chat/completions` (streaming)
 - Web chat `/api/chat/stream` (SSE)
+- Live agent push via `/api/chat/subscribe` (SSE) — surfaces cron-fired and other async replies into the open chat panel without a refresh
 - Session management `/api/chat/sessions`
 - Agent CRUD `/api/agents`
+- Per-agent scheduler `/api/agents/{id}/cron` (list / toggle / delete)
 - Provider management `/api/config`
 - Skill install `/api/skills/install` (ClawHub + GitHub)
 - API key management `/v1/admin/apikeys`
+- App-user provisioning `POST /v1/users` — third-party apps mint a stable fastclaw user_id per end-user, idempotent on `(api_key, external_id)`. Or pass `user` on `/v1/chat/completions` (or `X-Fastclaw-End-User` header) for lazy mint on first call
 
 ## Configuration
 

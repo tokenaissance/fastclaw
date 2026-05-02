@@ -1,19 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 
 // Static-export only generates /agents/default/..., so useParams() always
 // returns "default" when an app is served for a non-default agent via the
-// Go spaHandler fallback. Read the real id from window.location on the
-// client, fall back to useParams() for the initial SSR/prerender pass.
+// Go spaHandler fallback. Parse the real id from the *reactive* pathname
+// instead — usePathname() updates on every client navigation, so callers
+// see the new id immediately when the user switches agents (otherwise
+// background fetches keep firing against the old id and the chat panel
+// shows the wrong history).
 export function useAgentIdFromURL(): string {
+  const pathname = usePathname();
   const params = useParams<{ id: string }>();
-  const fallback = params?.id ?? "default";
-  const [id, setId] = useState<string>(fallback);
-  useEffect(() => {
-    const m = window.location.pathname.match(/\/agents\/([^/]+)\//);
-    if (m && m[1] !== id) setId(m[1]);
-  }, [id]);
-  return id;
+  const m = pathname?.match(/\/agents\/([^/]+)\//);
+  if (m) return m[1];
+  return params?.id ?? "default";
 }

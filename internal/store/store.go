@@ -28,6 +28,7 @@ type Store interface {
 	CreateUser(ctx context.Context, u *UserRecord) error
 	GetUser(ctx context.Context, id string) (*UserRecord, error)
 	GetUserByLogin(ctx context.Context, usernameOrEmail string) (*UserRecord, error)
+	GetUserByExternal(ctx context.Context, apikeyID, externalID string) (*UserRecord, error)
 	ListUsers(ctx context.Context) ([]UserRecord, error)
 	UpdateUser(ctx context.Context, u *UserRecord) error
 	DeleteUser(ctx context.Context, id string) error
@@ -73,7 +74,11 @@ type Store interface {
 	// Customize page), user_id=u_xxx is that user's personal override.
 	// Read picks user-specific over template via fallback; write hits
 	// the (agentID, userID, filename) row exactly.
+	// GetAgentFile prefers the caller's own row, falling back to the
+	// agent owner's row. Use GetAgentFileExact for a strict (agent,
+	// user, filename) lookup that bypasses the overlay.
 	GetAgentFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
+	GetAgentFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	SaveAgentFile(ctx context.Context, agentID, userID, filename string, data []byte) error
 	DeleteAgentFile(ctx context.Context, agentID, userID, filename string) error
 	ListAgentFiles(ctx context.Context, agentID, userID string) ([]string, error)
@@ -116,14 +121,23 @@ type Store interface {
 }
 
 // UserRecord is one row of the users table.
+//
+// Roles: "super_admin" | "user" are first-party humans who log in via
+// password / token. "app_user" is provisioned by an api_key on behalf of
+// a downstream application; for these rows APIKeyID identifies the key
+// that minted them and ExternalID is the calling app's own user
+// identifier (free-form). Together they give each external end-user a
+// stable fastclaw user_id without anyone logging in.
 type UserRecord struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`
 	Email        string    `json:"email"`
 	PasswordHash string    `json:"-"`
 	DisplayName  string    `json:"displayName,omitempty"`
-	Role         string    `json:"role"`   // "super_admin" | "user"
+	Role         string    `json:"role"`   // "super_admin" | "user" | "app_user"
 	Status       string    `json:"status"` // "active" | "disabled"
+	APIKeyID     string    `json:"apikeyId,omitempty"`
+	ExternalID   string    `json:"externalId,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 }

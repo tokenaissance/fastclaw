@@ -1,8 +1,10 @@
 package setup
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -169,6 +171,30 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 	return rec
 }
 
+// requireAgentReadable allows access when the caller is the owner OR the
+// caller's identity is granted access via the apikey ACL (CanAccessAgent).
+// This is the same gate /api/chat/history uses, so app_user requests
+// proxied through an integration with X-Fastclaw-End-User can read agent
+// artifacts (files, file list, zip) for sessions they own without
+// 403'ing on the strict ownership check.
+func (s *Server) requireAgentReadable(w http.ResponseWriter, r *http.Request, agentID string) bool {
+	rec, err := s.dataStore.GetAgent(r.Context(), agentID)
+	if err != nil || rec == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
+		return false
+	}
+	uid := s.effectiveUserID(r)
+	ident, _ := auth.FromContext(r.Context())
+	if rec.UserID == uid || ident.Role == users.RoleSuperAdmin {
+		return true
+	}
+	if ident.CanAccessAgent(agentID) {
+		return true
+	}
+	jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
+	return false
+}
+
 func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWritable(w, r) {
 		return
@@ -309,7 +335,7 @@ func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "filename not allowed"})
 		return
 	}
-	data, err := s.dataStore.GetAgentFile(r.Context(), id, s.systemFileUserScope(r), name)
+	data, err := s.dataStore.GetAgentFileExact(r.Context(), id, s.systemFileUserScope(r), name)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			jsonResponse(w, http.StatusOK, map[string]any{"content": ""})
@@ -381,23 +407,102 @@ func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{"files": []any{}})
 		return
 	}
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
+	// Always List with sessionID="" so returned paths stay agent-relative
+	// (e.g. "sessions/<sid>/foo.png") — the download endpoint expects that
+	// shape, and filtering here is cheaper than two divergent code paths.
 	objects, err := s.workspaceStore.List(r.Context(), id, "")
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+	var prefix string
+	if sessionID != "" {
+		prefix = "sessions/" + sessionID + "/"
+	}
 	files := make([]map[string]any, 0, len(objects))
 	for _, o := range objects {
+		if prefix != "" && !strings.HasPrefix(o.Path, prefix) {
+			continue
+		}
 		files = append(files, map[string]any{
-			"name": o.Path,
-			"size": o.Size,
-			"mod":  o.ModTime,
+			"path":    o.Path,
+			"size":    o.Size,
+			"modTime": o.ModTime.Unix(),
 		})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"files": files})
+}
+
+// handleAgentFilesZip streams a zip of every workspace file for the agent
+// (or just one session when ?sessionId= is set). Files are added with
+// their session-relative path so the archive layout matches what the user
+// sees in the chat panel — no enclosing wrapper directory.
+func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.workspaceStore == nil {
+		http.Error(w, "no workspace store", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.requireAgentReadable(w, r, id) {
+		return
+	}
+	objects, err := s.workspaceStore.List(r.Context(), id, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+	var prefix, archiveName string
+	if sessionID != "" {
+		prefix = "sessions/" + sessionID + "/"
+		archiveName = fmt.Sprintf("%s-%s.zip", id, sessionID)
+	} else {
+		archiveName = fmt.Sprintf("%s.zip", id)
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
+
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+
+	for _, o := range objects {
+		if prefix != "" && !strings.HasPrefix(o.Path, prefix) {
+			continue
+		}
+		entryName := o.Path
+		if prefix != "" {
+			entryName = strings.TrimPrefix(o.Path, prefix)
+		}
+		if entryName == "" {
+			continue
+		}
+		hdr := &zip.FileHeader{
+			Name:     entryName,
+			Method:   zip.Deflate,
+			Modified: o.ModTime,
+		}
+		entry, err := zw.CreateHeader(hdr)
+		if err != nil {
+			slog.Warn("zip: create entry failed", "agent", id, "path", o.Path, "err", err)
+			return
+		}
+		rc, err := s.workspaceStore.Get(r.Context(), id, "", o.Path)
+		if err != nil {
+			slog.Warn("zip: open object failed", "agent", id, "path", o.Path, "err", err)
+			continue
+		}
+		_, copyErr := io.Copy(entry, rc)
+		rc.Close()
+		if copyErr != nil {
+			slog.Warn("zip: copy failed", "agent", id, "path", o.Path, "err", copyErr)
+			return
+		}
+	}
 }
 
 func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
@@ -407,7 +512,7 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "path required"})
 		return
 	}
-	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
 	if s.workspaceStore != nil {

@@ -210,6 +210,20 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	// app_user accounts are programmatically provisioned by api_keys on
+	// behalf of downstream end-users — they're not humans the admin
+	// manages, and their volume can be very large. Hide them by default;
+	// admins that need to audit them can pass ?includeAppUsers=1.
+	if r.URL.Query().Get("includeAppUsers") != "1" {
+		filtered := make([]*users.Account, 0, len(list))
+		for _, u := range list {
+			if u.Role == users.RoleAppUser {
+				continue
+			}
+			filtered = append(filtered, u)
+		}
+		list = filtered
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{"users": list})
 }
 

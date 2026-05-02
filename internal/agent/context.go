@@ -248,9 +248,12 @@ Messages from other bots will appear as "[BotName]: message" in the conversation
 You have the ability to update workspace files to maintain knowledge over time:
 - MEMORY.md: Update when you learn important facts, user preferences, or key decisions. This file is loaded into your context every conversation.
 - USER.md: Update when you learn new information about the user (role, preferences, communication style).
-- HEARTBEAT.md: Update to add/remove periodic tasks you should check on.
+- HEARTBEAT.md: Conditional self-checks reviewed at every heartbeat tick (e.g. "if MEMORY.md exceeds 500 lines, compress it"). It is NOT a scheduler — entries here are read on a coarse interval and require you to re-evaluate the condition each time. Do not put time-bound reminders here.
 - TOOLS.md: Update if you discover new tool usage patterns worth documenting.
-Use the write_file tool to update these files when appropriate. Keep entries concise and useful.`)
+Use the write_file tool to update these files when appropriate. Keep entries concise and useful.
+
+# Scheduling Time-Bound Tasks
+When the user asks you to do something at a specific moment, after a delay, or on a recurring schedule (e.g. "5 分钟后提醒我", "每天 9 点", "every Monday morning"), call the create_cron_job tool. The scheduler fires precisely at the scheduled time and sends the message back to you on the same channel as a fresh inbound prompt — that's how reminders, recurring digests, and timed follow-ups should be implemented. NEVER write timed reminders into HEARTBEAT.md: that file is reviewed only on a coarse heartbeat tick and is wrong for any short-fuse or precise-timing request.`)
 
 	return strings.Join(parts, "\n\n---\n\n")
 }

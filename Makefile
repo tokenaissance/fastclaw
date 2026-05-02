@@ -5,6 +5,12 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE    ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS  = -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
+# Install destination. Default is the per-user XDG-style bin so a plain
+# `make install` doesn't need sudo. Override with e.g.
+#   make install PREFIX=/usr/local        (system-wide; needs sudo)
+#   make install PREFIX=/opt/homebrew     (Apple Silicon brew layout)
+PREFIX ?= $(HOME)/.local
+
 build-web:
 	cd web && pnpm install --frozen-lockfile && pnpm build
 	rm -rf internal/setup/web
@@ -14,7 +20,14 @@ build: build-web
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/fastclaw ./cmd/fastclaw
 
 install: build
-	cp bin/fastclaw /usr/local/bin/fastclaw
+	install -d $(PREFIX)/bin
+	install -m 0755 bin/fastclaw $(PREFIX)/bin/fastclaw
+	@echo
+	@echo "==> installed: $(PREFIX)/bin/fastclaw"
+	@case ":$$PATH:" in *":$(PREFIX)/bin:"*) ;; *) \
+	  echo "    NOTE: $(PREFIX)/bin is not on your PATH."; \
+	  echo "    Add to ~/.zshrc:  export PATH=\"$(PREFIX)/bin:\$$PATH\"" ;; \
+	esac
 
 test:
 	go test ./...

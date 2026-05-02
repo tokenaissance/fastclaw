@@ -21,11 +21,17 @@ import (
 )
 
 // Roles. super_admin can manage every user/agent/provider on the platform;
-// user can only touch their own resources. There is intentionally no
-// fine-grained scheme — anything more complex lives in the apikey ACL layer.
+// user can only touch their own resources. app_user is provisioned by an
+// api_key on behalf of a downstream application — these accounts have no
+// password and cannot log in via dashboard or password endpoints; they
+// exist purely to give external end-users a stable fastclaw user_id so
+// sessions / agent_files / scope=user configs partition cleanly per
+// end-user. There is intentionally no fine-grained scheme — anything
+// more complex lives in the apikey ACL layer.
 const (
 	RoleSuperAdmin = "super_admin"
 	RoleUser       = "user"
+	RoleAppUser    = "app_user"
 )
 
 // Statuses.
@@ -48,6 +54,8 @@ type Account struct {
 	DisplayName string    `json:"displayName,omitempty"`
 	Role        string    `json:"role"`
 	Status      string    `json:"status"`
+	APIKeyID    string    `json:"apikeyId,omitempty"`
+	ExternalID  string    `json:"externalId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -130,6 +138,14 @@ func (a *Accounts) Authenticate(ctx context.Context, login, password string) (*A
 	if rec.Status != StatusActive {
 		return nil, ErrInvalidCredentials
 	}
+	// app_user accounts (and any other row provisioned without a real
+	// password) carry an empty hash. bcrypt.CompareHashAndPassword
+	// would still fail-closed, but checking explicitly keeps the
+	// failure mode unambiguous and avoids burning bcrypt cycles on
+	// every probe.
+	if rec.PasswordHash == "" || rec.Role == RoleAppUser {
+		return nil, ErrInvalidCredentials
+	}
 	if err := bcrypt.CompareHashAndPassword([]byte(rec.PasswordHash), []byte(password)); err != nil {
 		return nil, ErrInvalidCredentials
 	}
@@ -204,6 +220,58 @@ func (a *Accounts) SetPassword(ctx context.Context, id, newPassword string) erro
 	return a.store.UpdateUser(ctx, rec)
 }
 
+// EnsureAppUser returns the fastclaw user representing (apikeyID, externalID),
+// creating one with role=app_user the first time it's seen. Idempotent:
+// later calls with the same pair return the existing row. The caller is
+// expected to be the api_key owner — Mint does not authenticate, that's
+// the auth middleware's job. Username/email are synthesized from the
+// pair and namespaced ("ext:<apikeyID>:<externalID>") so they don't
+// collide with real human signups but still satisfy the UNIQUE
+// constraints on those columns.
+func (a *Accounts) EnsureAppUser(ctx context.Context, apikeyID, externalID, displayName string) (*Account, error) {
+	apikeyID = strings.TrimSpace(apikeyID)
+	externalID = strings.TrimSpace(externalID)
+	if apikeyID == "" || externalID == "" {
+		return nil, errors.New("users.EnsureAppUser: apikeyID and externalID are required")
+	}
+	// Fast path — already provisioned.
+	if rec, err := a.store.GetUserByExternal(ctx, apikeyID, externalID); err == nil {
+		return toAccount(rec), nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	id, err := newID("u_")
+	if err != nil {
+		return nil, err
+	}
+	// Synthesize unique username/email tokens. The downstream app
+	// is the source of truth for the human-readable identity; we
+	// only need *something* unique to satisfy the schema.
+	syn := apikeyID + ":" + externalID
+	rec := &store.UserRecord{
+		ID:           id,
+		Username:     "ext:" + syn,
+		Email:        syn + "@external.fastclaw.local",
+		PasswordHash: "",
+		DisplayName:  displayName,
+		Role:         RoleAppUser,
+		Status:       StatusActive,
+		APIKeyID:     apikeyID,
+		ExternalID:   externalID,
+	}
+	if err := a.store.CreateUser(ctx, rec); err != nil {
+		// Race: another concurrent request minted the same pair
+		// between our GetUserByExternal and CreateUser. Re-read
+		// and return that row instead of bubbling the unique
+		// violation up to the caller.
+		if again, qerr := a.store.GetUserByExternal(ctx, apikeyID, externalID); qerr == nil {
+			return toAccount(again), nil
+		}
+		return nil, err
+	}
+	return toAccount(rec), nil
+}
+
 // Delete removes an account and its owned rows (cascade implemented in the
 // store). Refuses to drop the last super_admin so the install doesn't lock
 // itself out.
@@ -241,6 +309,8 @@ func toAccount(r *store.UserRecord) *Account {
 		DisplayName: r.DisplayName,
 		Role:        r.Role,
 		Status:      r.Status,
+		APIKeyID:    r.APIKeyID,
+		ExternalID:  r.ExternalID,
 		CreatedAt:   r.CreatedAt,
 		UpdatedAt:   r.UpdatedAt,
 	}

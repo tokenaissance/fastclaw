@@ -22,32 +22,39 @@ type deleteCronJobArgs struct {
 }
 
 // RegisterCronTools registers cron job management tools.
-func RegisterCronTools(r *Registry, st store.Store, userID, agentID, channel, chatID string) {
+//
+// Channel + chatID for the originating turn are read from the registry
+// at execute time via r.MessageChannel() / r.MessageChatID() so a single
+// registration at agent construction handles every chat context the
+// agent runs in. The agent loop's bindSession stamps the per-turn
+// values onto the registry before any tool fires.
+func RegisterCronTools(r *Registry, st store.Store, userID, agentID string) {
 	r.Register("create_cron_job",
-		"Create a scheduled task. The task will run at the specified schedule and send the message to the current channel.",
+		"Create a scheduled task. Use this for any user request that names a specific time, an interval, or a recurring schedule (e.g. \"5 分钟后提醒\", \"every Monday 9am\", \"each day at 8\"). When the schedule fires, the agent receives `message` as a fresh inbound prompt on the same channel the request originated from. Do NOT write timed reminders into HEARTBEAT.md — that file is only for conditional self-checks reviewed at every heartbeat tick.",
 		map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"name": map[string]interface{}{
 					"type":        "string",
-					"description": "Task name",
+					"description": "Short task name (for listing / debugging).",
 				},
 				"schedule": map[string]interface{}{
 					"type":        "string",
-					"description": "Cron expression like '0 9 * * *', interval like 'every 30m', or one-time ISO datetime",
+					"description": "When to fire. For type='cron': a 5-field cron expression like '0 9 * * *'. For type='interval': a duration like '5m' / '30m' / '2h'. For type='once': an ISO-8601 datetime in UTC like '2026-05-02T15:56:52'.",
 				},
 				"message": map[string]interface{}{
 					"type":        "string",
-					"description": "The prompt/message to send to the agent when triggered",
+					"description": "The prompt the agent should receive when the schedule fires. Phrase it as instructions to yourself (e.g. \"提醒小m喝水\"), not as a user-facing message — the agent will compose the user reply when it processes the inbound.",
 				},
 				"type": map[string]interface{}{
 					"type":        "string",
-					"description": "Schedule type: 'cron' (default), 'interval', 'once'",
+					"description": "Schedule type. Use 'once' for one-shot reminders ('5 分钟后…'), 'cron' for calendar-style recurring schedules ('每天 9 点'), or 'interval' for fixed-period polling ('每 30 分钟检查一次'). Defaults to 'cron'.",
+					"enum":        []string{"cron", "interval", "once"},
 				},
 			},
 			"required": []string{"name", "schedule", "message"},
 		},
-		makeCreateCronJob(st, userID, agentID, channel, chatID),
+		makeCreateCronJob(st, r, userID, agentID),
 	)
 
 	r.Register("list_cron_jobs",
@@ -75,7 +82,7 @@ func RegisterCronTools(r *Registry, st store.Store, userID, agentID, channel, ch
 	)
 }
 
-func makeCreateCronJob(st store.Store, userID, agentID, channel, chatID string) ToolFunc {
+func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args createCronJobArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -88,6 +95,12 @@ func makeCreateCronJob(st store.Store, userID, agentID, channel, chatID string) 
 		if jobType == "" {
 			jobType = "cron"
 		}
+
+		// Read the originating bus address at execute time — bindSession
+		// stamps it on every turn, so this captures the channel/chatID
+		// the user was on when they asked for the reminder.
+		channel := r.MessageChannel()
+		chatID := r.MessageChatID()
 
 		id := generateUUID()
 		now := time.Now()

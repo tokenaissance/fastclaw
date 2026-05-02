@@ -26,8 +26,18 @@ func NewDBStore(dialect, dsn string) (*DBStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dialect, err)
 	}
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
+	// SQLite serializes all writes through a single global lock; granting
+	// 25 parallel connections makes the userland queue *deeper* without
+	// adding throughput, and on a busy install (cron scheduler + web
+	// traffic) it quickly stacks up SQLITE_BUSY past the busy_timeout.
+	// Postgres handles real concurrency, so we keep the wider pool there.
+	if dialect == "sqlite" {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	} else {
+		db.SetMaxOpenConns(25)
+		db.SetMaxIdleConns(5)
+	}
 	db.SetConnMaxLifetime(5 * time.Minute)
 	if err := db.Ping(); err != nil {
 		db.Close()
@@ -70,6 +80,46 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	}
 	if err := d.migrateAgentFilesDropTemplate(ctx); err != nil {
 		return fmt.Errorf("migrate agent_files drop template: %w", err)
+	}
+	if err := d.migrateUsersAppUserCols(ctx); err != nil {
+		return fmt.Errorf("migrate users app_user cols: %w", err)
+	}
+	return nil
+}
+
+// migrateUsersAppUserCols retrofits the apikey_id + external_id columns
+// onto the users table for existing installs, and creates the partial
+// unique index used for idempotent provisioning. CREATE TABLE only fires
+// on a fresh DB; older databases reach this with the legacy 7-column
+// users table and exit it with the new 9-column shape. Idempotent: each
+// step probes for existing state before mutating.
+func (d *DBStore) migrateUsersAppUserCols(ctx context.Context) error {
+	hasAPIKey, err := d.tableHasColumn(ctx, "users", "apikey_id")
+	if err != nil {
+		return err
+	}
+	if !hasAPIKey {
+		if _, err := d.db.ExecContext(ctx,
+			`ALTER TABLE users ADD COLUMN apikey_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add apikey_id: %w", err)
+		}
+	}
+	hasExt, err := d.tableHasColumn(ctx, "users", "external_id")
+	if err != nil {
+		return err
+	}
+	if !hasExt {
+		if _, err := d.db.ExecContext(ctx,
+			`ALTER TABLE users ADD COLUMN external_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add external_id: %w", err)
+		}
+	}
+	// CREATE UNIQUE INDEX IF NOT EXISTS is supported by both backends.
+	if _, err := d.db.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apikey_external
+			ON users (apikey_id, external_id)
+			WHERE apikey_id <> '' AND external_id <> ''`); err != nil {
+		return fmt.Errorf("create idx_users_apikey_external: %w", err)
 	}
 	return nil
 }
@@ -393,17 +443,33 @@ func (d *DBStore) tableHasColumn(ctx context.Context, table, column string) (boo
 
 func (d *DBStore) migrationSQL() []string {
 	return []string{
+		// users holds first-party humans (role=super_admin/user) AND
+		// app-provisioned end-users (role=app_user). The latter are
+		// minted by an api_key on behalf of a downstream application;
+		// they cannot log in (password_hash='' is rejected by the
+		// password login path). apikey_id + external_id together
+		// identify "which calling app, which of its end-users", and
+		// the partial UNIQUE makes provisioning idempotent on that
+		// pair so the same external user always resolves to the same
+		// fastclaw user_id.
 		`CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
 			email TEXT NOT NULL UNIQUE,
-			password_hash TEXT NOT NULL,
+			password_hash TEXT NOT NULL DEFAULT '',
 			display_name TEXT NOT NULL DEFAULT '',
 			role TEXT NOT NULL DEFAULT 'user',
 			status TEXT NOT NULL DEFAULT 'active',
+			apikey_id TEXT NOT NULL DEFAULT '',
+			external_id TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// Idempotency lookup for app_user provisioning lives in
+		// migrateUsersAppUserCols, not here — on existing installs the
+		// CREATE TABLE above is a no-op and the apikey_id column
+		// doesn't exist yet, so the index has to wait until the
+		// column-add step has run.
 		`CREATE TABLE IF NOT EXISTS web_sessions (
 			sid TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
@@ -527,6 +593,18 @@ func scanErr(err error) error {
 
 // --- Users ---
 
+// userColumns is the canonical select list — keep ordering aligned with
+// the Scan calls below so adding a column means editing both lines.
+const userColumns = `id, username, email, password_hash, display_name, role, status, apikey_id, external_id, created_at, updated_at`
+
+func scanUser(scanner interface{ Scan(dest ...any) error }) (*UserRecord, error) {
+	var u UserRecord
+	if err := scanner.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.APIKeyID, &u.ExternalID, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 func (d *DBStore) CreateUser(ctx context.Context, u *UserRecord) error {
 	now := time.Now().UTC()
 	if u.CreatedAt.IsZero() {
@@ -534,53 +612,67 @@ func (d *DBStore) CreateUser(ctx context.Context, u *UserRecord) error {
 	}
 	u.UpdatedAt = now
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO users (id, username, email, password_hash, display_name, role, status, created_at, updated_at)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9)),
-		u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.CreatedAt, u.UpdatedAt)
+		fmt.Sprintf(`INSERT INTO users (id, username, email, password_hash, display_name, role, status, apikey_id, external_id, created_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11)),
+		u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.APIKeyID, u.ExternalID, u.CreatedAt, u.UpdatedAt)
 	return err
 }
 
 func (d *DBStore) GetUser(ctx context.Context, id string) (*UserRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT id, username, email, password_hash, display_name, role, status, created_at, updated_at
-			FROM users WHERE id = %s`, d.ph(1)), id)
-	var u UserRecord
-	err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+		fmt.Sprintf(`SELECT `+userColumns+` FROM users WHERE id = %s`, d.ph(1)), id)
+	u, err := scanUser(row)
 	if err != nil {
 		return nil, scanErr(err)
 	}
-	return &u, nil
+	return u, nil
 }
 
 func (d *DBStore) GetUserByLogin(ctx context.Context, usernameOrEmail string) (*UserRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT id, username, email, password_hash, display_name, role, status, created_at, updated_at
-			FROM users WHERE username = %s OR email = %s LIMIT 1`, d.ph(1), d.ph(2)),
+		fmt.Sprintf(`SELECT `+userColumns+` FROM users WHERE username = %s OR email = %s LIMIT 1`, d.ph(1), d.ph(2)),
 		usernameOrEmail, usernameOrEmail)
-	var u UserRecord
-	err := row.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt)
+	u, err := scanUser(row)
 	if err != nil {
 		return nil, scanErr(err)
 	}
-	return &u, nil
+	return u, nil
+}
+
+// GetUserByExternal looks up an app_user by (apikey_id, external_id).
+// Returns ErrNotFound when nothing matches — used by the lazy-mint
+// flow on api_key chat calls and by the explicit provisioning endpoint
+// to make creation idempotent on re-entry.
+func (d *DBStore) GetUserByExternal(ctx context.Context, apikeyID, externalID string) (*UserRecord, error) {
+	if apikeyID == "" || externalID == "" {
+		return nil, ErrNotFound
+	}
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+userColumns+` FROM users WHERE apikey_id = %s AND external_id = %s LIMIT 1`,
+			d.ph(1), d.ph(2)),
+		apikeyID, externalID)
+	u, err := scanUser(row)
+	if err != nil {
+		return nil, scanErr(err)
+	}
+	return u, nil
 }
 
 func (d *DBStore) ListUsers(ctx context.Context) ([]UserRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		`SELECT id, username, email, password_hash, display_name, role, status, created_at, updated_at
-			FROM users ORDER BY created_at`)
+		`SELECT `+userColumns+` FROM users ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []UserRecord
 	for rows.Next() {
-		var u UserRecord
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, u)
+		out = append(out, *u)
 	}
 	return out, rows.Err()
 }
@@ -1020,19 +1112,59 @@ func (d *DBStore) RenameSession(ctx context.Context, userID, agentID, sessionKey
 //
 // SOUL.md / IDENTITY.md / MEMORY.md / AGENTS.md / BOOTSTRAP.md / etc.
 // Keyed on (agent_id, user_id, filename). Every row carries a real
-// user_id — there is no shared template row. A user with no override
-// for a given (agent_id, filename) gets nothing back; the agent runtime
-// optionally falls through to a local FS file at <agent_home>/<name>
-// for installs that want a global default for an agent.
+// user_id — there is no shared template row.
+//
+// Read path: prefer the caller's own row; fall back to the agent
+// owner's row when the caller has no override. This lets non-owner
+// callers (other humans the agent is shared with, or app_user accounts
+// minted on behalf of a downstream app's end-users) inherit the
+// owner's customized SOUL.md / IDENTITY.md while still being able to
+// fork their own MEMORY.md / USER.md by saving — saves always go to
+// the caller's exact row, never the owner's. The runtime additionally
+// falls through to a local FS file at <agent_home>/<name> for installs
+// that want a global default for an agent.
 
-// GetAgentFile returns the (agent_id, user_id, filename) row exactly.
-// userID is required — there is no shared template fallback.
+// GetAgentFile returns the file for (agent_id, filename), preferring
+// the caller's own row and falling back to the agent owner's row.
+// userID is required.
 func (d *DBStore) GetAgentFile(ctx context.Context, agentID, userID, filename string) ([]byte, error) {
 	if agentID == "" {
 		return nil, errors.New("store: GetAgentFile requires agent_id")
 	}
 	if userID == "" {
 		return nil, errors.New("store: GetAgentFile requires user_id")
+	}
+	// Single round-trip: pick caller's row if present (sort key 0),
+	// else owner's (sort key 1). LIMIT 1 returns the winning row.
+	// The subselect resolves the agent's owner; if the agent is gone
+	// it just produces NULL and the IN ignores it — caller's row is
+	// still returned when present, otherwise NoRows.
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT content FROM agent_files
+			WHERE agent_id = %s AND filename = %s
+			  AND user_id IN (%s, COALESCE((SELECT user_id FROM agents WHERE id = %s), ''))
+			ORDER BY CASE WHEN user_id = %s THEN 0 ELSE 1 END
+			LIMIT 1`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
+		agentID, filename, userID, agentID, userID)
+	var content string
+	if err := row.Scan(&content); err != nil {
+		return nil, scanErr(err)
+	}
+	return []byte(content), nil
+}
+
+// GetAgentFileExact bypasses the owner-fallback overlay and returns
+// only the (agent_id, user_id, filename) row, or ErrNotFound. Used
+// when a caller explicitly needs to know whether *their own* override
+// row exists (e.g. a Customize page that distinguishes "you've
+// authored an override" from "you're seeing the owner's content").
+func (d *DBStore) GetAgentFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error) {
+	if agentID == "" {
+		return nil, errors.New("store: GetAgentFileExact requires agent_id")
+	}
+	if userID == "" {
+		return nil, errors.New("store: GetAgentFileExact requires user_id")
 	}
 	row := d.db.QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT content FROM agent_files

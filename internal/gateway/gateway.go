@@ -105,6 +105,7 @@ type Gateway struct {
 	bus        *bus.MessageBus
 	users      *userSpaceRegistry
 	chanMgr    *channels.Manager
+	webChan    *channels.WebChannel
 	scheduler  *cron.Scheduler
 	webhookSrv *webhook.Server
 	pluginMgr  *plugin.Manager
@@ -116,6 +117,11 @@ type Gateway struct {
 	mu         sync.RWMutex
 	dedup      sync.Map
 }
+
+// WebChannel returns the in-process fan-out for web SSE subscribers.
+// Used by the setup server to register chat-stream subscribers so cron-
+// fired (and other async) outbound messages reach live dashboard tabs.
+func (g *Gateway) WebChannel() *channels.WebChannel { return g.webChan }
 
 // Workspace returns the durable artifact store.
 func (g *Gateway) Workspace() workspace.Store { return g.workspace }
@@ -184,6 +190,12 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	})
 
 	chanMgr := channels.NewManager(mb)
+	// Always-on web channel: routes cron-fired (and any other
+	// async-emitted) outbound messages to the dashboard's SSE
+	// subscribers so the user sees the agent's reply live instead of
+	// only on the next page reload.
+	webChan := channels.NewWebChannel()
+	chanMgr.Register(webChan)
 
 	// Cron scheduler reads jobs directly from the DB on each tick — no
 	// in-memory job list, no fastclaw.json copy. Each fired job carries
@@ -232,6 +244,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		usage:      meter,
 		users:      newUserSpaceRegistry(mb, st, ws),
 		chanMgr:    chanMgr,
+		webChan:    webChan,
 		scheduler:  scheduler,
 		webhookSrv: webhookSrv,
 		pluginMgr:  pluginMgr,
@@ -345,6 +358,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		out := bus.OutboundMessage{
 			Channel:      task.Message.Channel,
 			AccountID:    task.AccountID,
+			AgentID:      task.AgentID,
 			ChatID:       task.Message.ChatID,
 			Text:         text,
 			ReplyToMsgID: task.Message.MessageID,
@@ -570,22 +584,22 @@ func readSystemTaskQueue(st store.Store) config.TaskQueueCfg {
 // with kind="setting". Adding a new namespace is a one-line append; the
 // scope.Setting / SettingInto helpers handle merging across scopes.
 const (
-	NSAgentDefaults = "agents.defaults"
-	NSSandbox       = "sandbox"
-	NSObjectStore   = "objectstore"
-	NSHooks         = "hooks"
-	NSPlugins       = "plugins"
-	NSTaskQueue     = "taskqueue"
-	NSToolProviders = "tools.providers"
+	NSAgentDefaults  = "agents.defaults"
+	NSSandbox        = "sandbox"
+	NSObjectStore    = "objectstore"
+	NSHooks          = "hooks"
+	NSPlugins        = "plugins"
+	NSTaskQueue      = "taskqueue"
+	NSToolProviders  = "tools.providers"
 	NSToolCategories = "tools.categories"
-	NSSkillsInstall = "skills.install"
-	NSSkillsEntries = "skills.entries"
-	NSMemory        = "memory"
-	NSPrivacy       = "privacy"
-	NSSkillsLearner = "skillsLearner"
-	NSHeartbeat     = "heartbeat"
-	NSTeams         = "teams"
-	NSBindings      = "bindings"
+	NSSkillsInstall  = "skills.install"
+	NSSkillsEntries  = "skills.entries"
+	NSMemory         = "memory"
+	NSPrivacy        = "privacy"
+	NSSkillsLearner  = "skillsLearner"
+	NSHeartbeat      = "heartbeat"
+	NSTeams          = "teams"
+	NSBindings       = "bindings"
 )
 
 // registerChannelsFromStore loads every enabled kind="channel" row from

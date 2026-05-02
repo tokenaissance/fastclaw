@@ -22,7 +22,19 @@ func New(cfg *StorageConfig, homeDir string) (Store, error) {
 			if err := os.MkdirAll(homeDir, 0o755); err != nil {
 				return nil, fmt.Errorf("create %s: %w", homeDir, err)
 			}
-			dsn = "file:" + filepath.Join(homeDir, "fastclaw.db") + "?_journal=WAL&_fk=1"
+			// modernc.org/sqlite reads PRAGMA settings from `_pragma=`
+			// query params; the legacy `_journal=WAL` form was silently
+			// ignored, so the file was running in default rollback-journal
+			// mode where any writer blocks every other connection. Under
+			// load (cron scheduler firing while web traffic comes in) we
+			// saw "database is locked (SQLITE_BUSY)" — fixed by enabling
+			// WAL (concurrent reads + one writer) and a 5s busy_timeout
+			// so contended writers wait instead of erroring out.
+			dsn = "file:" + filepath.Join(homeDir, "fastclaw.db") +
+				"?_pragma=journal_mode(WAL)" +
+				"&_pragma=busy_timeout(5000)" +
+				"&_pragma=synchronous(NORMAL)" +
+				"&_pragma=foreign_keys(1)"
 		}
 		slog.Info("using database storage", "dialect", cfg.Type, "dsn", maskDSN(dsn))
 		db, err := NewDBStore(string(cfg.Type), dsn)

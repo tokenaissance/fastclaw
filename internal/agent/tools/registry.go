@@ -45,6 +45,15 @@ type Registry struct {
 	// the agent loop via SetSessionID; an empty value falls back to
 	// agent-shared scope (admin uploads, fixtures, tests).
 	sessionID string
+	// messageChannel + messageChatID name the bus address of the chat
+	// that's currently in flight. Set per-turn by bindSession so tools
+	// that schedule asynchronous work (e.g. create_cron_job) can stamp
+	// the originating address onto persisted rows — when the cron
+	// scheduler later fires, it routes the synthesized inbound message
+	// back to the same channel/chatID the user was talking on, so the
+	// reminder lands in the right web/Telegram/Discord thread.
+	messageChannel string
+	messageChatID  string
 	// systemFileStore is the optional durable store for identity files
 	// (SOUL.md, IDENTITY.md, USER.md, MEMORY.md, ...). In cloud/K8s
 	// deployments Server.readIdentityFile / writeIdentityFile go through
@@ -139,6 +148,23 @@ func (r *Registry) SetSandboxRequired(required bool) {
 func (r *Registry) SetSessionID(sessionID string) {
 	r.sessionID = sessionID
 }
+
+// SetMessageContext records the bus address of the in-flight turn so
+// tools that persist deferred work (cron jobs) can capture it for
+// later replay. Channel is e.g. "web" / "telegram" / "discord";
+// chatID is the thread/session identifier within that channel.
+func (r *Registry) SetMessageContext(channel, chatID string) {
+	r.messageChannel = channel
+	r.messageChatID = chatID
+}
+
+// MessageChannel returns the channel of the in-flight turn, or "" if
+// not set (e.g. a tool invocation outside a chat context).
+func (r *Registry) MessageChannel() string { return r.messageChannel }
+
+// MessageChatID returns the chat/session id of the in-flight turn,
+// or "" if not set.
+func (r *Registry) MessageChatID() string { return r.messageChatID }
 
 type registeredTool struct {
 	def    provider.Tool

@@ -1,27 +1,29 @@
 # FastClaw — single-file K8s deployment.
 #
 # ┌─ ONE-SHOT DEPLOY ──────────────────────────────────────────────────────┐
-# │  1. 改 `fastclaw-secrets` 里的 3 个值(DSN + 对象存储 AK/SK)          │
-# │  2. 在 `fastclaw-config` 里**选一个** object-store provider 块,       │
-# │     把旁边其他块保留注释                                                │
-# │  3. 改 Ingress 域名(不需要公网就删掉整段 Ingress)                    │
-# │  4. kubectl apply -f fastclaw.yaml                                    │
-# │  5. 创建超管:                                                         │
-# │     kubectl -n fastclaw exec deploy/fastclaw -- \                     │
-# │       fastclaw admin create-user --username alice \                   │
-# │         --email alice@example.com --password 'hunter2' \              │
-# │         --role super_admin                                            │
-# │     之后浏览器走 /login,无需 admin token。                            │
+# │  1. Edit the 3 (or 4) values in `fastclaw-secrets`                     │
+# │     (DSN + object-store AK/SK, optionally E2B key).                    │
+# │  2. In `fastclaw-config`, pick ONE object-store provider block;        │
+# │     leave the rest commented out.                                      │
+# │  3. Edit the Ingress host (or delete the whole Ingress section if      │
+# │     you don't need public access).                                     │
+# │  4. kubectl apply -f fastclaw.yaml                                     │
+# │  5. Create a super-admin:                                              │
+# │     kubectl -n fastclaw exec deploy/fastclaw -- \                      │
+# │       fastclaw admin create-user --username alice \                    │
+# │         --email alice@example.com --password 'hunter2' \               │
+# │         --role super_admin                                             │
+# │     Then sign in at /login — no admin token needed.                    │
 # └────────────────────────────────────────────────────────────────────────┘
 #
-# 外部前提:
-#   - 阿里云 RDS PostgreSQL(或任何 PG 16+)
-#   - 一个对象存储 bucket(AWS S3 / R2 / B2 / OSS / MinIO 任选)
-#   - 镜像:ghcr.io/fastclaw-ai/fastclaw:dev(GitHub Action 自动推送,公开)
-#   - 可选:cert-manager + ClusterIssuer(要 HTTPS 的话)
+# Prerequisites:
+#   - Managed PostgreSQL 16+ (Aliyun RDS / AWS RDS / etc.)
+#   - One object-store bucket (AWS S3 / R2 / B2 / OSS / MinIO — your pick)
+#   - Image: ghcr.io/fastclaw-ai/fastclaw:dev (auto-pushed by GitHub Actions, public)
+#   - Optional: cert-manager + ClusterIssuer (if you want HTTPS)
 #
-# 配置完全通过 FASTCLAW_* 环境变量驱动 — 没有配置文件。
-# 所有用户 / agent / provider / channel 数据都在 Postgres 里。
+# Configuration is fully driven by FASTCLAW_* env vars — there is no
+# config file. Users / agents / providers / channels all live in Postgres.
 
 ---
 apiVersion: v1
@@ -29,7 +31,7 @@ kind: Namespace
 metadata: { name: fastclaw }
 
 ---
-# ========================= 改这里(敏感) =========================
+# ========================= EDIT HERE (secrets) =========================
 apiVersion: v1
 kind: Secret
 metadata:
@@ -37,30 +39,34 @@ metadata:
   namespace: fastclaw
 type: Opaque
 stringData:
-  # Postgres DSN。阿里云 RDS 建议 sslmode=require。
+  # Postgres DSN. Use sslmode=require for managed RDS-style endpoints.
   STORAGE_DSN: "postgres://fastclaw:PASS@rm-xxxxx.pg.rds.aliyuncs.com:5432/fastclaw?sslmode=require"
 
-  # 对象存储 AK/SK。所有 provider 共用这一对字段:
+  # Object-store credentials. Same two fields for every provider:
   #   AWS S3:       Access Key ID / Secret Access Key
-  #   R2:           API Token(Access Key ID / Secret Access Key)
+  #   R2:           API Token (Access Key ID / Secret Access Key)
   #   Backblaze B2: Key ID / Application Key
-  #   Aliyun OSS:   AccessKey / AccessSecret(建议 RAM 子账号,只授一个 bucket)
+  #   Aliyun OSS:   AccessKey / AccessSecret (use a RAM sub-account scoped to one bucket)
   #   MinIO:        root user / root password
   OBJECT_STORE_ACCESSKEY: "REPLACE_WITH_ACCESS_KEY"
   OBJECT_STORE_SECRETKEY: "REPLACE_WITH_SECRET_KEY"
 
+  # Set when sandbox is enabled, then uncomment the matching env entry
+  # in the Deployment below.
+  # E2B_API_KEY: "REPLACE_WITH_E2B_KEY"
+
 ---
-# ==================== 改这里(object store provider) ==============
-# 选 ONE 个 provider,取消对应块的注释,其他保留注释。
+# =================== EDIT HERE (object store provider) ==================
+# Pick ONE provider — uncomment its block and leave the others commented.
 #
-# FASTCLAW_OBJECT_STORE_TYPE 可选值:
-#   local          pod 本地盘(单机 / 开发用)
+# FASTCLAW_OBJECT_STORE_TYPE accepts:
+#   local          pod-local disk (single node / dev only)
 #   aws-s3         AWS S3
-#   cloudflare-r2  Cloudflare R2(需要 ACCOUNTID)
-#   backblaze-b2   Backblaze B2 S3-兼容
-#   aliyun-oss     阿里云 OSS
-#   minio          自建 MinIO(需要 ENDPOINT)
-#   s3             其他 S3-兼容(需要 ENDPOINT,例:DO Spaces / Wasabi)
+#   cloudflare-r2  Cloudflare R2 (requires ACCOUNTID)
+#   backblaze-b2   Backblaze B2 (S3-compatible)
+#   aliyun-oss     Aliyun OSS
+#   minio          self-hosted MinIO (requires ENDPOINT)
+#   s3             generic S3-compatible (requires ENDPOINT — e.g. DO Spaces / Wasabi)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -72,11 +78,11 @@ data:
   FASTCLAW_STORAGE_TYPE: "postgres"
   FASTCLAW_STORAGE_AUTO_MIGRATE: "true"
 
-  # ─── Provider 1: 阿里云 OSS(默认示例) ───
+  # ─── Provider 1: Aliyun OSS (default example) ───
   FASTCLAW_OBJECT_STORE_TYPE: "aliyun-oss"
   FASTCLAW_OBJECT_STORE_REGION: "cn-hangzhou"
   FASTCLAW_OBJECT_STORE_BUCKET: "your-fastclaw-bucket"
-  FASTCLAW_OBJECT_STORE_ALIYUN_INTERNAL: "true"    # ACK 同区域走内网,省 egress
+  FASTCLAW_OBJECT_STORE_ALIYUN_INTERNAL: "true"    # same-region ACK uses the internal endpoint, saves egress
 
   # ─── Provider 2: AWS S3 ───
   # FASTCLAW_OBJECT_STORE_TYPE: "aws-s3"
@@ -93,26 +99,30 @@ data:
   # FASTCLAW_OBJECT_STORE_REGION: "us-west-004"
   # FASTCLAW_OBJECT_STORE_BUCKET: "your-fastclaw-bucket"
 
-  # ─── Provider 5: 自建 MinIO(集群内网) ───
+  # ─── Provider 5: self-hosted MinIO (in-cluster) ───
   # FASTCLAW_OBJECT_STORE_TYPE: "minio"
   # FASTCLAW_OBJECT_STORE_ENDPOINT: "minio.default.svc.cluster.local:9000"
   # FASTCLAW_OBJECT_STORE_BUCKET: "fastclaw"
   # FASTCLAW_OBJECT_STORE_USESSL: "false"
 
-  # ─── Provider 6: 其他 S3-兼容(DigitalOcean Spaces / Wasabi / …) ───
+  # ─── Provider 6: generic S3-compatible (DigitalOcean Spaces / Wasabi / …) ───
   # FASTCLAW_OBJECT_STORE_TYPE: "s3"
   # FASTCLAW_OBJECT_STORE_ENDPOINT: "nyc3.digitaloceanspaces.com"
   # FASTCLAW_OBJECT_STORE_REGION: "nyc3"
   # FASTCLAW_OBJECT_STORE_BUCKET: "your-fastclaw-bucket"
 
-  # 可选:多环境共享一个 bucket 时分前缀
+  # Optional: prefix to share one bucket across multiple environments.
   # FASTCLAW_OBJECT_STORE_PREFIX: "prod"
 
-  # Sandbox(可选)
+  # ─── Sandbox (optional) ───
+  # k8s pods don't have a docker daemon, so the only sandbox backend
+  # is E2B (remote) — or leave it disabled. To enable: set the
+  # E2B_API_KEY in fastclaw-secrets above and uncomment the lines below.
   # FASTCLAW_SANDBOX_BACKEND: "e2b"
+  # FASTCLAW_SANDBOX_IMAGE: "fastclaw/sandbox:latest"   # used when running an E2B custom template
 
 ---
-# =================== 应用层(通常不动) ===========================
+# =================== Application (usually no edits) =====================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -130,7 +140,7 @@ spec:
     spec:
       containers:
         - name: fastclaw
-          image: ghcr.io/fastclaw-ai/fastclaw:dev    # 生产建议 pin 到 :<sha7> 或 :vX.Y.Z
+          image: ghcr.io/fastclaw-ai/fastclaw:dev    # production: pin to :<sha7> or :vX.Y.Z
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 18953 }
@@ -144,8 +154,9 @@ spec:
             # - { name: E2B_API_KEY, valueFrom: { secretKeyRef: { name: fastclaw-secrets, key: E2B_API_KEY } } }
           volumeMounts:
             - { name: data, mountPath: /data/.fastclaw }
-          # /healthz / /readyz 不经过 auth 中间件,K8s 直接探活。别用
-          # /api/status —— 它被 userAuth 包住了,匿名请求一律 401。
+          # /healthz and /readyz skip the auth middleware so kubelet can probe
+          # them directly. Don't use /api/status — it sits behind userAuth and
+          # 401s every anonymous request.
           readinessProbe:
             httpGet: { path: /readyz, port: http }
             periodSeconds: 5
@@ -158,10 +169,16 @@ spec:
             requests: { cpu: "100m", memory: "128Mi" }
             limits:   { cpu: "1",    memory: "512Mi" }
           lifecycle:
+            # Give SSE / WebSocket connections time to drain.
+            # terminationGracePeriod=30s; preStop sleeps 15s, leaving the
+            # remainder for Go's graceful shutdown.
             preStop:
-              exec: { command: ["sh", "-c", "sleep 5"] }
+              exec: { command: ["sh", "-c", "sleep 15"] }
       terminationGracePeriodSeconds: 30
       volumes:
+        # /data/.fastclaw only holds pod-local ephemeral state (sandbox cache,
+        # etc.). Workspace artifacts go to the object store (FASTCLAW_OBJECT_STORE_*)
+        # so they're shared across pods and survive horizontal scaling.
         - { name: data, emptyDir: {} }
 
 ---
@@ -173,6 +190,14 @@ metadata:
 spec:
   type: ClusterIP
   selector: { app: fastclaw }
+  # SSE / WebSocket connections must stick to the same pod until they close.
+  # The Ingress already does cookie affinity; this is a ClientIP fallback for
+  # load balancers that bypass the Ingress and hit the Service directly,
+  # otherwise /api/chat/subscribe reconnects in a loop.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
   ports:
     - { name: http, port: 80, targetPort: http }
 
@@ -203,8 +228,8 @@ spec:
   selector: { matchLabels: { app: fastclaw } }
 
 ---
-# ========================= 改这里(域名) ========================
-# 不需要公网就整段删掉。
+# ========================= EDIT HERE (host) ============================
+# Delete this entire block if you don't need public access.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -213,6 +238,20 @@ metadata:
   annotations:
     cert-manager.io/cluster-issuer: letsencrypt-prod
     nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+    # SSE (/api/chat/subscribe) and WebSocket (/ws) are long-lived — the
+    # default 60s timeout disconnects clients constantly. Lift read/write
+    # to 1h and disable buffering so tokens are flushed in real time.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Pin clients to the same pod under multi-replica — SSE/WS can't
+    # resume across pods.
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: "fastclaw-affinity"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "86400"
+    # Aliyun ACK ships nginx-ingress by default; if you use ALB Ingress
+    # instead, swap the annotations above for their alb.ingress.kubernetes.io/*
+    # equivalents (same semantics).
 spec:
   ingressClassName: nginx
   tls:

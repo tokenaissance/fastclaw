@@ -264,8 +264,27 @@ func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
 		return nil
 	}
 	ag := space.Agents.AgentByID(agentID)
-	if ag == nil && ident.Role == users.RoleSuperAdmin && !ident.IsActingAs() {
-		if injector, ok := s.userResolver.(api.AgentInjector); ok {
+	// Lazy-attach when the agent isn't in the caller's UserSpace but
+	// the caller is otherwise authorized to use it. Three concrete
+	// scenarios this covers:
+	//
+	//   1. super_admin browsing another user's agent (legacy case).
+	//   2. api_key whose ACL grants this agent — typically the key
+	//      owner == agent owner, but this path also handles the
+	//      app_user case where SwitchToAppUser flipped the identity
+	//      to a fresh app_user whose UserSpace has no agents at all.
+	//      Sessions/files written under that UserSpace then partition
+	//      per end-user, which is the desired isolation.
+	//   3. (future) cross-user grants when we add agent sharing.
+	//
+	// CanAccessAgent above is the only authorization gate; this just
+	// hydrates the in-memory Manager. EnsureAgent is idempotent.
+	if ag == nil {
+		injector, hasInjector := s.userResolver.(api.AgentInjector)
+		canAttach := hasInjector &&
+			(ident.AuthMethod == "apikey" ||
+				(ident.Role == users.RoleSuperAdmin && !ident.IsActingAs()))
+		if canAttach {
 			if err := injector.EnsureAgent(r.Context(), uid, agentID); err == nil {
 				ag = space.Agents.AgentByID(agentID)
 			}
@@ -707,6 +726,77 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	_ = ag.HandleWebChatStream(r.Context(), req.SessionID, req.Message, req.Images, events)
 	close(events)
 	<-done
+}
+
+// handleChatSubscribe holds an SSE connection open for one (agent,
+// session) pair and forwards every bus.OutboundMessage routed through
+// the WebChannel to that pair. Used by the dashboard chat panel to see
+// cron-fired (and other async) agent replies live.
+//
+// Auth gating reuses resolveAgent, so the caller must already have
+// permission to chat with this agent. The subscription doesn't
+// generate any traffic on its own — closes are silent (client gone)
+// and the server only writes when an outbound message arrives.
+func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
+	if s.webChan == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "web channel not configured"})
+		return
+	}
+	agentID := r.URL.Query().Get("agentId")
+	sessionID := r.URL.Query().Get("sessionId")
+	if agentID == "" || sessionID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agentId and sessionId required"})
+		return
+	}
+	if ag := s.resolveAgent(r, agentID); ag == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Initial flush so the client EventSource fires `open` immediately
+	// — without it browsers wait for the first event and the chat
+	// panel can't tell whether the subscription is live yet.
+	fmt.Fprintf(w, ": ok\n\n")
+	flusher.Flush()
+
+	out, unsubscribe := s.webChan.Subscribe(agentID, sessionID)
+	defer unsubscribe()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-out:
+			if !ok {
+				return
+			}
+			payload := map[string]any{
+				"text":      msg.Text,
+				"parseMode": msg.ParseMode,
+			}
+			if len(msg.MediaItems) > 0 {
+				items := make([]map[string]any, 0, len(msg.MediaItems))
+				for _, m := range msg.MediaItems {
+					items = append(items, map[string]any{
+						"filename":    m.Filename,
+						"contentType": m.ContentType,
+					})
+				}
+				payload["mediaItems"] = items
+			}
+			data, _ := json.Marshal(payload)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {

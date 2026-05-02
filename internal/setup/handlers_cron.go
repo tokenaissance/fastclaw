@@ -6,7 +6,81 @@ import (
 	"net/http"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
+
+// --- Per-agent cron jobs (DB-backed) ---
+//
+// The legacy /api/cron set below reads jobs out of the user's flat
+// fastclaw.json (cfg.CronJobs) — that's the install-time, statically-
+// configured catalog. Agents that schedule work at runtime via the
+// create_cron_job tool persist into the cron_jobs DB table instead, and
+// the cron.Scheduler (which actually fires them) only watches the DB.
+// So those agent-authored jobs were invisible to the dashboard.
+// handleListAgentCronJobs surfaces them at /api/agents/{id}/cron.
+
+func (s *Server) handleListAgentCronJobs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.requireAgentOwner(w, r, id) == nil {
+		return
+	}
+	jobs, err := s.dataStore.ListCronJobsByAgent(r.Context(), id)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if jobs == nil {
+		jobs = []store.CronJobRecord{}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
+func (s *Server) handleDeleteAgentCronJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	jobID := r.PathValue("jobId")
+	if s.requireAgentOwner(w, r, id) == nil {
+		return
+	}
+	// Verify the job belongs to this agent before deleting — otherwise
+	// the path param could be used to delete jobs the caller doesn't
+	// own (the cron table has no user_id; we gate via agent ownership).
+	job, err := s.dataStore.GetCronJob(r.Context(), jobID)
+	if err != nil || job == nil || job.AgentID != id {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "job not found for this agent"})
+		return
+	}
+	if err := s.dataStore.DeleteCronJob(r.Context(), jobID); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleToggleAgentCronJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	jobID := r.PathValue("jobId")
+	if s.requireAgentOwner(w, r, id) == nil {
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid request"})
+		return
+	}
+	job, err := s.dataStore.GetCronJob(r.Context(), jobID)
+	if err != nil || job == nil || job.AgentID != id {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "job not found for this agent"})
+		return
+	}
+	job.Enabled = req.Enabled
+	if err := s.dataStore.SaveCronJob(r.Context(), job); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "job": job})
+}
 
 // --- Cron Jobs ---
 

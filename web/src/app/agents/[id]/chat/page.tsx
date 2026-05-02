@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgent, getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square } from "lucide-react";
+import { getAgent, getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -256,16 +257,15 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
   return msgs;
 }
 
-function getAgentIdFromURL(): string {
-  if (typeof window === "undefined") return "default";
-  const match = window.location.pathname.match(/\/agents\/([^/]+)\//);
-  return match ? match[1] : "default";
-}
-
 export default function AgentChatPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [selectedAgent] = useState(() => getAgentIdFromURL());
+  // Reactive: re-derives from pathname so switching agents (sidebar
+  // dropdown, browser back/forward) immediately updates downstream
+  // fetches. The previous useState(() => ...) flavor froze the id at
+  // mount, so background loads kept hitting the old agent and the
+  // panel showed stale history under the new URL.
+  const selectedAgent = useAgentIdFromURL();
   const [agentName, setAgentName] = useState<string>("");
   const [sessionId, setSessionId] = useState<string>(() => searchParams.get("session") || generateSessionId());
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -273,6 +273,7 @@ export default function AgentChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [filesSheetOpen, setFilesSheetOpen] = useState(false);
   const [sessionTitle, setSessionTitle] = useState<string>("");
   const [attachments, setAttachments] = useState<File[]>([]);
   // Lightbox for clicking either an attachment thumbnail (compose box)
@@ -312,6 +313,24 @@ export default function AgentChatPage() {
   useEffect(() => {
     getSkills().then(setSkills).catch(() => setSkills([]));
   }, []);
+
+  // Reset chat-pane state when the active agent changes. Without
+  // this, switching agents from the sidebar would briefly render the
+  // previous agent's history / sessions / title under the new URL
+  // until the load effects below replaced them. Clearing eagerly is
+  // cheaper than threading a "loading" flag through every render.
+  // We deliberately keep `input` so a half-typed message survives an
+  // accidental agent switch.
+  const lastAgentRef = useRef(selectedAgent);
+  useEffect(() => {
+    if (lastAgentRef.current === selectedAgent) return;
+    lastAgentRef.current = selectedAgent;
+    setMessages([]);
+    setSessions([]);
+    setSessionTitle("");
+    setAgentName("");
+    setAttachments([]);
+  }, [selectedAgent]);
 
   // Resolve the agent's display name once. The chat title and any
   // future header bits should show "Chat with My Helper", not the
@@ -390,6 +409,44 @@ export default function AgentChatPage() {
     if (!selectedAgent) return;
     loadSessions(selectedAgent);
   }, [selectedAgent, loadSessions]);
+
+  // Live subscription for cron-fired (and other async) replies. The
+  // server's WebChannel fans out every outbound bus message routed to
+  // (agent, session) here as an SSE event; we append it to messages so
+  // the user sees scheduled jokes / reminders without reloading.
+  // Re-runs whenever (agent, session) changes — closing the previous
+  // EventSource so we don't double-receive after switching sessions.
+  useEffect(() => {
+    if (!selectedAgent || !sessionId) return;
+    const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}`;
+    const es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as { text?: string };
+        const text = data.text || "";
+        if (!text) return;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `async-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            role: "agent",
+            content: text,
+            timestamp: Date.now(),
+          },
+        ]);
+      } catch {
+        // ignore malformed events
+      }
+    };
+    es.onerror = () => {
+      // EventSource auto-reconnects on transient errors; only close on
+      // unmount. A persistent 404 (session removed, agent gone) will
+      // keep flapping but is harmless.
+    };
+    return () => {
+      es.close();
+    };
+  }, [selectedAgent, sessionId]);
 
   // Sync URL's ?session= back into local state. Without this, navigating
   // between sessions / to "New chat" from the sidebar (router.push of the
@@ -959,7 +1016,8 @@ export default function AgentChatPage() {
     new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] flex-col">
+    <div className="flex h-[calc(100vh-3rem)] flex-row">
+      <div className="flex flex-1 min-w-0 flex-col">
       {/* Messages */}
         <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4">
           <div className="mx-auto max-w-2xl space-y-3">
@@ -1118,6 +1176,16 @@ export default function AgentChatPage() {
                           ) : (
                             <Copy className="h-3 w-3" />
                           )}
+                        </button>
+                      )}
+                      {msg.role === "agent" && (
+                        <button
+                          onClick={() => setFilesSheetOpen(true)}
+                          className="opacity-0 group-hover:opacity-100 inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-muted text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-all"
+                          title="View task files"
+                        >
+                          <FolderOpen className="h-3 w-3" />
+                          <span>Files</span>
                         </button>
                       )}
                     </div>
@@ -1296,6 +1364,14 @@ export default function AgentChatPage() {
             </button>
           </div>
         )}
+      </div>
+      {filesSheetOpen && selectedAgent && sessionId && (
+        <SessionFilesPanel
+          agentId={selectedAgent}
+          sessionId={sessionId}
+          onClose={() => setFilesSheetOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1534,6 +1610,15 @@ function fileUrl(agentId: string, path: string, download: boolean): string {
   return `/api/agents/${agentId}/files/${encoded}${qs ? "?" + qs : ""}`;
 }
 
+function zipUrl(agentId: string, sessionId: string): string {
+  const token = getAuthToken();
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (token) params.set("token", token);
+  const qs = params.toString();
+  return `/api/agents/${agentId}/files.zip${qs ? "?" + qs : ""}`;
+}
+
 function FilesPanel({ agentId, files }: { agentId: string; files: ProducedFile[] }) {
   const [previewing, setPreviewing] = useState<ProducedFile | null>(null);
   return (
@@ -1584,6 +1669,199 @@ function FilesPanel({ agentId, files }: { agentId: string; files: ProducedFile[]
       )}
     </>
   );
+}
+
+const FILES_PANEL_MIN = 280;
+const FILES_PANEL_MAX = 640;
+const FILES_PANEL_DEFAULT = 416;
+const FILES_PANEL_KEY = "chat:filesPanelWidth";
+
+function SessionFilesPanel({
+  agentId,
+  sessionId,
+  onClose,
+}: {
+  agentId: string;
+  sessionId: string;
+  onClose: () => void;
+}) {
+  const [files, setFiles] = useState<WorkspaceFile[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [previewing, setPreviewing] = useState<ProducedFile | null>(null);
+  const [width, setWidth] = useState<number>(() => {
+    if (typeof window === "undefined") return FILES_PANEL_DEFAULT;
+    const stored = Number(window.localStorage.getItem(FILES_PANEL_KEY));
+    if (Number.isFinite(stored) && stored >= FILES_PANEL_MIN && stored <= FILES_PANEL_MAX) {
+      return stored;
+    }
+    return FILES_PANEL_DEFAULT;
+  });
+  const [resizing, setResizing] = useState(false);
+
+  useEffect(() => {
+    if (!resizing) return;
+    const handleMove = (e: MouseEvent) => {
+      const next = Math.min(
+        FILES_PANEL_MAX,
+        Math.max(FILES_PANEL_MIN, window.innerWidth - e.clientX),
+      );
+      setWidth(next);
+    };
+    const handleUp = () => {
+      setResizing(false);
+      try {
+        window.localStorage.setItem(FILES_PANEL_KEY, String(width));
+      } catch { /* ignore quota errors */ }
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [resizing, width]);
+
+  const refresh = useCallback(async () => {
+    if (!agentId || !sessionId) return;
+    setLoading(true);
+    try {
+      const list = await listAgentFiles(agentId, sessionId);
+      const cleaned = list
+        .filter((f) => !isSystemFile(f.path))
+        .sort((a, b) => (b.modTime || 0) - (a.modTime || 0));
+      setFiles(cleaned);
+    } finally {
+      setLoading(false);
+    }
+  }, [agentId, sessionId]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  return (
+    <>
+      <aside
+        style={{ width }}
+        className="relative z-30 hidden md:flex shrink-0 flex-col border-l border-border bg-background -mt-12 h-screen"
+      >
+        <div
+          onMouseDown={(e) => { e.preventDefault(); setResizing(true); }}
+          className={`absolute -left-1 top-0 bottom-0 w-2 cursor-col-resize z-10 group ${resizing ? "" : ""}`}
+          title="Drag to resize"
+        >
+          <div
+            className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors ${
+              resizing ? "bg-primary" : "bg-transparent group-hover:bg-primary/40"
+            }`}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-2 px-4 h-12 border-b border-border">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <FolderOpen className="h-4 w-4" />
+            Files
+          </div>
+          <div className="flex items-center gap-1">
+            <a
+              href={files.length > 0 ? zipUrl(agentId, sessionId) : undefined}
+              aria-disabled={files.length === 0}
+              className={`p-1.5 rounded-md transition-colors ${
+                files.length === 0
+                  ? "text-muted-foreground/40 pointer-events-none"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              }`}
+              title="Download all as zip"
+            >
+              <Download className="h-4 w-4" />
+            </a>
+            <button
+              onClick={refresh}
+              disabled={loading}
+              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-50"
+              title="Refresh"
+            >
+              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+              title="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2">
+          {!loading && files.length === 0 ? (
+            <p className="px-3 py-8 text-center text-sm text-muted-foreground">
+              No files in this session yet.
+            </p>
+          ) : (
+            <div className="flex flex-col">
+              <div className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70 border-b">
+                <span>Name</span>
+                <span>Modified</span>
+                <span>Size</span>
+              </div>
+              {files.map((f) => {
+                const { icon: Icon } = fileKind(f.path);
+                const basename = f.path.split("/").pop() || f.path;
+                const downloadUrl = fileUrl(agentId, f.path, true);
+                return (
+                  <div
+                    key={f.path}
+                    className="group grid grid-cols-[1fr_auto_auto] items-center gap-3 px-3 py-2 hover:bg-muted/40 rounded-md transition-colors"
+                  >
+                    <button
+                      onClick={() => setPreviewing({ path: f.path, size: f.size })}
+                      className="flex items-center gap-2 min-w-0 text-left"
+                      title="Open preview"
+                    >
+                      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="text-sm text-foreground truncate">{basename}</span>
+                    </button>
+                    <span className="text-[11px] text-muted-foreground/70 whitespace-nowrap">
+                      {formatRelativeTime(f.modTime)}
+                    </span>
+                    <a
+                      href={downloadUrl}
+                      className="text-[11px] text-muted-foreground/70 whitespace-nowrap hover:text-foreground"
+                      title="Download"
+                    >
+                      {formatBytes(f.size)}
+                    </a>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </aside>
+      {previewing && (
+        <FilePreview
+          agentId={agentId}
+          file={previewing}
+          onClose={() => setPreviewing(null)}
+        />
+      )}
+    </>
+  );
+}
+
+function formatRelativeTime(ts?: number): string {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const now = Date.now();
+  const diff = now - d.getTime();
+  if (diff < 60_000) return "just now";
+  if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
+  if (diff < 7 * 86400_000) return `${Math.floor(diff / 86400_000)}d ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function FilePreview({ agentId, file, onClose }: { agentId: string; file: ProducedFile; onClose: () => void }) {

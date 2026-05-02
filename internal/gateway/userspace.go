@@ -448,6 +448,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		agent.WithGlobalSkillsCfg(cfg.Skills),
 		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
 		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
+		agent.WithDataStore(st),
 	}
 	if ws != nil {
 		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
