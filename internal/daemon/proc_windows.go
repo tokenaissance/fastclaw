@@ -20,6 +20,18 @@ func signalProcess(proc *os.Process, sig string) error {
 	case "CHECK":
 		// On Windows, just try to open the process
 		return nil
+	case "RELOAD":
+		// SIGHUP is not deliverable on Windows. Callers fall back to a
+		// hint asking the operator to restart the gateway.
+		return errReloadUnsupported
 	}
 	return nil
 }
+
+// errReloadUnsupported is returned by signalProcess on Windows so the
+// CLI can detect "no graceful reload available here" and degrade.
+var errReloadUnsupported = winReloadErr("reload via signal is not supported on Windows")
+
+type winReloadErr string
+
+func (e winReloadErr) Error() string { return string(e) }

@@ -178,6 +178,115 @@ Click an agent to enter its management panel:
 ./fastclaw gateway
 ```
 
+### Manage agents from the CLI (`fastclaw agents …`)
+
+The `fastclaw agents` subcommand is a thin convenience wrapper around the
+same store the dashboard uses. Agents you create here show up in the web
+UI and vice-versa — there's only ever one fastclaw deployment per
+`FASTCLAW_HOME`.
+
+```bash
+# Zero to a chattable agent in one command. On a fresh install this
+# creates an `admin` user (random password printed once) and starts
+# the gateway daemon if it isn't already running.
+fastclaw agents init alpha \
+  --provider openai \
+  --model openai/gpt-4o-mini \
+  --api-key-env OPENAI_API_KEY
+
+# Set per-agent overrides (model, temperature, sandbox, …).
+fastclaw agents config alpha set temperature 0.7
+fastclaw agents config alpha set sandbox.enabled true
+
+# Upload the agent's identity files.
+fastclaw agents files put alpha SOUL.md ./SOUL.md
+fastclaw agents files put alpha IDENTITY.md ./IDENTITY.md
+
+# Inspect.
+fastclaw agents ls
+fastclaw agents config alpha get
+fastclaw agents files ls alpha
+
+# Tear down.
+fastclaw agents rm alpha
+```
+
+The CLI opens the operator's store directly (sqlite at
+`~/.fastclaw/fastclaw.db`, or whatever `FASTCLAW_STORAGE_DSN` points at)
+and writes through the same code paths the gateway uses. It does not
+require the gateway to be running — but `agents init` will spin one up
+in the background so a fresh agent is immediately reachable at
+`http://localhost:18953`. Subsequent CLI writes (`config set`,
+`files put`, `rm`, `init` re-runs) send `SIGHUP` to the running gateway
+so it hot-reloads without restart. Windows lacks `SIGHUP` delivery, so
+the CLI falls back to a hint asking you to run `fastclaw daemon restart`.
+
+The default owner is the `admin` user. On an empty database
+`agents init` creates that account with a generated password (printed
+once); on a populated database it expects `admin` to exist or
+`--username` to point at an existing user.
+
+#### Resolving agents
+
+CLI commands accept either a display name or an `agt_…` id:
+
+- `fastclaw agents config alpha get` — by display name (must be unique)
+- `fastclaw agents config agt_d3c4a5… get` — by id
+
+If the same text matches one agent's id and a different agent's display
+name, the CLI reports an ambiguity instead of guessing.
+
+When you create an agent via `agents init <name>`, the name is the
+display name and the id is auto-generated. To update an agent that was
+created via the dashboard, pass its id explicitly:
+
+```bash
+fastclaw agents init "Cool Agent" --id agt_d3c4a5...
+```
+
+#### Configuration keys
+
+Per-agent (saved at `scope=agent` under the agent's id):
+
+- `model`, `temperature`, `maxTokens`, `thinking`, `policy`
+- `sandbox`, `sandbox.enabled`, `sandbox.backend`, `sandbox.image`, `sandbox.network`
+
+System-wide (saved at `scope=system`):
+
+- `plugins`, `plugins.<name>`
+- `skills.install`, `skills.entries`, `skillsLearner`
+- `tools.providers`, `tools.categories`
+- `objectstore`, `taskqueue`, `heartbeat`, `memory`, `privacy`, `hooks`, `teams`
+
+Provider configs live in `scope=system` and are addressed as
+`provider.<name>.<field>`:
+
+```bash
+fastclaw agents config alpha set provider.openai.apiKeyEnv OPENAI_API_KEY
+fastclaw agents config alpha set provider.openrouter.apiBase https://openrouter.ai/api/v1
+fastclaw agents config alpha set provider.openai.model gpt-4o      # adds; idempotent
+fastclaw agents config alpha set provider.openai.models '[]'        # explicit clear
+```
+
+Provider presets ship for `openai`, `openrouter`, `anthropic`, `ollama`,
+`groq`, `deepseek`, `mistral` — `--api-key-env` populates `apiKey` from
+the named environment variable, the rest comes from the preset.
+
+#### Agent system files
+
+The CLI reads and writes the same `agent_files` table the dashboard's
+file editor uses. Allowlisted filenames: `SOUL.md`, `IDENTITY.md`,
+`USER.md`, `BOOTSTRAP.md`, `MEMORY.md`, `HEARTBEAT.md`, `AGENTS.md`,
+`TOOLS.md`, `agent.json`.
+
+| Subcommand | Purpose |
+|---|---|
+| `agents init <name>` | Create or update an agent (provider/model/sandbox/files) |
+| `agents ls` | List all agents in the store |
+| `agents config <name> get\|set [key] [value]` | Read or update a config value |
+| `agents files ls\|put\|get <name>` | Read / write the agent's system files |
+| `agents rm <name>` | Delete the agent record and its system files |
+
 ### Docker
 ```bash
 cd deploy/docker && ./start.sh

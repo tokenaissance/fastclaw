@@ -29,6 +29,8 @@ func signalProcess(proc *os.Process, sig string) error {
 		return proc.Signal(syscall.SIGKILL)
 	case "CHECK":
 		return proc.Signal(syscall.Signal(0))
+	case "RELOAD":
+		return proc.Signal(syscall.SIGHUP)
 	}
 	return nil
 }

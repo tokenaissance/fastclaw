@@ -276,6 +276,17 @@ func RemovePIDFile() {
 	}
 }
 
+// SignalReload asks the gateway running at pid to reload its in-memory
+// caches without restarting. On Unix this is SIGHUP; on Windows it
+// returns an error and callers print a "restart it" hint instead.
+func SignalReload(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return signalProcess(proc, "RELOAD")
+}
+
 func writePID(path string, pid int) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
