@@ -1,11 +1,12 @@
 ## FastClaw Helm Chart — default values
 ##
-## 与 deploy/k8s/fastclaw.yaml 同语义:env-var 驱动,无 init-container sed,
-## workspace 走对象存储(S3 / OSS / R2 / B2 / MinIO …)以便多副本水平扩展。
+## Same semantics as deploy/k8s/fastclaw.yaml: env-var driven, no
+## init-container sed, workspace artifacts go to an object store
+## (S3 / OSS / R2 / B2 / MinIO / …) so multi-replica scales horizontally.
 
 image:
   repository: ghcr.io/fastclaw-ai/fastclaw
-  # 生产环境务必 pin 到 :v0.x.y 或 commit sha,不要用 latest/dev。
+  # In production, pin to :v0.x.y or a commit sha — don't use latest/dev.
   tag: dev
   pullPolicy: IfNotPresent
   # imagePullSecrets:
@@ -22,7 +23,8 @@ gateway:
     limits:
       cpu: "2"
       memory: 1Gi
-  # 给 SSE/WS 排空时间。preStop sleep 占去大头,剩下留给优雅 shutdown。
+  # Drain budget for SSE/WS. preStop sleep takes the bulk of it; the
+  # remainder is for Go's graceful shutdown.
   preStopSleepSeconds: 15
   terminationGracePeriodSeconds: 30
 
@@ -40,60 +42,61 @@ pdb:
 
 ## Postgres
 ##
-## 推荐用云厂商托管 PG(RDS / 阿里云 PG)并把 externalDSN 设上;
-## 内置 PG 仅适合开发 / 单机验证。
+## Prefer a managed service (RDS / Aliyun PG) and set externalDSN.
+## The built-in pod is only suitable for dev / single-node trials.
 postgres:
-  enabled: false                # default off — 生产请用托管 PG
+  enabled: false                # default off — use managed PG in production
   image: postgres:16-alpine
   password: ""                  # required when enabled=true
   storage: 10Gi
 externalDSN: ""                 # postgres://user:pass@host:5432/db?sslmode=require
 
-## 对象存储 — agent workspace artifacts、上传文件、生成的图片/PDF 都落这里。
-## 多副本必须配,否则同一 session 文件在不同 pod 看到的内容会不一致。
+## Object store — workspace artifacts, uploads, generated images/PDFs all
+## land here. Required for multi-replica: without it, the same session
+## sees different files on different pods.
 ##
-## type 可选:
-##   local           pod 本地盘(单副本开发用,生产别开)
+## type accepts:
+##   local           pod-local disk (single-replica dev only — never in production)
 ##   aws-s3          AWS S3
-##   cloudflare-r2   Cloudflare R2(需 accountId)
-##   backblaze-b2    Backblaze B2 S3-兼容
-##   aliyun-oss      阿里云 OSS
-##   minio           自建 MinIO(需 endpoint)
-##   s3              其他 S3-兼容(需 endpoint,例:DO Spaces / Wasabi)
+##   cloudflare-r2   Cloudflare R2 (requires accountId)
+##   backblaze-b2    Backblaze B2 (S3-compatible)
+##   aliyun-oss      Aliyun OSS
+##   minio           self-hosted MinIO (requires endpoint)
+##   s3              generic S3-compatible (requires endpoint — e.g. DO Spaces / Wasabi)
 objectStore:
   type: local
   bucket: ""
   region: ""
-  endpoint: ""                  # MinIO / S3-compatible 时设
-  accountId: ""                 # Cloudflare R2 时设
-  accessKey: ""                 # 走 Secret 注入,不要 commit 真值
+  endpoint: ""                  # set for MinIO / generic S3-compatible
+  accountId: ""                 # set for Cloudflare R2
+  accessKey: ""                 # injected via Secret — don't commit real values
   secretKey: ""
-  prefix: ""                    # 多环境共享 bucket 时分前缀
+  prefix: ""                    # prefix when sharing one bucket across environments
   useSSL: true
-  aliyunInternal: false         # ACK 同区域走 OSS 内网
+  aliyunInternal: false         # ACK same-region uses the OSS internal endpoint
 
-## Sandbox(skill 执行容器)
+## Sandbox (skill execution container)
 ##
-## k8s pod 没有 docker daemon — 只能 e2b(远端)或关闭。
+## k8s pods have no docker daemon — only e2b (remote) or disabled.
 sandbox:
   enabled: false
-  backend: e2b                  # "e2b" only(docker 在 k8s 不可用)
+  backend: e2b                  # "e2b" only (docker not available in k8s)
   image: fastclaw/sandbox:latest
   e2bApiKey: ""
 
 ## Ingress
 ingress:
   enabled: false
-  className: nginx              # 或 alb(阿里云 ACK ALB)
+  className: nginx              # or "alb" (Aliyun ACK ALB)
   host: fastclaw.example.com
   tls: false
   tlsSecret: ""
   certManagerIssuer: ""         # e.g. "letsencrypt-prod"
   proxyBodySize: "32m"
-  ## 若用 ALB Ingress (alb.ingress.kubernetes.io/*) 自行 override 这个 map
+  ## When using ALB Ingress (alb.ingress.kubernetes.io/*), override this map.
   annotations: {}
 
-## 额外的 FASTCLAW_* 环境变量(透传 ConfigMap)
+## Extra FASTCLAW_* env vars passed through to the ConfigMap.
 extraEnv: {}
   # FASTCLAW_LOG_LEVEL: "info"
   # FASTCLAW_DAEMON_IDLE_TIMEOUT_SECONDS: "300"

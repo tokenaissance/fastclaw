@@ -63,8 +63,9 @@ spec:
           mountPath: /data/.fastclaw
         resources:
           {{- toYaml .Values.gateway.resources | nindent 10 }}
-        # /readyz / /livez 不经过 auth — onboard 前后都能稳定探活。
-        # 不要切回 /api/status,那条路径在 onboard 后会 401。
+        # /readyz and /livez bypass auth — they probe reliably both before
+        # and after onboard. Don't switch to /api/status: that path 401s
+        # once onboard is complete.
         readinessProbe:
           httpGet:
             path: /readyz
@@ -83,7 +84,8 @@ spec:
               command: ["sh", "-c", "sleep {{ .Values.gateway.preStopSleepSeconds }}"]
       terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
       volumes:
-      # /data/.fastclaw 仅承载 pod-local 临时态;workspace artifacts 走对象存储。
+      # /data/.fastclaw only holds pod-local ephemeral state; workspace
+      # artifacts go to the object store.
       - name: data
         emptyDir: {}
 ---
@@ -97,7 +99,9 @@ spec:
   type: ClusterIP
   selector:
     app: {{ include "fastclaw.fullname" . }}-gateway
-  # SSE/WS 多副本必须粘连。Ingress 已设 cookie affinity,这里再兜底 ClientIP。
+  # SSE/WS connections must stick to the same pod under multi-replica.
+  # The Ingress already does cookie affinity; ClientIP here is a fallback
+  # for load balancers that hit the Service directly.
   sessionAffinity: ClientIP
   sessionAffinityConfig:
     clientIP:
