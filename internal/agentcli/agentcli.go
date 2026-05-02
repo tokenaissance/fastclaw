@@ -264,31 +264,39 @@ func loadAccount(ctx context.Context, st store.Store, userID string) (*users.Acc
 	return accts.Get(ctx, userID)
 }
 
-// Resolve looks an agent up by its agt_ id (when name has the prefix)
-// or by display name.
-func Resolve(ctx context.Context, st store.Store, name string) (*store.AgentRecord, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
+// Resolve looks an agent up by exact id and by display name. Agent names
+// can legitimately start with "agt_", so the prefix alone is not enough
+// to classify a user-supplied reference.
+func Resolve(ctx context.Context, st store.Store, ref string) (*store.AgentRecord, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
 		return nil, errors.New("agent name is required")
 	}
-	if strings.HasPrefix(name, "agt_") {
-		rec, err := st.GetAgent(ctx, name)
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("agent %q not found", name)
-		}
-		if err != nil {
-			return nil, err
-		}
-		return rec, nil
-	}
-	match, err := findAgentByName(ctx, st, name)
-	if err != nil {
+
+	var byID *store.AgentRecord
+	if rec, err := st.GetAgent(ctx, ref); err == nil {
+		byID = rec
+	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, err
 	}
-	if match == nil {
-		return nil, fmt.Errorf("agent %q not found", name)
+
+	byName, err := findAgentByName(ctx, st, ref)
+	if err != nil {
+		if errors.Is(err, ErrAmbiguousName) && byID != nil {
+			return nil, fmt.Errorf("agent reference %q is ambiguous: it matches an id and multiple display names; use the exact agt_ id of the intended agent", ref)
+		}
+		return nil, err
 	}
-	return match, nil
+	if byID != nil && byName != nil && byID.ID != byName.ID {
+		return nil, fmt.Errorf("agent reference %q is ambiguous: it matches an id and a different display name; use the exact agt_ id of the intended agent", ref)
+	}
+	if byID != nil {
+		return byID, nil
+	}
+	if byName != nil {
+		return byName, nil
+	}
+	return nil, fmt.Errorf("agent %q not found", ref)
 }
 
 // ErrAmbiguousName signals that a display name resolved to more than

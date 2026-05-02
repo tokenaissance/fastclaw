@@ -361,6 +361,43 @@ func TestResolveByNameAndID(t *testing.T) {
 	}
 }
 
+func TestResolveAgtPrefixDisplayName(t *testing.T) {
+	st := freshStore(t)
+	res, err := Init(context.Background(), st, "agt_demo", InitOptions{})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	got, err := Resolve(context.Background(), st, "agt_demo")
+	if err != nil {
+		t.Fatalf("resolve agt_ display name: %v", err)
+	}
+	if got.ID != res.Agent.ID {
+		t.Fatalf("resolved wrong agent: got %s want %s", got.ID, res.Agent.ID)
+	}
+}
+
+func TestResolveAmbiguousIDAndDisplayName(t *testing.T) {
+	st := freshStore(t)
+
+	byID, err := Init(context.Background(), st, "alpha", InitOptions{})
+	if err != nil {
+		t.Fatalf("seed alpha: %v", err)
+	}
+	if err := st.SaveAgent(context.Background(), &store.AgentRecord{
+		ID:     "agt_other",
+		UserID: byID.Agent.UserID,
+		Name:   byID.Agent.ID,
+		Config: map[string]interface{}{},
+	}); err != nil {
+		t.Fatalf("seed name collision: %v", err)
+	}
+
+	_, err = Resolve(context.Background(), st, byID.Agent.ID)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguous id/name reference, got %v", err)
+	}
+}
+
 func TestResolveAmbiguousName(t *testing.T) {
 	st := freshStore(t)
 	// Create two agents with the same display name (the dashboard
