@@ -1,43 +1,83 @@
-# FastClaw Community License Agreement
+                       FastClaw Community License Agreement
+                              Version 1.0, 2026
 
-FastClaw is licensed under the FastClaw Community License, based on Apache License 2.0 with the following additional conditions:
+   FastClaw is licensed under the FastClaw Community License, based on
+   the Apache License 2.0 with the following additional conditions:
 
-1. Commercial Use
+   1. Commercial Use
 
-   a. FastClaw may be utilized commercially, including as a backend service for other applications or as an application development platform for enterprises, without modifying the source code.
+      (a) FastClaw may be utilized commercially, including as a backend
+          service for other applications or as an application development
+          platform for enterprises, without modifying the source code.
 
-   b. A commercial license must be obtained from ThinkAny, LLC if any of the following conditions apply:
+      (b) A commercial license must be obtained from ThinkAny, LLC if any
+          of the following conditions apply:
 
-      - Multi-tenant Service: Unless explicitly authorized by ThinkAny, LLC in writing, you may not use the FastClaw source code to operate a multi-tenant service where multiple users or organizations share a single deployment for the purpose of providing FastClaw-as-a-Service to third parties.
+          (i) Multi-tenant Service. Unless explicitly authorized by
+              ThinkAny, LLC in writing, You may not use the FastClaw
+              source code to operate a multi-tenant service where
+              multiple users or organizations share a single deployment
+              for the purpose of providing FastClaw-as-a-Service to
+              third parties.
 
-         Permitted use cases (no commercial license required):
-           • Internal deployment within a single organization for its employees or teams.
-           • Using FastClaw as a backend to power your own SaaS product, where end users interact with your product rather than FastClaw directly.
+              Permitted use cases (no commercial license required):
 
-         Restricted use cases (commercial license required):
-           • Hosting FastClaw and selling access to multiple unrelated organizations as a competing Agent platform service.
+              - Internal deployment within a single organization for
+                its employees or teams.
 
-      - Logo and Copyright Information: In the process of using FastClaw's frontend, you may not remove or modify the FastClaw logo, branding, or copyright information in the FastClaw interface.
+              - Using FastClaw as a backend to power Your own SaaS
+                product, where end users interact with Your product
+                rather than FastClaw directly.
 
-         Frontend Definition: For the purposes of this license, the "frontend" of FastClaw includes all visual interface components delivered to end users, including but not limited to those located in the `web/public/` and `web/src/` directories when running FastClaw from the source code, as well as any compiled or distributed frontend artifacts.
+              Restricted use cases (commercial license required):
 
-         This restriction is inapplicable to uses of FastClaw that do not involve its frontend (e.g., using FastClaw purely as an API backend without exposing its UI to end users).
+              - Hosting FastClaw and selling access to multiple
+                unrelated organizations as a competing Agent platform
+                service.
 
-   To obtain a commercial license, please contact ThinkAny, LLC at support@thinkany.ai.
+          (ii) Logo and Copyright Information. In the process of using
+               FastClaw's frontend, You may not remove or modify the
+               FastClaw logo, branding, or copyright information in the
+               FastClaw interface.
 
-2. As a contributor, you should agree that:
+               Frontend Definition. For the purposes of this License,
+               the "frontend" of FastClaw includes all visual interface
+               components delivered to end users, including but not
+               limited to those located in the `web/public/` and
+               `web/src/` directories when running FastClaw from the
+               source code, as well as any compiled or distributed
+               frontend artifacts.
 
-   a. ThinkAny, LLC may adjust the open-source agreement to be more strict or relaxed as deemed necessary.
+               This restriction is inapplicable to uses of FastClaw
+               that do not involve its frontend (e.g., using FastClaw
+               purely as an API backend without exposing its UI to end
+               users).
 
-   b. Your contributed code may be used for commercial purposes, including but not limited to cloud services and enterprise editions operated by ThinkAny, LLC.
+      To obtain a commercial license, please contact ThinkAny, LLC at
+      support@thinkany.ai.
 
-3. Trademark
+   2. Contributions
 
-   a. You may not use the FastClaw name, logo, or trademarks to promote derivative products or services without prior written consent from ThinkAny, LLC.
+      As a contributor, You agree that:
 
-Apart from the specific conditions mentioned above, all other rights and restrictions follow the Apache License 2.0. The full text of the Apache License 2.0 is reproduced below.
+      (a) ThinkAny, LLC may adjust the open-source agreement to be more
+          strict or relaxed as deemed necessary.
 
-Copyright (c) 2026 ThinkAny, LLC
+      (b) Your contributed code may be used for commercial purposes,
+          including but not limited to cloud services and enterprise
+          editions operated by ThinkAny, LLC.
+
+   3. Trademark
+
+      You may not use the FastClaw name, logo, or trademarks to promote
+      derivative products or services without prior written consent from
+      ThinkAny, LLC.
+
+   Apart from the specific conditions mentioned above, all other rights
+   and restrictions follow the Apache License 2.0. The full text of the
+   Apache License 2.0 is reproduced below.
+
+   Copyright (c) 2026 ThinkAny, LLC
 
 ────────────────────────────────────────────────────────────────────────────────
 

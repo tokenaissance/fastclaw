@@ -14,12 +14,24 @@ A lightweight AI Agent runtime written in Go.
 
 ---
 
+<p align="center">
+  <img src="previews/admin.png" alt="FastClaw admin dashboard" width="900">
+  <br>
+  <em>Platform admin: agents, models, skills, users, API keys</em>
+</p>
+
+<p align="center">
+  <img src="previews/agent.png" alt="FastClaw agent management" width="900">
+  <br>
+  <em>Per-agent management: chat, customize, scoped models / skills / channels / scheduler</em>
+</p>
+
 ## What is FastClaw?
 
 FastClaw is an **Agent Factory** — it creates, manages, and runs AI agents. Each agent has its own personality (SOUL.md), memory, skills, and tools. FastClaw handles the LLM communication, tool execution, sandbox isolation, and session management.
 
 ```bash
-# Install and run
+# Install (drops the binary into ~/.local/bin and adds it to PATH)
 curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/main/install.sh | bash
 ```
 
@@ -28,9 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/fastclaw-ai/fastclaw/main/install.s
 ### 1. First Run
 
 ```bash
-./fastclaw
-# Opens setup wizard → configure LLM provider → creates default agent
-# Admin token is generated — save it for dashboard login
+fastclaw
+# Opens setup wizard → configure LLM provider → creates default agent.
+# Foreground mode; ^C to stop. Use `fastclaw daemon start` to run in
+# the background, or `fastclaw daemon install` to register a
+# launchd / systemd service.
 ```
 
 ### 2. Dashboard
@@ -64,17 +78,21 @@ Click an agent to enter its management panel:
 
 ```
 ~/.fastclaw/
-  fastclaw.json              # Bootstrap config (gateway port, storage DSN)
   fastclaw.db                # SQLite default — users, agents, sessions,
                              # apikeys, configs, agent_files all live here
   skills/                    # Shared skills (bundled + installed)
   agents/
-    <agentId>/skills/        # Agent-private skills (filesystem only)
+    <agentId>/agent/skills/        # Agent-private skills (filesystem only)
 ```
 
 The database is the source of truth for everything except skill folders
 on disk. SQLite is the default; point `FASTCLAW_STORAGE_DSN` at Postgres
 for multi-pod deployments.
+
+**There is no `fastclaw.json`.** Bootstrap settings (port, bind, storage
+DSN, sandbox backend) come from `FASTCLAW_*` env vars; everything user-
+facing (providers, channels, settings, defaults) lives in the `configs`
+table and is edited through the dashboard or `fastclaw agents config`.
 
 ### What FastClaw Stores
 
@@ -83,7 +101,7 @@ for multi-pod deployments.
 | Agent records, SOUL.md / IDENTITY.md / MEMORY.md / agent.json | Agent | DB (`agent_files` table) |
 | Sessions (chat history) | Agent × user | DB (`sessions` table) |
 | API keys, users, scoped configs (providers/channels/settings) | Platform | DB |
-| Skills | Agent / Global | Filesystem (`skills/`, `agents/<id>/skills/`) |
+| Skills | Agent / Global | Filesystem (`skills/`, `agents/<id>/agent/skills/`) |
 | User accounts, billing | Application | Your app (ChatClaw, etc.) |
 | Output files | Application | Your app / S3 |
 
@@ -129,46 +147,39 @@ for multi-pod deployments.
 
 ## Configuration
 
-### fastclaw.json
+Bootstrap is **env-only**. Everything that needs to change at runtime
+(providers, models, channels, defaults, sandbox toggle) lives in the
+database and is edited through the dashboard or `fastclaw agents config`.
 
-```json
-{
-  "gateway": {
-    "port": 18953,
-    "auth": { "token": "your-admin-token" }
-  },
-  "storage": {
-    "type": "postgres",
-    "dsn": "postgres://user:pass@localhost:5432/fastclaw?sslmode=disable",
-    "autoMigrate": true
-  },
-  "sandbox": {
-    "enabled": true,
-    "backend": "e2b",
-    "e2bKey": "e2b_..."
-  },
-  "providers": {
-    "openrouter": {
-      "apiKey": "sk-or-...",
-      "apiBase": "https://openrouter.ai/api/v1",
-      "apiType": "openai"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": "openrouter/openai/gpt-4o",
-      "maxTokens": 8192,
-      "temperature": 0.7
-    }
-  }
-}
-```
+| Env var | Default | What it does |
+|---|---|---|
+| `FASTCLAW_HOME` | `~/.fastclaw` | Where the SQLite DB and skill folders live. |
+| `FASTCLAW_PORT` | `18953` | Gateway HTTP port. |
+| `FASTCLAW_BIND` | `loopback` | `loopback` (127.0.0.1) or `all` (0.0.0.0). |
+| `FASTCLAW_STORAGE_TYPE` | `sqlite` | `sqlite` or `postgres`. |
+| `FASTCLAW_STORAGE_DSN` | empty | Postgres DSN, e.g. `postgres://u:p@host:5432/db?sslmode=disable`. Empty = sqlite at `$FASTCLAW_HOME/fastclaw.db`. |
+| `FASTCLAW_STORAGE_AUTO_MIGRATE` | `true` | Apply schema migrations on boot. |
+| `FASTCLAW_SANDBOX_ENABLED` | dashboard | Override the Settings → Runtime toggle. |
+| `FASTCLAW_SANDBOX_BACKEND` | dashboard | `docker` or `e2b`. |
+| `FASTCLAW_SANDBOX_IMAGE` | dashboard | Docker image (Docker backend) or template id (E2B). |
+| `FASTCLAW_OBJECT_STORE_*` | unset | S3-compatible blob store for distributed deploys (multi-pod skill / file hydration). |
+| `FASTCLAW_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error`. |
+
+Anything not on this list — providers, models, default model, skill
+catalog, channels, plugin config, scheduler — is configured at runtime
+through the web UI (`http://localhost:18953`) or the CLI (`fastclaw
+agents config`, `fastclaw provider`, `fastclaw skill`).
 
 ## Deployment
 
 ### Local
+
 ```bash
-./fastclaw gateway
+fastclaw                    # foreground (^C to stop)
+fastclaw daemon start       # background (logs at ~/.fastclaw/daemon.log)
+fastclaw daemon status
+fastclaw daemon stop
+fastclaw daemon install     # register as a launchd / systemd service
 ```
 
 ### Manage agents from the CLI (`fastclaw agents …`)
@@ -286,29 +297,37 @@ cd deploy/docker && ./start.sh
 ```
 
 ### Kubernetes
+
 ```yaml
-volumeMounts:
-  - name: config
-    mountPath: /root/.fastclaw/fastclaw.json
-    subPath: fastclaw.json
 env:
+  - name: FASTCLAW_BIND
+    value: "all"
+  - name: FASTCLAW_STORAGE_TYPE
+    value: "postgres"
   - name: FASTCLAW_STORAGE_DSN
     valueFrom:
       secretKeyRef:
         name: fastclaw-db
         key: dsn
+  - name: FASTCLAW_OBJECT_STORE_ENDPOINT
+    value: "s3.amazonaws.com"
+  - name: FASTCLAW_OBJECT_STORE_BUCKET
+    value: "fastclaw-skills"
 ```
+
+No config file is mounted — bootstrap is env-only. See `deploy/k8s/`
+for full manifests.
 
 ## Building
 
 ```bash
-# Build frontend
-cd web && pnpm install && pnpm build
-cp -r out ../internal/setup/web
-
-# Build binary
-go build -o fastclaw ./cmd/fastclaw
+make build                  # builds the web bundle and the Go binary → bin/fastclaw
+make install                # installs to $HOME/.local/bin (override with PREFIX=)
+make release-local          # cross-compile darwin / linux / windows into dist/
 ```
+
+The Makefile bakes the version, commit, and build date into the binary
+via `-ldflags`. CI uses these targets too — see `.github/workflows/`.
 
 ## License
 
