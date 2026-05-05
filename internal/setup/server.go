@@ -26,13 +26,18 @@ import (
 // AgentHandle is the surface the web UI uses to talk to a running agent.
 type AgentHandle interface {
 	Name() string
-	HandleWebChat(ctx context.Context, sessionId, text string) string
-	HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, events chan<- agent.ChatEvent) string
+	HandleWebChat(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any) string
+	HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any, events chan<- agent.ChatEvent) string
 	WebChatHistory(sessionId string) []map[string]any
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
 	RenameWebChatSession(sessionId, title string) error
 	ReloadWorkspaceFiles()
+	// WriteSessionAttachments materializes user-uploaded image bytes (data
+	// URLs / HTTPS URLs) into the agent's session workspace so skills can
+	// read them via /workspace/<filename>. Returns the relative filenames
+	// in input order; per-image errors are skipped.
+	WriteSessionAttachments(ctx context.Context, sessionID string, urls []string) []string
 }
 
 // AgentProvider is implemented by gateway.UserSpace's agent manager — used
@@ -221,12 +226,31 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/agents/{id}/channels/telegram", auth(s.handleConnectAgentTelegram))
 	mux.HandleFunc("POST /api/agents/{id}/channels/discord", auth(s.handleConnectAgentDiscord))
 	mux.HandleFunc("POST /api/agents/{id}/channels/slack", auth(s.handleConnectAgentSlack))
+	mux.HandleFunc("POST /api/agents/{id}/channels/wechat/login", auth(s.handleStartAgentWeChatLogin))
+	mux.HandleFunc("GET /api/agents/{id}/channels/wechat/login/status", auth(s.handleAgentWeChatLoginStatus))
+	mux.HandleFunc("POST /api/agents/{id}/channels/line", auth(s.handleConnectAgentLINE))
+	mux.HandleFunc("POST /api/agents/{id}/channels/feishu", auth(s.handleConnectAgentFeishu))
 	mux.HandleFunc("DELETE /api/agents/{id}/channels/{type}/{accountId}", auth(s.handleDisconnectAgentChannel))
+
+	// Feishu (飞书) event webhook. UNAUTHENTICATED — Feishu posts here
+	// without a fastclaw bearer token. Per-event security comes from
+	// the verification_token validated inside the adapter against the
+	// payload's header.token. The {appId} path segment scopes the
+	// receive to one registered channel.
+	mux.HandleFunc("POST /api/feishu/webhook/{appId}", s.handleFeishuWebhook)
+
+	// LINE Messaging API event webhook. UNAUTHENTICATED at the fastclaw
+	// layer — per-event security is HMAC-SHA256(channel_secret, body)
+	// validated by the adapter against the `x-line-signature` header.
+	// The {accountId} path segment is the bot's userId, scoping the
+	// receive to one registered channel.
+	mux.HandleFunc("POST /api/line/webhook/{accountId}", s.handleLINEWebhook)
 
 	// Skills
 	mux.HandleFunc("GET /api/skills", s.handleListSkills)
 	mux.HandleFunc("GET /api/skills/search", auth(s.handleSearchSkills))
 	mux.HandleFunc("POST /api/skills/install", auth(s.handleInstallSkill))
+	mux.HandleFunc("POST /api/skills/upload", auth(s.handleUploadSkill))
 	mux.HandleFunc("DELETE /api/skills/{name}", admin(s.handleDeleteSkill))
 	mux.HandleFunc("GET /api/agents/{id}/skills", auth(s.handleListAgentSkills))
 	mux.HandleFunc("DELETE /api/agents/{id}/skills/{name}", auth(s.handleDeleteAgentSkill))

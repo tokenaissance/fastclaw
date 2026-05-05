@@ -186,6 +186,7 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 			ChatID:      j.ChatID,
 			UserID:      "cron",
 			OwnerUserID: j.OwnerUserID,
+			AgentID:     j.AgentID,
 			Text:        text,
 			PeerKind:    "dm",
 		}
@@ -335,6 +336,7 @@ func (s *Scheduler) fireJob(job Job) {
 		ChatID:      job.ChatID,
 		UserID:      "cron",
 		OwnerUserID: job.OwnerUserID,
+		AgentID:     job.AgentID,
 		Text:        text,
 		PeerKind:    "dm",
 	}

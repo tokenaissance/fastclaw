@@ -71,24 +71,88 @@ func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey stri
 		UpdatedAt: time.Now(),
 	}
 	for i, m := range messages {
-		rec.Messages[i] = store.SessionMessage{
-			Role:         m.Role,
-			Content:      m.Content,
-			ToolCallID:   m.ToolCallID,
-			Name:         m.Name,
-			Metadata:     m.Metadata,
-			Timestamp:    time.Now(),
-			Thinking:     m.Thinking,
-			RawAssistant: m.RawAssistant,
-		}
-		if len(m.ToolCalls) > 0 {
-			rec.Messages[i].ToolCalls = m.ToolCalls
-		}
-		if len(m.ContentParts) > 0 {
-			rec.Messages[i].ContentParts = m.ContentParts
-		}
+		rec.Messages[i] = sessionMessageFromProvider(m)
 	}
 	return a.st.SaveSession(ctx, a.userID, agentID, sessionKey, rec)
+}
+
+// AppendMessage persists one turn into session_messages — the append-only
+// archive parallel to the sessions blob. Called from Session.Append on
+// every Append, in addition to SaveSession.
+func (a *StoreAdapter) AppendMessage(ctx context.Context, agentID, sessionKey string, m provider.Message) error {
+	return a.st.AppendSessionMessage(ctx, a.userID, agentID, sessionKey, sessionMessageFromProvider(m))
+}
+
+// ListMessages reads the full archive for one session, in turn order.
+// Used by the chat history UI so users see the original conversation
+// even after compaction has shrunk the LLM-facing working set.
+func (a *StoreAdapter) ListMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
+	sms, err := a.st.ListSessionMessages(ctx, a.userID, agentID, sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	msgs := make([]provider.Message, len(sms))
+	for i, m := range sms {
+		msgs[i] = providerMessageFromStored(m)
+	}
+	return msgs, nil
+}
+
+// sessionMessageFromProvider converts a provider.Message into the wire
+// shape stored in both sessions.messages (as a JSON array element) and
+// session_messages (as a row). Single conversion site so the two paths
+// can't drift.
+func sessionMessageFromProvider(m provider.Message) store.SessionMessage {
+	out := store.SessionMessage{
+		Role:         m.Role,
+		Content:      m.Content,
+		ToolCallID:   m.ToolCallID,
+		Name:         m.Name,
+		Metadata:     m.Metadata,
+		Timestamp:    time.Now(),
+		Thinking:     m.Thinking,
+		RawAssistant: m.RawAssistant,
+	}
+	if len(m.ToolCalls) > 0 {
+		out.ToolCalls = m.ToolCalls
+	}
+	if len(m.ContentParts) > 0 {
+		out.ContentParts = m.ContentParts
+	}
+	return out
+}
+
+// providerMessageFromStored is the inverse of sessionMessageFromProvider.
+// JSON-tunnel ToolCalls / ContentParts back into typed provider slices,
+// otherwise the generic interface{} shape leaves them as map nests and
+// downstream callers see "no tool calls / no parts" on a populated row.
+func providerMessageFromStored(m store.SessionMessage) provider.Message {
+	out := provider.Message{
+		Role:         m.Role,
+		Content:      m.Content,
+		ToolCallID:   m.ToolCallID,
+		Name:         m.Name,
+		Metadata:     m.Metadata,
+		Thinking:     m.Thinking,
+		RawAssistant: m.RawAssistant,
+	}
+	if m.ToolCalls != nil {
+		if raw, err := json.Marshal(m.ToolCalls); err == nil {
+			var tcs []provider.ToolCall
+			if json.Unmarshal(raw, &tcs) == nil {
+				out.ToolCalls = tcs
+			}
+		}
+	}
+	if m.ContentParts != nil {
+		if raw, err := json.Marshal(m.ContentParts); err == nil {
+			var parts []provider.ContentPart
+			if json.Unmarshal(raw, &parts) == nil {
+				out.ContentParts = parts
+			}
+		}
+	}
+	return out
 }
 
 func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error) {
@@ -104,33 +168,42 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 		sessionId := strings.TrimPrefix(m.Key, "web_")
 		preview := ""
 		thumb := ""
-		rec, err := a.st.GetSession(ctx, a.userID, agentID, m.Key)
-		if err == nil && rec != nil {
-			for _, msg := range rec.Messages {
-				if msg.Role != "user" {
-					continue
-				}
-				// Multimodal user turns (text + image attachment) live
-				// in ContentParts with Content="". Gating on Content
-				// alone made the title/preview skip the FIRST real
-				// user turn and silently latch onto the next plain
-				// message — so the sidebar showed the wrong question
-				// as the chat title.
-				text := userText(msg)
-				img := userImage(msg)
-				if text == "" && img == "" {
-					continue
-				}
-				preview = text
-				if preview == "" {
-					preview = "[image]"
-				}
-				if len(preview) > 100 {
-					preview = preview[:100] + "..."
-				}
-				thumb = img
-				break
+		// Prefer the append-only archive — its first row is always the
+		// user's original opening turn even after compaction has folded
+		// it into a [Conversation Summary] row inside the blob. Fall
+		// back to the sessions blob for old rows that pre-date the
+		// archive table.
+		archive, _ := a.st.ListSessionMessages(ctx, a.userID, agentID, m.Key)
+		var source []store.SessionMessage
+		if len(archive) > 0 {
+			source = archive
+		} else if rec, err := a.st.GetSession(ctx, a.userID, agentID, m.Key); err == nil && rec != nil {
+			source = rec.Messages
+		}
+		for _, msg := range source {
+			if msg.Role != "user" {
+				continue
 			}
+			// Multimodal user turns (text + image attachment) live
+			// in ContentParts with Content="". Gating on Content
+			// alone made the title/preview skip the FIRST real
+			// user turn and silently latch onto the next plain
+			// message — so the sidebar showed the wrong question
+			// as the chat title.
+			text := userText(msg)
+			img := userImage(msg)
+			if text == "" && img == "" {
+				continue
+			}
+			preview = text
+			if preview == "" {
+				preview = "[image]"
+			}
+			if len(preview) > 100 {
+				preview = preview[:100] + "..."
+			}
+			thumb = img
+			break
 		}
 		if preview == "" {
 			continue

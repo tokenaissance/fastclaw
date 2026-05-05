@@ -7,6 +7,12 @@ type InboundMessage struct {
 	ChatID       string   // unique chat identifier within the channel
 	UserID       string   // user identifier
 	OwnerUserID  string   // fastclaw user that owns the agent (for multi-user routing)
+	// AgentID is an *explicit* agent target. Non-empty when the source
+	// of the message already knows which agent should handle it (cron
+	// jobs, web chat, sub-agent spawns) — bypasses binding lookup +
+	// default-agent fallback in routeDM. Empty for IM-channel messages
+	// where the gateway has to figure out the agent from bindings.
+	AgentID      string
 	MessageID    string   // unique message identifier within the chat
 	Text         string   // message text
 	PeerKind     string   // "group" or "dm"
@@ -16,6 +22,14 @@ type InboundMessage struct {
 	PhotoURL     string   // URL of attached photo (if any) — single-image legacy field
 	PhotoURLs    []string // URLs of attached photos. Independent of PhotoURL so old single-image callers (Telegram bridge etc.) keep working untouched; new web-chat path uses this for multi-image attachments.
 	ReplyToMsgID string   // message ID being replied to
+	// Params is a freeform structured-parameter blob supplied by the
+	// calling client (typically a third-party app via the chat
+	// completions API's `params` field). The agent loop renders it as
+	// a per-turn system message so the LLM can honor it when calling
+	// tools. Scope is per-request — not stored in session history,
+	// next turn ships its own params (or none). nil / empty when the
+	// inbound source doesn't supply params (IM channels, web chat).
+	Params map[string]any
 }
 
 // OutboundButton represents a button in an inline keyboard.

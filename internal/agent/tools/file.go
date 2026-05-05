@@ -175,6 +175,44 @@ func resolvePathSandboxed(root, sandboxRoot, path string) (string, error) {
 	return absFull, nil
 }
 
+// looksBinary returns true when the payload contains a NUL byte in the
+// first 8KB — a near-perfect signal for JPEG/PNG/PDF/zip/wasm/etc. We
+// refuse to read binary files via read_file because the bytes get coerced
+// into a Go string, then sent to the LLM as tool_result text: a 5MB JPG
+// becomes ~1.5M garbled UTF-8 tokens, blowing past every model's context
+// limit and turning the next inference into a multi-minute "thinking..."
+// stall (or an outright API error). The right path for binary files is
+// to feed the path directly to whatever skill handles that format
+// (image-tool's `input`, etc.) — never inline the bytes.
+func looksBinary(data []byte) bool {
+	head := data
+	if len(head) > 8192 {
+		head = head[:8192]
+	}
+	for _, b := range head {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func binaryRefusal(path string, size int) string {
+	// Skill-agnostic by design: read_file is a system tool, but which
+	// skill is the right consumer for a binary path depends on what
+	// the host agent actually has installed (image editing, OCR,
+	// archive extract, …). Naming a specific skill here would mislead
+	// agents that don't have it. Per-skill guidance belongs in that
+	// skill's SKILL.md / the agent's SOUL.md, not in a system tool's
+	// error path.
+	//
+	// What this message MUST do: stop the model's "let me probe the
+	// file first" reflex (file / identify / inline python on a 5MB
+	// JPEG burns turns and never produces a useful result). The
+	// "Don't probe" line is the load-bearing part.
+	return fmt.Sprintf("[read_file refused: %q is a binary file (%d bytes). Binary bytes don't decode as text — loading them would blow past the context window. Don't probe with `file`, `identify`, `ls`, `python`, or any inline script — pass the path directly to whichever skill in your toolset handles this format (e.g. an image-editing skill for images). If your toolset doesn't have a skill for this format, tell the user instead of trying to inline-process the bytes.]", path, size)
+}
+
 func makeReadFile(r *Registry) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args readFileArgs
@@ -193,6 +231,9 @@ func makeReadFile(r *Registry) ToolFunc {
 			data, err := io.ReadAll(rc)
 			if err != nil {
 				return "", fmt.Errorf("workspace read: %w", err)
+			}
+			if looksBinary(data) {
+				return binaryRefusal(args.Path, len(data)), nil
 			}
 			return string(data), nil
 		}
@@ -227,6 +268,9 @@ func makeReadFile(r *Registry) ToolFunc {
 			return "", fmt.Errorf("read file: %w", err)
 		}
 
+		if looksBinary(data) {
+			return binaryRefusal(args.Path, len(data)), nil
+		}
 		return string(data), nil
 	}
 }
@@ -419,11 +463,17 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				defer rc.Close()
 				data, readErr := io.ReadAll(rc)
 				if readErr == nil {
+					if looksBinary(data) {
+						return binaryRefusal(args.Path, len(data)), nil
+					}
 					return string(data), nil
 				}
 			}
 		}
 		out, err := ex.ReadFile(ctx, args.Path)
+		if err == nil && looksBinary([]byte(out)) {
+			return binaryRefusal(args.Path, len(out)), nil
+		}
 		return MetaSandboxPrefix + out, err
 	})
 

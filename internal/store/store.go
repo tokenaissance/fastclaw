@@ -67,6 +67,17 @@ type Store interface {
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
 
+	// --- Session messages (append-only per-turn archive) ---
+	//
+	// Mirrors every Append into session_messages, separate from the
+	// sessions.messages JSONB working set. AppendSessionMessage assigns
+	// the next seq atomically inside one INSERT (COALESCE(MAX(seq),-1)+1)
+	// so callers don't pass a seq. ListSessionMessages returns all rows
+	// for one session in ascending seq order — that's the full history,
+	// untouched by compaction. DeleteSession cascades to clean these up.
+	AppendSessionMessage(ctx context.Context, userID, agentID, sessionKey string, msg SessionMessage) error
+	ListSessionMessages(ctx context.Context, userID, agentID, sessionKey string) ([]SessionMessage, error)
+
 	// --- Agent files ---
 	//
 	// SOUL.md, IDENTITY.md, MEMORY.md, AGENTS.md, BOOTSTRAP.md, etc.

@@ -33,7 +33,7 @@ test:
 	go test ./...
 
 dev: build-web
-	air
+	FASTCLAW_DUMP_LLM=1 air
 
 clean:
 	rm -rf bin/ dist/ tmp/

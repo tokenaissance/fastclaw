@@ -26,6 +26,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/taskqueue"
@@ -101,21 +102,27 @@ func buildToolChainFromResolved(resolved config.ResolvedAgent, category string) 
 // Gateway is the runtime orchestrator. It does not load any agents at
 // boot; UserSpaces are constructed lazily when an authenticated request
 // resolves to their owner.
+//
+// `sandboxPool` is the gateway-wide executor pool. Built once from the
+// system-scope sandbox config and shared by every UserSpace. The
+// per-UserSpace `SandboxPool` field is just a borrowed reference;
+// shutdown closes this single pool.
 type Gateway struct {
-	bus        *bus.MessageBus
-	users      *userSpaceRegistry
-	chanMgr    *channels.Manager
-	webChan    *channels.WebChannel
-	scheduler  *cron.Scheduler
-	webhookSrv *webhook.Server
-	pluginMgr  *plugin.Manager
-	taskQueue  *taskqueue.Queue
-	store      store.Store
-	workspace  workspace.Store
-	usage      usage.Meter
-	envCfg     *config.EnvConfig
-	mu         sync.RWMutex
-	dedup      sync.Map
+	bus         *bus.MessageBus
+	users       *userSpaceRegistry
+	chanMgr     *channels.Manager
+	webChan     *channels.WebChannel
+	scheduler   *cron.Scheduler
+	webhookSrv  *webhook.Server
+	pluginMgr   *plugin.Manager
+	taskQueue   *taskqueue.Queue
+	store       store.Store
+	workspace   workspace.Store
+	sandboxPool sandbox.ExecutorPool
+	usage       usage.Meter
+	envCfg      *config.EnvConfig
+	mu          sync.RWMutex
+	dedup       sync.Map
 }
 
 // WebChannel returns the in-process fan-out for web SSE subscribers.
@@ -237,18 +244,28 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	}
 	taskTimeout := time.Duration(taskTimeoutSec) * time.Second
 
+	// System-wide sandbox pool. Built once at boot from the system-
+	// scope sandbox config (env-merged) and shared across every
+	// UserSpace. Lazy-injected agents (super_admin chat, app-mode
+	// API-key callers whose `app_user` UserSpace owns no agents of
+	// its own) need this — without a system-level pool, the per-user
+	// builder produced nil for those spaces and the agent's exec tool
+	// refused to run with "sandbox required but no executor available".
+	systemSandboxPool := buildSystemSandboxPool(readSystemSandboxCfg(st), ws)
+
 	g := &Gateway{
-		bus:        mb,
-		store:      st,
-		workspace:  ws,
-		usage:      meter,
-		users:      newUserSpaceRegistry(mb, st, ws),
-		chanMgr:    chanMgr,
-		webChan:    webChan,
-		scheduler:  scheduler,
-		webhookSrv: webhookSrv,
-		pluginMgr:  pluginMgr,
-		envCfg:     env,
+		bus:         mb,
+		store:       st,
+		workspace:   ws,
+		usage:       meter,
+		sandboxPool: systemSandboxPool,
+		users:       newUserSpaceRegistry(mb, st, ws, systemSandboxPool),
+		chanMgr:     chanMgr,
+		webChan:     webChan,
+		scheduler:   scheduler,
+		webhookSrv:  webhookSrv,
+		pluginMgr:   pluginMgr,
+		envCfg:      env,
 	}
 
 	if webhookSrv != nil {
@@ -281,53 +298,12 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 			}
 		}()
 
-		// IM progress relay: forward the agent loop's tool_call events
-		// to the channel as short status messages so users on long
-		// tool runs (image-tool taking 30s+) see something happening
-		// instead of staring at a typing dot. We only react to
-		// tool_call (the start signal) and skip tool_result / content
-		// — final reply already comes through the Outbound below.
-		// Content/text events would otherwise duplicate the final
-		// answer.
-		eventsCh := make(chan agent.ChatEvent, 64)
-		eventsDone := make(chan struct{})
-		go func() {
-			defer close(eventsDone)
-			seen := make(map[string]bool) // dedupe per-turn
-			for evt := range eventsCh {
-				if evt.Type != "tool_call" {
-					continue
-				}
-				name, _ := evt.Data["name"].(string)
-				if name == "" || seen[name] {
-					continue
-				}
-				seen[name] = true
-				progress := bus.OutboundMessage{
-					Channel:   task.Message.Channel,
-					AccountID: task.AccountID,
-					ChatID:    task.Message.ChatID,
-					Text:      "🛠 calling `" + name + "`…",
-					ParseMode: "Markdown",
-				}
-				// Non-blocking enqueue: progress messages are
-				// best-effort, dropping one is fine. A blocking
-				// `mb.Outbound <- progress` deadlocked the task
-				// when routeOutbound stalled on a slow Telegram
-				// API call — the goroutine couldn't exit because
-				// it never saw close(eventsCh), the main flow
-				// waited on <-eventsDone forever, the taskQueue
-				// slot stayed held, and every subsequent inbound
-				// from this user piled up unanswered.
-				select {
-				case mb.Outbound <- progress:
-				case <-ctx.Done():
-					return
-				default:
-					slog.Debug("outbound full, dropping progress event", "tool", name)
-				}
-			}
-		}()
+		// IM channels show only the final reply — no per-tool_call
+		// progress messages. Users see a typing indicator (above)
+		// during the run; intermediate "calling X…" lines added too
+		// much noise on multi-tool turns. Web UI subscribes to chat
+		// events directly via HandleWebChatStream and is unaffected.
+
 		// Record turn start. After ag.HandleMessage returns we list the
 		// workspace and attach every image whose ModTime >= turnStart —
 		// works regardless of whether the LLM's reply contains a usable
@@ -336,11 +312,8 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// path stability, files overwritten in place, etc.).
 		turnStart := time.Now()
 
-		ctxWithEvents := agent.ContextWithChatEvents(ctx, eventsCh)
-		reply := ag.HandleMessage(ctxWithEvents, task.Message)
+		reply := ag.HandleMessage(ctx, task.Message)
 		close(typingDone)
-		close(eventsCh)
-		<-eventsDone
 		// Extract `![alt](workspace/relative/path)` markdown image refs
 		// from the agent's reply, resolve their bytes via the
 		// workspace.Store, and ship them as MediaItems so IM channels
@@ -499,10 +472,8 @@ func (g *Gateway) Run() error {
 	if g.pluginMgr != nil {
 		g.pluginMgr.StopAll()
 	}
-	for _, sp := range g.users.all() {
-		if sp.SandboxPool != nil {
-			sp.SandboxPool.CloseAll()
-		}
+	if g.sandboxPool != nil {
+		g.sandboxPool.CloseAll()
 	}
 	slog.Info("gateway stopped")
 	return nil
@@ -578,6 +549,18 @@ func readSystemTaskQueue(st store.Store) config.TaskQueueCfg {
 		_ = scope.SettingInto(context.Background(), st, NSTaskQueue, "", "", "", &out)
 	}
 	return out
+}
+
+// readSystemSandboxCfg reads the system-scope sandbox setting and
+// merges FASTCLAW_SANDBOX_* env vars on top. Source of truth for the
+// gateway-wide sandbox pool.
+func readSystemSandboxCfg(st store.Store) config.SandboxCfg {
+	cfg := &config.Config{}
+	if st != nil {
+		_ = scope.SettingInto(context.Background(), st, NSSandbox, "", "", "", &cfg.Sandbox)
+	}
+	config.LoadEnv().ApplyToConfig(cfg)
+	return cfg.Sandbox
 }
 
 // Setting namespace constants. Each maps to one row in configs

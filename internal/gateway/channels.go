@@ -28,6 +28,12 @@ func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr
 		return registerDiscordChannels(cc, mb, chanMgr, hot)
 	case "slack":
 		return registerSlackChannels(cc, mb, chanMgr, hot)
+	case "line":
+		return registerLINEChannels(cc, mb, chanMgr, hot)
+	case "wechat":
+		return registerWeChatChannels(cc, mb, chanMgr, hot)
+	case "feishu":
+		return registerFeishuChannels(cc, mb, chanMgr, hot)
 	}
 	return nil
 }
@@ -117,6 +123,68 @@ func registerSlackChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanM
 			return err
 		}
 		register(chanMgr, sl, hot)
+	}
+	return nil
+}
+
+func registerLINEChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
+	// LINE row carries one or more (channel_access_token, channel_secret)
+	// pairs keyed by bot userId. AccountConfig.BotToken is the channel
+	// access token; AccountConfig.UserID is the channel secret (used
+	// for inbound HMAC verification — see channels/line.go field-mapping
+	// note).
+	for accountID, acct := range chCfg.Accounts {
+		token := acct.BotToken
+		if token == "" {
+			token = chCfg.BotToken
+		}
+		ln, err := channels.NewLINE(token, acct.UserID, accountID, mb)
+		if err != nil {
+			return err
+		}
+		register(chanMgr, ln, hot)
+	}
+	return nil
+}
+
+func registerFeishuChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
+	// Feishu is multi-account: one row carries one or more (app_id,
+	// app_secret, verification_token) triples keyed by app_id. No
+	// legacy single-bot fallback — the per-account map is the only
+	// shape produced by the connect handler.
+	for accountID, acct := range chCfg.Accounts {
+		secret := acct.BotToken
+		if secret == "" {
+			secret = chCfg.BotToken
+		}
+		// AccountConfig.UserID carries the verification token (see
+		// channels/feishu.go for the field-mapping rationale).
+		lk, err := channels.NewFeishu(accountID, secret, acct.UserID, accountID, mb)
+		if err != nil {
+			return err
+		}
+		register(chanMgr, lk, hot)
+	}
+	return nil
+}
+
+func registerWeChatChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
+	// WeChat is multi-account by design — every QR scan mints a new
+	// (botToken, ilink_user_id, baseURL) triple keyed under a fresh
+	// accountID. The legacy "no Accounts map → single bot from
+	// top-level BotToken" shape doesn't apply (we never have a
+	// usable top-level config; the per-account fields BaseURL +
+	// UserID are required). So skip the empty-Accounts fallback.
+	for accountID, acct := range chCfg.Accounts {
+		token := acct.BotToken
+		if token == "" {
+			token = chCfg.BotToken
+		}
+		wc, err := channels.NewWeChat(token, acct.BaseURL, acct.UserID, accountID, mb)
+		if err != nil {
+			return err
+		}
+		register(chanMgr, wc, hot)
 	}
 	return nil
 }

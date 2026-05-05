@@ -307,16 +307,21 @@ func (a *Agent) Name() string {
 }
 
 // HandleWebChat handles a chat message from the web UI with a session ID.
-func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string) string {
+// imageURLs and params mirror the streaming variant so non-streaming
+// callers (third-party apps hitting POST /api/chat) get the same
+// vision + per-turn-params support as the SSE path.
+func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any) string {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
 	msg := bus.InboundMessage{
-		Channel:  "web",
-		ChatID:   sessionId,
-		UserID:   "web-user",
-		Text:     text,
-		PeerKind: "dm",
+		Channel:   "web",
+		ChatID:    sessionId,
+		UserID:    "web-user",
+		Text:      text,
+		PeerKind:  "dm",
+		PhotoURLs: imageURLs,
+		Params:    params,
 	}
 	return a.HandleMessage(ctx, msg)
 }
@@ -325,7 +330,7 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string) strin
 // imageURLs carries any user-attached images (data URLs or fetchable HTTPS
 // links) so vision-capable models receive them as image_url content parts on
 // the user message.
-func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, events chan<- ChatEvent) string {
+func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string, imageURLs []string, params map[string]any, events chan<- ChatEvent) string {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
@@ -337,6 +342,7 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 		Text:      text,
 		PeerKind:  "dm",
 		PhotoURLs: imageURLs,
+		Params:    params,
 	}
 	return a.HandleMessage(ctx, msg)
 }
@@ -410,12 +416,18 @@ func (a *Agent) Sessions() *session.Manager {
 }
 
 // WebChatHistory returns chat history for a specific web session.
+//
+// Reads from the append-only session_messages archive (via
+// Session.ArchivedMessages) instead of the in-memory working set, so
+// post-compaction sessions show the original conversation rather than a
+// summary + last 20 turns. Falls back to the working set when no
+// archive is available (file-backed mode or pre-archive sessions).
 func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
 	sess := a.sessions.Get("web", sessionId)
-	msgs := sess.GetMessages()
+	msgs := sess.ArchivedMessages()
 	var history []map[string]any
 	for _, m := range msgs {
 		switch m.Role {
@@ -504,6 +516,140 @@ func (a *Agent) CostTracker() *costtracker.Tracker {
 	return a.costTracker
 }
 
+// dumpLLMRequest appends the full LLM-bound payload to a dedicated file
+// when FASTCLAW_DUMP_LLM is set. Default path is ~/.fastclaw/logs/llm-dump.log
+// (overridable via FASTCLAW_DUMP_LLM_FILE) — separate from gateway.log so
+// the multi-thousand-line system prompt doesn't drown structured slog
+// entries, and tail-able regardless of whether the gateway runs under air,
+// daemon, or as a foreground process.
+//
+// Multi-line content is written as one block per turn (not per-line slog
+// calls) so timestamps don't shred the system prompt.
+func dumpLLMRequest(agentName, model string, messages []provider.Message, tools []provider.Tool) {
+	if os.Getenv("FASTCLAW_DUMP_LLM") == "" {
+		return
+	}
+	path := os.Getenv("FASTCLAW_DUMP_LLM_FILE")
+	if path == "" {
+		home := os.Getenv("FASTCLAW_HOME")
+		if home == "" {
+			if h, err := os.UserHomeDir(); err == nil {
+				home = h + "/.fastclaw"
+			}
+		}
+		if home == "" {
+			return
+		}
+		path = home + "/logs/llm-dump.log"
+	}
+	_ = os.MkdirAll(filepathDir(path), 0o755)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n=== LLM REQUEST  ts=%s  agent=%s  model=%s  messages=%d  tools=%d ===\n",
+		time.Now().Format(time.RFC3339Nano), agentName, model, len(messages), len(tools))
+	for i, m := range messages {
+		fmt.Fprintf(&b, "--- msg[%d] role=%s ---\n", i, m.Role)
+		// Prefer Content; fall back to ContentParts for multimodal turns
+		// (image_url stubs keep logs readable instead of dumping data URLs).
+		content := m.Content
+		if content == "" && len(m.ContentParts) > 0 {
+			var pb strings.Builder
+			for _, p := range m.ContentParts {
+				switch p.Type {
+				case "text":
+					pb.WriteString(p.Text)
+				case "image_url":
+					pb.WriteString("[image_url]")
+				default:
+					fmt.Fprintf(&pb, "[%s]", p.Type)
+				}
+				pb.WriteString("\n")
+			}
+			content = pb.String()
+		}
+		if content != "" {
+			b.WriteString(content)
+			if !strings.HasSuffix(content, "\n") {
+				b.WriteString("\n")
+			}
+		}
+		for _, tc := range m.ToolCalls {
+			fmt.Fprintf(&b, "[tool_call name=%s args=%s]\n", tc.Function.Name, tc.Function.Arguments)
+		}
+	}
+	if len(tools) > 0 {
+		names := make([]string, 0, len(tools))
+		for _, t := range tools {
+			names = append(names, t.Function.Name)
+		}
+		fmt.Fprintf(&b, "--- tools (%d) ---\n%s\n", len(tools), strings.Join(names, ", "))
+	}
+	b.WriteString("=== END LLM REQUEST ===\n")
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		// Fall back to stderr so the dump isn't silently lost.
+		fmt.Fprint(os.Stderr, b.String())
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(b.String())
+}
+
+// filepathDir is a tiny inline helper to dodge importing path/filepath
+// just for one Dir() call in this single function.
+func filepathDir(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[:i]
+		}
+	}
+	return "."
+}
+
+// renderClientParams turns the per-request `params` blob the API
+// caller submitted into a system message that nudges the LLM to
+// honor those values when calling tools. Returns "" when params is
+// empty so we don't add a noise message every turn.
+//
+// Why a system message and not a binding into tool args:
+//
+//	v1 trades determinism for simplicity. Apps don't know which
+//	tools the agent has — they just send a flat key/value blob, and
+//	the agent owner's system prompt tells the LLM what to do with
+//	each known key. LLMs are reliable at copying JSON-shaped values
+//	verbatim into tool calls (the failure mode is "ignored", not
+//	"corrupted"); a stronger forcing layer is a v2 problem.
+//
+// Output shape: a `## Client Parameters` section with the JSON
+// pretty-printed in a fenced block, plus a one-liner reminding the
+// model these are constraints. The header + fence are deliberate —
+// LLMs honor structured params framed as a separate document
+// section much more reliably than as inline prose.
+func renderClientParams(params map[string]any) string {
+	if len(params) == 0 {
+		return ""
+	}
+	blob, err := json.MarshalIndent(params, "", "  ")
+	if err != nil {
+		return ""
+	}
+	// Minimal by design — one fact, no behavioural prose. Earlier
+	// versions tried to nudge the model with "treat as constraints" /
+	// "don't shell out" / "look at the skills section" and each one
+	// opened a new literal-misread surface (the model treated `model`
+	// as a directive to call that API, refused outright "no skill
+	// matches", or did `ls Skills/` looking for a directory). How to
+	// pick a tool / skill is the agent's regular job, fully covered
+	// by the system prompt's skills section and any per-agent SOUL.md.
+	// The only thing the system has to say here is "here is the data
+	// the client sent" — anything more is noise.
+	return "## Client Parameters\n\n" +
+		"The user's client app submitted these parameters alongside " +
+		"the message. Forward them to whichever tool / skill you call.\n\n" +
+		"```json\n" + string(blob) + "\n```"
+}
+
 // HandleMessage processes an inbound message through the ReAct loop.
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
 	// Check for slash commands first
@@ -579,8 +725,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		slog.Info("context compacted", "agent", a.name, "log_file", compactResult.LogFile)
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+1)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+2)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
+	}
 	messages = append(messages, sessionMsgs...)
 
 	toolDefs := a.registry.Definitions()
@@ -620,6 +769,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			return noProviderMsg
 		}
+		dumpLLMRequest(a.name, a.model, llmMessages, toolDefs)
 		resp, err := a.provider.Chat(ctx, llmMessages, toolDefs, a.model, a.maxTokens, a.temperature)
 
 		// Hook: AfterModelCall
@@ -943,8 +1093,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		sessionMsgs = compactResult.Messages
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+1)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+2)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
+	}
 	messages = append(messages, sessionMsgs...)
 
 	toolDefs := a.registry.Definitions()
@@ -961,6 +1114,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		hcBefore := &HookContext{AgentName: a.name, Point: BeforeModelCall, Messages: messages, ChatID: msg.ChatID, UserID: a.ownerUserID}
 		a.hooks.Run(ctx, hcBefore)
 
+		dumpLLMRequest(a.name, a.model, messages, toolDefs)
 		resp, err := a.provider.Chat(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
 
 		hcAfter := &HookContext{AgentName: a.name, Point: AfterModelCall, Messages: messages, Response: resp, Error: err, StartTime: hcBefore.StartTime, ChatID: msg.ChatID, UserID: a.ownerUserID}

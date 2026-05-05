@@ -163,6 +163,17 @@ func (m *Manager) Has(channel, accountID string) bool {
 	return ok
 }
 
+// Get returns the registered adapter for (channel, accountID), or nil.
+// Used by the Feishu webhook handler to find the adapter that should
+// dispatch an incoming event — the HTTP route receives the raw POST
+// and needs to call the right Feishu instance's HandleWebhook based on
+// the {accountId} (Feishu App ID) in the URL path.
+func (m *Manager) Get(channel, accountID string) Channel {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.channels[channelKey(channel, accountID)]
+}
+
 func channelKey(channel, accountID string) string {
 	if accountID == "" {
 		return channel + ":"

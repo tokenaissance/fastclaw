@@ -1,13 +1,17 @@
 package setup
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -583,4 +587,518 @@ func slackAuthTest(botToken string) (teamID, teamName, botUserID string, err err
 		return "", "", "", errors.New("slack auth.test returned empty team_id")
 	}
 	return ok.TeamID, ok.Team, ok.UserID, nil
+}
+
+// --- WeChat (iLink) ---
+//
+// Unlike Telegram/Discord/Slack, WeChat doesn't take a paste-it-in
+// token. The user scans a QR code with the WeChat phone app; on
+// confirmation iLink hands back a (bot_token, ilink_bot_id,
+// ilink_user_id, baseurl) tuple. Two-step flow:
+//
+//   POST /api/agents/{id}/channels/wechat/login
+//     → fetch a QR token from iLink, render as image on the client.
+//       Returns {sessionID, qrCode, qrCodeImg}.
+//
+//   GET  /api/agents/{id}/channels/wechat/login/status?session=<id>
+//     → poll iLink's get_qrcode_status one round-trip.
+//       Returns {status: wait|scaned|confirmed|expired, connected,
+//       accountId?}. On `confirmed`, persists the channel row +
+//       binding and hot-registers the adapter, so the next poll the
+//       client makes for sandbox/agent state shows the bot live.
+
+const (
+	wechatILinkBase    = "https://ilinkai.weixin.qq.com"
+	wechatQRCodeURL    = wechatILinkBase + "/ilink/bot/get_bot_qrcode?bot_type=3"
+	wechatQRStatusURL  = wechatILinkBase + "/ilink/bot/get_qrcode_status?qrcode="
+	wechatStatusWait   = "wait"
+	wechatStatusScaned = "scaned"
+	wechatStatusOK     = "confirmed"
+	wechatStatusExpire = "expired"
+)
+
+// wechatLoginSession tracks an in-flight QR scan. Lives in memory only
+// — abandoned sessions get GC'd via the TTL sweep on the registry.
+// Saving to the store would let polls survive process restart but the
+// QR token itself expires in iLink server-side after a couple of
+// minutes anyway, so cross-restart resumption isn't worth the
+// complexity.
+type wechatLoginSession struct {
+	qrCode    string // iLink token, used both as polling key + as QR payload
+	qrCodeImg string // optional pre-rendered QR image (base64 or URL)
+	agentID   string // which agent the credentials should bind to
+	userID    string // owner — verified on every status poll
+	createdAt time.Time
+}
+
+type wechatLoginRegistry struct {
+	mu       sync.Mutex
+	sessions map[string]*wechatLoginSession
+}
+
+var wechatLogins = &wechatLoginRegistry{sessions: map[string]*wechatLoginSession{}}
+
+func (r *wechatLoginRegistry) put(id string, s *wechatLoginSession) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessions[id] = s
+	// Opportunistic GC: drop sessions older than 5 minutes (QR codes
+	// expire well before this server-side; anything older is dead).
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for k, v := range r.sessions {
+		if v.createdAt.Before(cutoff) {
+			delete(r.sessions, k)
+		}
+	}
+}
+
+func (r *wechatLoginRegistry) get(id string) *wechatLoginSession {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sessions[id]
+}
+
+func (r *wechatLoginRegistry) delete(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.sessions, id)
+}
+
+// handleStartAgentWeChatLogin asks iLink for a fresh QR code, registers
+// a server-side session keyed by the returned qrCode token, and hands
+// the client back what it needs to render the QR image. The actual
+// scan happens out-of-band in the user's WeChat phone app; the client
+// then polls handleAgentWeChatLoginStatus to drive the state machine.
+func (s *Server) handleStartAgentWeChatLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	uid, ok := s.ownsAgent(r, id)
+	if !ok {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+
+	qr, err := wechatFetchQRCode(r.Context())
+	if err != nil {
+		jsonResponse(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	sessionID := qr.QRCode // iLink's token is unique enough; reuse it
+	wechatLogins.put(sessionID, &wechatLoginSession{
+		qrCode:    qr.QRCode,
+		qrCodeImg: qr.QRCodeImgContent,
+		agentID:   id,
+		userID:    uid,
+		createdAt: time.Now(),
+	})
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"sessionId": sessionID,
+		"qrCode":    qr.QRCode,
+		"qrCodeImg": qr.QRCodeImgContent,
+	})
+}
+
+// handleAgentWeChatLoginStatus polls iLink for the current scan state
+// of this session's QR code. On `confirmed`, persists the channel row
+// + binding + hot-registers the adapter — same shape as the Telegram /
+// Discord / Slack connect handlers, but driven by the QR status
+// machine instead of an immediate token validation.
+func (s *Server) handleAgentWeChatLoginStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	uid, ok := s.ownsAgent(r, id)
+	if !ok {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+	sessionID := r.URL.Query().Get("session")
+	if sessionID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "session required"})
+		return
+	}
+	sess := wechatLogins.get(sessionID)
+	if sess == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "session not found or expired"})
+		return
+	}
+	// Cross-tenant guard: don't let one user's poll observe another
+	// user's QR session even with a guessed sessionID.
+	if sess.userID != uid || sess.agentID != id {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+
+	status, err := wechatPollQRStatus(r.Context(), sess.qrCode)
+	if err != nil {
+		jsonResponse(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	switch status.Status {
+	case wechatStatusOK:
+		// User confirmed on phone. iLink returned credentials; persist
+		// + bind + hot-register, then drop the in-flight session.
+		creds := wechatCredentials{
+			BotToken:    status.BotToken,
+			ILinkBotID:  status.ILinkBotID,
+			BaseURL:     status.BaseURL,
+			ILinkUserID: status.ILinkUserID,
+		}
+		if creds.BotToken == "" || creds.ILinkBotID == "" {
+			jsonResponse(w, http.StatusBadGateway, map[string]any{"error": "ilink confirmed without credentials"})
+			return
+		}
+		if err := s.persistWeChatAccount(r, id, creds); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		wechatLogins.delete(sessionID)
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"status":    "confirmed",
+			"connected": true,
+			"accountId": creds.ILinkBotID,
+		})
+		return
+	case wechatStatusExpire:
+		wechatLogins.delete(sessionID)
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"status":    "expired",
+			"connected": false,
+		})
+		return
+	default:
+		// wait / scaned / unknown — keep polling. We surface "scaned"
+		// distinctly because the UI flips to "扫描完成,请确认" when the
+		// user has tapped the QR but not yet pressed confirm on phone.
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"status":    status.Status,
+			"connected": false,
+		})
+		return
+	}
+}
+
+// persistWeChatAccount writes a kind=channel row + binding for a
+// freshly-confirmed iLink account, identical in shape to what
+// handleConnectAgentTelegram does for a token paste — just sourcing
+// the credentials from QR confirmation instead of user input.
+func (s *Server) persistWeChatAccount(r *http.Request, agentID string, creds wechatCredentials) error {
+	cc := config.ChannelConfig{
+		Enabled: true,
+		Accounts: map[string]config.AccountConfig{
+			creds.ILinkBotID: {
+				BotToken: creds.BotToken,
+				BaseURL:  creds.BaseURL,
+				UserID:   creds.ILinkUserID,
+			},
+		},
+	}
+	credKey := creds.ILinkBotID
+	if err := s.assertChannelCredentialUnique(r, "wechat", credKey, ""); err != nil {
+		return err
+	}
+	if err := scope.SaveChannel(r.Context(), s.dataStore, scope.Agent, agentID, "wechat", credKey, true, cc); err != nil {
+		return err
+	}
+	if err := s.appendBinding(r, agentID, config.Binding{
+		AgentID: agentID,
+		Match:   config.Match{Channel: "wechat", AccountID: creds.ILinkBotID},
+	}); err != nil {
+		return err
+	}
+	s.invalidateScope(scope.Agent, agentID)
+	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "wechat", credKey); rec != nil {
+		s.hotRegisterChannel(*rec)
+	}
+	return nil
+}
+
+// --- iLink HTTP helpers (validation-only; running adapter has its own
+//     client in internal/channels/wechat.go) ---
+
+type wechatCredentials struct {
+	BotToken    string
+	ILinkBotID  string
+	BaseURL     string
+	ILinkUserID string
+}
+
+type wechatQRCodeResp struct {
+	QRCode           string `json:"qrcode"`
+	QRCodeImgContent string `json:"qrcode_img_content"`
+}
+
+type wechatQRStatusResp struct {
+	Status      string `json:"status"`
+	BotToken    string `json:"bot_token"`
+	ILinkBotID  string `json:"ilink_bot_id"`
+	BaseURL     string `json:"baseurl"`
+	ILinkUserID string `json:"ilink_user_id"`
+}
+
+func wechatFetchQRCode(ctx context.Context) (*wechatQRCodeResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wechatQRCodeURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("contact ilink: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ilink qrcode HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var out wechatQRCodeResp
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse ilink qrcode: %w", err)
+	}
+	if out.QRCode == "" {
+		return nil, errors.New("ilink returned empty qrcode")
+	}
+	return &out, nil
+}
+
+// wechatPollQRStatus does ONE round-trip — returns whatever the server
+// says right now. We don't long-poll on the server side because the
+// upstream endpoint already does (~40s); doing it on every status
+// request would mean a tab refresh stalls 40s. The client polls every
+// 3s instead, mirroring the workany-web shape.
+func wechatPollQRStatus(ctx context.Context, qrcode string) (*wechatQRStatusResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wechatQRStatusURL+qrcode, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("contact ilink: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ilink status HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	var out wechatQRStatusResp
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse ilink status: %w", err)
+	}
+	return &out, nil
+}
+
+// --- Feishu / Feishu ---
+
+type connectFeishuRequest struct {
+	AppID             string `json:"appId"`
+	AppSecret         string `json:"appSecret"`
+	VerificationToken string `json:"verificationToken"`
+}
+
+// handleConnectAgentFeishu validates a Feishu custom-app credential triple
+// by minting a tenant_access_token (proves app_id+app_secret are
+// valid) and fetching /bot/v3/info (captures the bot's display name).
+// Stores the triple as kind=channel + binding rows + hot-registers
+// the adapter.
+//
+// Storage layout mirrors slack/wechat: credKey = app_id (also the
+// accountID), AccountConfig.BotToken = app_secret, AccountConfig.UserID
+// = verification_token (matches the field's "extra account-scoped
+// identifier" comment).
+func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok := s.ownsAgent(r, id); !ok {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+
+	var req connectFeishuRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	appID := strings.TrimSpace(req.AppID)
+	appSecret := strings.TrimSpace(req.AppSecret)
+	verificationToken := strings.TrimSpace(req.VerificationToken)
+	if appID == "" || appSecret == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "appId and appSecret required"})
+		return
+	}
+	if !strings.HasPrefix(appID, "cli_") {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "appId should start with cli_ (Feishu custom-app App ID)"})
+		return
+	}
+
+	botName, botOpenID, err := channels.FeishuValidateCredentials(r.Context(), appID, appSecret)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	cc := config.ChannelConfig{
+		Enabled: true,
+		Accounts: map[string]config.AccountConfig{
+			appID: {
+				BotToken: appSecret,
+				UserID:   verificationToken, // see channels/feishu.go field-mapping note
+			},
+		},
+	}
+	credKey := appID
+	if err := s.assertChannelCredentialUnique(r, "feishu", credKey, ""); err != nil {
+		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := scope.SaveChannel(r.Context(), s.dataStore, scope.Agent, id, "feishu", credKey, true, cc); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.appendBinding(r, id, config.Binding{
+		AgentID: id,
+		Match:   config.Match{Channel: "feishu", AccountID: appID},
+	}); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	s.invalidateScope(scope.Agent, id)
+	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "feishu", credKey); rec != nil {
+		s.hotRegisterChannel(*rec)
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"appId":      appID,
+		"botName":    botName,
+		"botOpenId":  botOpenID,
+		"webhookUrl": feishuWebhookPathFor(r, appID),
+	})
+}
+
+// feishuWebhookPathFor builds the URL the user should paste into the
+// Feishu Developer Console's "Event Subscriptions → Request URL" field.
+// Best-effort — uses the request's Host so reverse-proxied deployments
+// surface the user-facing hostname rather than the bind address.
+func feishuWebhookPathFor(r *http.Request, appID string) string {
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
+		scheme = "http"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	host := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		host = h
+	}
+	return scheme + "://" + host + "/api/feishu/webhook/" + appID
+}
+
+// --- LINE ---
+
+type connectLINERequest struct {
+	ChannelToken  string `json:"channelToken"`
+	ChannelSecret string `json:"channelSecret"`
+}
+
+// handleConnectAgentLINE validates a LINE Messaging API channel by
+// hitting /v2/bot/info with the channel access token. Captures the
+// bot's userId (used as accountID) + display name + basicId. Stores
+// channel_access_token in AccountConfig.BotToken, channel_secret in
+// AccountConfig.UserID (matching the field-mapping convention used by
+// the WeChat / Feishu adapters).
+//
+// channel_secret is technically optional — the adapter can run without
+// signature validation — but webhook traffic flows over the open
+// internet so we strongly recommend setting it. The connect handler
+// accepts an empty string and warns at validation time only if the
+// secret is missing.
+func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok := s.ownsAgent(r, id); !ok {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
+		return
+	}
+
+	var req connectLINERequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	channelToken := strings.TrimSpace(req.ChannelToken)
+	channelSecret := strings.TrimSpace(req.ChannelSecret)
+	if channelToken == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "channelToken required"})
+		return
+	}
+
+	userID, displayName, basicID, err := channels.LINEValidateCredentials(r.Context(), channelToken)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	cc := config.ChannelConfig{
+		Enabled: true,
+		Accounts: map[string]config.AccountConfig{
+			userID: {
+				BotToken: channelToken,
+				UserID:   channelSecret,
+			},
+		},
+	}
+	credKey := userID
+	if err := s.assertChannelCredentialUnique(r, "line", credKey, ""); err != nil {
+		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := scope.SaveChannel(r.Context(), s.dataStore, scope.Agent, id, "line", credKey, true, cc); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.appendBinding(r, id, config.Binding{
+		AgentID: id,
+		Match:   config.Match{Channel: "line", AccountID: userID},
+	}); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	s.invalidateScope(scope.Agent, id)
+	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "line", credKey); rec != nil {
+		s.hotRegisterChannel(*rec)
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"botUserId":   userID,
+		"botName":     displayName,
+		"basicId":     basicID,
+		"webhookUrl":  lineWebhookPathFor(r, userID),
+	})
+}
+
+// lineWebhookPathFor returns the URL the user pastes into LINE
+// Developers Console under "Messaging API → Webhook URL". Same shape
+// as feishuWebhookPathFor — surfaces the public-facing host via the
+// usual reverse-proxy headers.
+func lineWebhookPathFor(r *http.Request, userID string) string {
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
+		scheme = "http"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	host := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		host = h
+	}
+	return scheme + "://" + host + "/api/line/webhook/" + userID
 }

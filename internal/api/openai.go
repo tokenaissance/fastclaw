@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
@@ -25,6 +26,32 @@ type chatCompletionRequest struct {
 	Messages []chatMessage `json:"messages"`
 	Stream   *bool         `json:"stream,omitempty"`
 	User     string        `json:"user,omitempty"`
+	// AgentID is a fastclaw extension: lets the caller pick the agent
+	// in the request body instead of (or in addition to) the
+	// `x-fastclaw-agent-id` header. Body wins when both are set —
+	// matches the pattern used for `user`. Optional.
+	AgentID string `json:"agent_id,omitempty"`
+	// Params is a fastclaw extension: a freeform structured-parameter
+	// blob the calling app submits alongside the chat. Rendered into
+	// a per-turn system message so the agent's LLM can honor it when
+	// calling tools (e.g. a third-party app's "model selector" +
+	// "settings" UI translate to {provider, aspect_ratio, n} here,
+	// rather than the user typing those into the prompt). Scope is
+	// per-request — params don't persist across turns. OpenAI clients
+	// that don't know about this field are unaffected (omitempty).
+	Params map[string]any `json:"params,omitempty"`
+	// Images is a fastclaw extension: image attachments for the
+	// current turn. Each entry is one of:
+	//   - HTTPS URL: "https://example.com/photo.jpg" (must be
+	//     reachable from the LLM provider; not validated here)
+	//   - Data URL:  "data:image/png;base64,iVBORw0KGgo..."
+	//
+	// Accepted MIME types depend on the LLM model. Anthropic / OpenAI
+	// vision models all support png, jpeg, webp; gif is hit-or-miss.
+	// Per-image and total-request size limits are also model-side
+	// (Anthropic ~5MB/image, OpenAI ~20MB) — fastclaw does not enforce
+	// its own ceiling, the upstream provider returns the rejection.
+	Images []string `json:"images,omitempty"`
 }
 
 type chatMessage struct {
@@ -116,7 +143,12 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Body field beats header — same precedence as `user`. Lets app
+	// callers send everything in one JSON without juggling headers.
 	agentID := r.Header.Get("x-fastclaw-agent-id")
+	if req.AgentID != "" {
+		agentID = req.AgentID
+	}
 	ag := resolveAgent(space, agentID)
 	if ag == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{
@@ -146,13 +178,34 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Materialize attached images into the agent's session workspace and
+	// prepend the same `[Attached: /workspace/<file>]` breadcrumb the web
+	// UI uses (web/src/app/agents/[id]/chat/page.tsx:639-645) so the wire
+	// shape is identical across web and API entry points. Verbose "do not
+	// probe" notes here actively backfire — models reflexively run
+	// which/ls/file to "verify" the path when the prompt foregrounds it.
+	// PhotoURLs is preserved so vision LLMs still see the image inline.
+	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, req.Images)
+	if len(attachmentPaths) > 0 {
+		var b strings.Builder
+		for _, p := range attachmentPaths {
+			b.WriteString("[Attached: /workspace/")
+			b.WriteString(p)
+			b.WriteString("]\n")
+		}
+		b.WriteString(userText)
+		userText = b.String()
+	}
+
 	// Build inbound message
 	msg := bus.InboundMessage{
-		Channel:  "api",
-		ChatID:   sessionKey,
-		UserID:   "api-user",
-		Text:     userText,
-		PeerKind: "dm",
+		Channel:   "api",
+		ChatID:    sessionKey,
+		UserID:    "api-user",
+		Text:      userText,
+		PeerKind:  "dm",
+		Params:    req.Params,
+		PhotoURLs: req.Images,
 	}
 
 	slog.Info("chat completion request",

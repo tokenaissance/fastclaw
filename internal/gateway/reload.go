@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
+	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
@@ -59,4 +61,45 @@ func (g *Gateway) UnregisterChannel(channelType, accountID string) {
 		return
 	}
 	g.chanMgr.Unregister(channelType, accountID)
+}
+
+// DispatchLINEWebhook hands a raw LINE webhook POST body off to the
+// adapter for accountID. Signature is the value of the `x-line-signature`
+// header — the adapter checks it against HMAC-SHA256(channel_secret,
+// body). Returns the response body + status the HTTP handler should
+// write back; LINE retries on non-2xx.
+func (g *Gateway) DispatchLINEWebhook(accountID string, body []byte, signature string) (responseBody []byte, status int, err error) {
+	if g.chanMgr == nil {
+		return nil, 503, errors.New("channel manager not running")
+	}
+	ch := g.chanMgr.Get("line", accountID)
+	if ch == nil {
+		return nil, 404, errors.New("no line channel for account")
+	}
+	ln, ok := ch.(*channels.LINE)
+	if !ok {
+		return nil, 500, errors.New("registered channel is not a LINE adapter")
+	}
+	return ln.HandleWebhook(body, signature)
+}
+
+// DispatchFeishuWebhook hands a raw Feishu webhook POST body off to the
+// adapter registered for accountID (= Feishu App ID in URL path). The
+// adapter handles URL-verification challenges + im.message.receive_v1
+// dispatch + token validation; the HTTP handler just relays response
+// body / status. Returns ErrUnknownAccount when no adapter is
+// registered (Feishu configured to push to a non-existent app id).
+func (g *Gateway) DispatchFeishuWebhook(accountID string, body []byte) (responseBody []byte, status int, err error) {
+	if g.chanMgr == nil {
+		return nil, 503, errors.New("channel manager not running")
+	}
+	ch := g.chanMgr.Get("feishu", accountID)
+	if ch == nil {
+		return nil, 404, errors.New("no feishu channel for account")
+	}
+	lk, ok := ch.(*channels.Feishu)
+	if !ok {
+		return nil, 500, errors.New("registered channel is not a Feishu adapter")
+	}
+	return lk.HandleWebhook(body)
 }

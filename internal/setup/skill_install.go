@@ -1,6 +1,8 @@
 package setup
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -163,6 +166,283 @@ func runInstall(source, name, repo, targetDir string) (*skills.Result, error) {
 	default:
 		return nil, fmt.Errorf("unknown source %q", source)
 	}
+}
+
+// handleUploadSkill installs a skill from a user-supplied .zip file.
+// Multipart POST: field `file` is the zip; optional `name` form field
+// overrides the inferred skill folder name. Optional `?agent=<id>` query
+// param scopes the install to one agent's home (same auth + target rules
+// as handleInstallSkill).
+//
+// Layout assumptions:
+//   - Zip with a single common top-level directory (e.g. `my-skill/...`):
+//     that dir becomes the skill folder name and its contents land
+//     directly inside <target>/my-skill/.
+//   - Zip without a common top-level (files at root): we wrap them in a
+//     <target>/<name>/ folder, where <name> defaults to the upload's
+//     filename minus extension and can be overridden by the `name` form
+//     field.
+//
+// Zip-slip protection: every extracted file path is validated to stay
+// under the chosen skill dir. Symlinks are skipped — Go's archive/zip
+// doesn't auto-follow them but we also refuse to recreate them on disk.
+func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
+	const maxUploadSize = 64 << 20 // 64 MiB
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "file field required"})
+		return
+	}
+	defer file.Close()
+
+	if hdr.Size > maxUploadSize {
+		jsonResponse(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "zip too large"})
+		return
+	}
+
+	agentID := r.URL.Query().Get("agent")
+	if agentID != "" {
+		ident, ok := auth.FromContext(r.Context())
+		if !ok || !ident.CanAccessAgent(agentID) {
+			jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
+			return
+		}
+	}
+	targetDir, err := resolveInstallTarget(r, agentID)
+	if err != nil {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	data, err := io.ReadAll(io.LimitReader(file, maxUploadSize+1))
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if int64(len(data)) > maxUploadSize {
+		jsonResponse(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "zip too large"})
+		return
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "not a valid zip: " + err.Error()})
+		return
+	}
+
+	commonTop := detectCommonTopDir(zr.File)
+	skillName := strings.TrimSpace(r.FormValue("name"))
+	if skillName == "" {
+		skillName = commonTop
+	}
+	if skillName == "" {
+		base := filepath.Base(hdr.Filename)
+		skillName = strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	skillName = sanitizeSkillName(skillName)
+	if skillName == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "could not determine skill name"})
+		return
+	}
+
+	stripPrefix := ""
+	if commonTop != "" {
+		// Zip already has a wrapping dir — strip it on extraction so
+		// we don't end up with skill/skill/SKILL.md (works whether the
+		// wrapper matches skillName or the user renamed via form field).
+		stripPrefix = commonTop + "/"
+	}
+
+	// Validation: a valid skill MUST have a SKILL.md at its root. We
+	// check this BEFORE creating any directories so a bad upload (e.g.
+	// a zip of a session log, a random folder) doesn't pollute the
+	// agent's skills dir. Match SKILL.md exactly (case-sensitive — the
+	// runtime in agent/skills.go reads "SKILL.md").
+	hasSkillMD := false
+	for _, entry := range zr.File {
+		if entry.FileInfo().IsDir() {
+			continue
+		}
+		name := entry.Name
+		if stripPrefix != "" && strings.HasPrefix(name, stripPrefix) {
+			name = strings.TrimPrefix(name, stripPrefix)
+		}
+		if name == "SKILL.md" {
+			hasSkillMD = true
+			break
+		}
+	}
+	if !hasSkillMD {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{
+			"ok":    false,
+			"error": "zip is not a valid skill: SKILL.md not found at the skill root",
+		})
+		return
+	}
+
+	skillDir := filepath.Join(targetDir, skillName)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	skillDirAbs, err := filepath.Abs(filepath.Clean(skillDir))
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	files := make([]string, 0, len(zr.File))
+
+	for _, entry := range zr.File {
+		name := entry.Name
+		if stripPrefix != "" {
+			if name == strings.TrimSuffix(stripPrefix, "/") || name == stripPrefix {
+				continue
+			}
+			if !strings.HasPrefix(name, stripPrefix) {
+				continue
+			}
+			name = strings.TrimPrefix(name, stripPrefix)
+		}
+		if name == "" {
+			continue
+		}
+		// Reject any entry whose cleaned name escapes the skill dir.
+		clean := filepath.Clean(name)
+		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+			slog.Warn("skipping unsafe zip entry", "name", entry.Name)
+			continue
+		}
+		dest := filepath.Join(skillDirAbs, clean)
+		destAbs, err := filepath.Abs(filepath.Clean(dest))
+		if err != nil || (destAbs != skillDirAbs && !strings.HasPrefix(destAbs, skillDirAbs+string(os.PathSeparator))) {
+			slog.Warn("skipping zip-slip entry", "name", entry.Name, "dest", destAbs)
+			continue
+		}
+		// Reject symlinks — Go's archive/zip exposes them via mode bits.
+		if entry.Mode()&os.ModeSymlink != 0 {
+			slog.Warn("skipping symlink in zip", "name", entry.Name)
+			continue
+		}
+		if entry.FileInfo().IsDir() {
+			if err := os.MkdirAll(destAbs, 0o755); err != nil {
+				jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+				return
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(destAbs), 0o755); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		rc, err := entry.Open()
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		out, err := os.OpenFile(destAbs, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		if err != nil {
+			rc.Close()
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		// Cap per-file copy too — defense in depth against zip bombs
+		// after the outer 64MiB cap.
+		if _, err := io.Copy(out, io.LimitReader(rc, maxUploadSize)); err != nil {
+			rc.Close()
+			out.Close()
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		rc.Close()
+		out.Close()
+		files = append(files, clean)
+	}
+
+	if s.workspaceStore != nil {
+		owner := agentID
+		if owner == "" {
+			owner = skills.GlobalSkillOwner
+		}
+		if uerr := skills.SyncSkillUp(r.Context(), s.workspaceStore, owner, skillName, targetDir); uerr != nil {
+			slog.Warn("failed to mirror uploaded skill to object store",
+				"owner", owner, "skill", skillName, "error", uerr)
+		}
+	}
+	if agentID != "" {
+		if ag := s.resolveAgent(r, agentID); ag != nil {
+			ag.ReloadWorkspaceFiles()
+		}
+	}
+
+	slog.Info("skill uploaded",
+		"name", skillName, "agent", agentID, "files", len(files), "path", skillDir)
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"source":      "upload",
+		"name":        skillName,
+		"installedAt": skillDir,
+		"files":       files,
+	})
+}
+
+// detectCommonTopDir returns the shared first-path-segment across every
+// zip entry, or "" if entries diverge or any entry sits at the zip root.
+// Used to decide whether the user's upload already wraps its skill in a
+// folder we should peel off (and reuse as the skill name).
+func detectCommonTopDir(files []*zip.File) string {
+	var top string
+	for _, f := range files {
+		n := f.Name
+		if n == "" {
+			continue
+		}
+		// macOS Finder zips include `__MACOSX/` metadata — ignore it
+		// so its presence doesn't break common-top detection.
+		if strings.HasPrefix(n, "__MACOSX/") {
+			continue
+		}
+		idx := strings.Index(n, "/")
+		if idx <= 0 {
+			// file lives at zip root → there's no common top dir
+			return ""
+		}
+		seg := n[:idx]
+		if top == "" {
+			top = seg
+		} else if top != seg {
+			return ""
+		}
+	}
+	return top
+}
+
+// sanitizeSkillName strips path separators and other surprises from a
+// user-supplied skill name, leaving a single safe directory component.
+func sanitizeSkillName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimSuffix(name, "/")
+	name = strings.TrimSuffix(name, "\\")
+	// Take the last path segment in case the user typed a path.
+	name = filepath.Base(name)
+	if name == "." || name == ".." || name == "/" || name == "\\" {
+		return ""
+	}
+	// Filter unsafe characters.
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r == '/' || r == '\\' || r == ':' || r == '\x00':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // handleSearchSkills returns search results. source=skillssh (default) hits

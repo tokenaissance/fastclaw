@@ -50,10 +50,10 @@ function AgentAvatar({
   if (failed) {
     return (
       <div
-        className="flex shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-purple-600"
+        className="flex shrink-0 items-center justify-center rounded-lg bg-primary/10 dark:bg-primary/15 border border-primary/15"
         style={{ width: size, height: size }}
       >
-        <Bot className="text-white" style={{ width: size * 0.55, height: size * 0.55 }} />
+        <Bot className="text-primary" style={{ width: size * 0.55, height: size * 0.55 }} />
       </div>
     );
   }

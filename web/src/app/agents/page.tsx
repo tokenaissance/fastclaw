@@ -62,10 +62,10 @@ function AgentAvatar({
   if (!agent.avatarUrl || failed) {
     return (
       <div
-        className="flex shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600"
+        className="flex shrink-0 items-center justify-center rounded-xl bg-primary/10 dark:bg-primary/15 border border-primary/15"
         style={{ width: size, height: size }}
       >
-        <Bot className="text-white" style={{ width: size * 0.5, height: size * 0.5 }} />
+        <Bot className="text-primary" style={{ width: size * 0.5, height: size * 0.5 }} />
       </div>
     );
   }

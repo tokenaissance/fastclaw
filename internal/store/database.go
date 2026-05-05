@@ -564,6 +564,32 @@ func (d *DBStore) migrationSQL() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (user_id, agent_id, session_key)
 		)`,
+		// session_messages is the append-only archive of every turn ever
+		// written to a session. The sessions row above stores the
+		// LLM-facing working set (post-compaction); session_messages
+		// stores the original full history so UI / audit / multi-tenant
+		// recovery has a source of truth that compaction never touches.
+		// seq is a per-session monotonic counter assigned at INSERT time
+		// via COALESCE(MAX(seq), -1)+1 so callers don't need a separate
+		// SELECT round-trip. Composite PK doubles as the natural order.
+		`CREATE TABLE IF NOT EXISTS session_messages (
+			user_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			session_key TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			content_parts TEXT NOT NULL DEFAULT '',
+			tool_calls TEXT NOT NULL DEFAULT '',
+			tool_call_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			metadata TEXT NOT NULL DEFAULT '',
+			thinking TEXT NOT NULL DEFAULT '',
+			raw_assistant TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, agent_id, session_key, seq)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_messages_lookup ON session_messages (user_id, agent_id, session_key, seq)`,
 		// agent_files holds the agent's own files: SOUL.md, IDENTITY.md,
 		// MEMORY.md, AGENTS.md, BOOTSTRAP.md, etc.
 		//
@@ -1147,11 +1173,106 @@ func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]S
 }
 
 func (d *DBStore) DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error {
+	if _, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM session_messages WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, sessionKey); err != nil {
+		return err
+	}
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
 			d.ph(1), d.ph(2), d.ph(3)),
 		userID, agentID, sessionKey)
 	return err
+}
+
+// AppendSessionMessage writes one message to the per-session archive.
+// seq is computed atomically inside the INSERT via
+// `COALESCE(MAX(seq), -1) + 1`, so two concurrent appenders racing on
+// the same session can't collide on the unique key — the second insert
+// reads MAX after the first commits. Multi-pod safety relies on the
+// engine's write serialization (sqlite global, postgres MVCC + the
+// composite PK uniqueness check on commit).
+func (d *DBStore) AppendSessionMessage(ctx context.Context, userID, agentID, sessionKey string, msg SessionMessage) error {
+	if userID == "" {
+		return errors.New("store: AppendSessionMessage requires user_id")
+	}
+	contentParts, _ := json.Marshal(msg.ContentParts)
+	toolCalls, _ := json.Marshal(msg.ToolCalls)
+	metadata, _ := json.Marshal(msg.Metadata)
+	rawAssistant := string(msg.RawAssistant)
+	ts := msg.Timestamp
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO session_messages
+				(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at)
+			SELECT $1, $2, $3, COALESCE(MAX(seq), -1) + 1, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+				FROM session_messages
+				WHERE user_id = $1 AND agent_id = $2 AND session_key = $3`,
+			userID, agentID, sessionKey,
+			msg.Role, msg.Content, string(contentParts), string(toolCalls),
+			msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, ts)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO session_messages
+			(user_id, agent_id, session_key, seq, role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at)
+		SELECT ?, ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			FROM session_messages
+			WHERE user_id = ? AND agent_id = ? AND session_key = ?`,
+		userID, agentID, sessionKey,
+		msg.Role, msg.Content, string(contentParts), string(toolCalls),
+		msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, ts,
+		userID, agentID, sessionKey)
+	return err
+}
+
+// ListSessionMessages returns every archived turn for one session in
+// ascending seq order. Empty slice on a session that has no archive
+// yet (e.g. rows pre-dating the table). Callers that want a fallback
+// to sessions.messages should check len() and decide.
+func (d *DBStore) ListSessionMessages(ctx context.Context, userID, agentID, sessionKey string) ([]SessionMessage, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT role, content, content_parts, tool_calls, tool_call_id, name, metadata, thinking, raw_assistant, created_at
+			FROM session_messages
+			WHERE user_id = %s AND agent_id = %s AND session_key = %s
+			ORDER BY seq ASC`, d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, sessionKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionMessage
+	for rows.Next() {
+		var m SessionMessage
+		var contentParts, toolCalls, metadata, rawAssistant string
+		if err := rows.Scan(&m.Role, &m.Content, &contentParts, &toolCalls, &m.ToolCallID, &m.Name, &metadata, &m.Thinking, &rawAssistant, &m.Timestamp); err != nil {
+			return nil, err
+		}
+		if contentParts != "" && contentParts != "null" {
+			var v interface{}
+			if json.Unmarshal([]byte(contentParts), &v) == nil {
+				m.ContentParts = v
+			}
+		}
+		if toolCalls != "" && toolCalls != "null" {
+			var v interface{}
+			if json.Unmarshal([]byte(toolCalls), &v) == nil {
+				m.ToolCalls = v
+			}
+		}
+		if metadata != "" && metadata != "null" {
+			_ = json.Unmarshal([]byte(metadata), &m.Metadata)
+		}
+		if rawAssistant != "" && rawAssistant != "null" {
+			m.RawAssistant = json.RawMessage(rawAssistant)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 func (d *DBStore) RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error {

@@ -77,6 +77,11 @@ func (cb *ContextBuilder) SetSkillsSummary(s string) { cb.skillsSummary = s }
 
 // BuildSystemPrompt assembles the system prompt from identity, bootstrap files, memory, and skills.
 func (cb *ContextBuilder) BuildSystemPrompt() string {
+	// Diagnostic: log SOUL.md / IDENTITY.md load probe so we can tell
+	// whether the per-agent context fields (agentID, userID, store)
+	// got wired correctly under the EnsureAgent path. Written to the
+	// same dump file as the LLM payloads so it's easy to grep.
+	cb.diagnoseLoadFile()
 	var parts []string
 
 	// 1. Runtime environment info. Deliberately NOT an identity claim —
@@ -300,6 +305,45 @@ Before responding to each message, %s your approach internally. Consider:
 - What is the best approach and why?
 - Are there any risks or trade-offs to consider?
 Structure your reasoning before acting. Think before you respond.`, depth)
+}
+
+// diagnoseLoadFile probes SOUL.md via the same path BuildSystemPrompt uses
+// and dumps the outcome to ~/.fastclaw/logs/llm-dump.log so we can confirm
+// whether the per-agent context (agentID / userID / store) got wired.
+// Removed once the EnsureAgent injection bug is fixed.
+func (cb *ContextBuilder) diagnoseLoadFile() {
+	path := os.Getenv("FASTCLAW_DUMP_LLM_FILE")
+	if path == "" {
+		home := os.Getenv("FASTCLAW_HOME")
+		if home == "" {
+			if h, err := os.UserHomeDir(); err == nil {
+				home = h + "/.fastclaw"
+			}
+		}
+		if home == "" {
+			return
+		}
+		path = home + "/logs/llm-dump.log"
+	}
+	var soulLen int
+	var soulErr string
+	if cb.store != nil {
+		data, err := cb.store.GetWorkspaceFile(cb.ctx(), cb.agentID, cb.userID, "SOUL.md")
+		if err != nil {
+			soulErr = err.Error()
+		} else {
+			soulLen = len(data)
+		}
+	} else {
+		soulErr = "store=nil"
+	}
+	line := fmt.Sprintf("\n[ctxBuilder probe ts=%s agentID=%q userID=%q hasStore=%v home=%q soulLen=%d soulErr=%q]\n",
+		time.Now().Format(time.RFC3339Nano), cb.agentID, cb.userID,
+		cb.store != nil, cb.home, soulLen, soulErr)
+	if f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		_, _ = f.WriteString(line)
+		_ = f.Close()
+	}
 }
 
 func (cb *ContextBuilder) loadFile(name string) string {

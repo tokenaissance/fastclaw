@@ -1086,7 +1086,7 @@ export default function AgentChatPage() {
                     <div
                       className={`rounded-2xl px-4 py-2.5 ${
                         msg.role === "user"
-                          ? "bg-sidebar text-sidebar-foreground rounded-br-md"
+                          ? "bg-primary/10 dark:bg-primary/15 text-foreground rounded-br-md"
                           : "bg-muted rounded-bl-md"
                       }`}
                     >
@@ -1107,7 +1107,7 @@ export default function AgentChatPage() {
                         ) : null;
                       })()}
                       {msg.role === "user" && msg.attachments && msg.attachments.length > 0 && (
-                        <div className="space-y-2 mb-2">
+                        <div className="flex flex-wrap gap-2 mb-2 justify-end">
                           {msg.attachments.map((att, i) =>
                             att.isImage && att.previewUrl ? (
                               <button
@@ -1121,7 +1121,7 @@ export default function AgentChatPage() {
                                 <img
                                   src={att.previewUrl}
                                   alt={att.name}
-                                  className="rounded-lg max-w-full h-auto"
+                                  className="rounded-lg max-h-48 max-w-[12rem] w-auto h-auto object-cover"
                                 />
                               </button>
                             ) : (
@@ -1334,9 +1334,6 @@ export default function AgentChatPage() {
                 )}
               </div>
             </div>
-            <p className="text-center text-[11px] text-muted-foreground/50 mt-2">
-              Enter to send, Shift+Enter for new line
-            </p>
           </div>
         </div>
         {lightboxSrc && (

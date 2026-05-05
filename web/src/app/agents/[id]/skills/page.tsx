@@ -31,11 +31,15 @@ import {
   Check,
   ExternalLink,
   Settings,
+  Upload,
+  Files,
+  Info,
 } from "lucide-react";
 import {
   getAgentSkills,
   deleteAgentSkill,
   installSkill,
+  uploadSkill,
   searchSkills,
   getConfig,
   type SkillInfo,
@@ -58,6 +62,15 @@ export default function AgentSkillsPage() {
   // agent-scoped one. Lets the user configure FAL_KEY etc. from
   // whichever entry point they're already on.
   const [skillEntries, setSkillEntries] = useState<Record<string, SkillEntryView>>({});
+  // File input ref + upload state for the local-zip "Upload" button.
+  // The server unzips to <agent>/skills/<name>/ and hot-reloads the
+  // agent so the new skill shows up without a refresh.
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [dragOver, setDragOver] = useState(false);
 
   const fetchSkills = useCallback(() => {
     setLoading(true);
@@ -98,6 +111,61 @@ export default function AgentSkillsPage() {
     fetchSkills();
   };
 
+  const handleUploadConfirm = async () => {
+    if (!uploadFile || !agentId) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const resp = await uploadSkill(uploadFile, agentId);
+      if (!resp.ok) {
+        // Backend rejects zips that don't contain SKILL.md at the
+        // skill root — surface the message inside the dialog so the
+        // user can fix the zip and retry without re-opening it.
+        setUploadError(resp.error || "upload failed");
+        return;
+      }
+      // Success — close, reset, refresh the grid.
+      setUploadOpen(false);
+      setUploadFile(null);
+      fetchSkills();
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : "upload failed");
+    } finally {
+      setUploading(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+
+  // Drop dialog state when the dialog closes (cancel or success), so the
+  // next open is fresh — no stale file or error from a previous attempt.
+  const handleUploadOpenChange = (open: boolean) => {
+    setUploadOpen(open);
+    if (!open) {
+      setUploadFile(null);
+      setUploadError(null);
+      setDragOver(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+
+  // Filter dropped/selected files to a single .zip — the dropzone accepts
+  // multi-drop in the browser, but a skill bundle is one archive so we
+  // take the first .zip and reject the rest with an inline message.
+  const acceptDroppedFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    if (files.length > 1) {
+      setUploadError("Please drop only one .zip file at a time.");
+      return;
+    }
+    const f = files[0];
+    if (!/\.zip$/i.test(f.name)) {
+      setUploadError("File must be a .zip archive.");
+      return;
+    }
+    setUploadFile(f);
+    setUploadError(null);
+  };
+
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
@@ -108,10 +176,16 @@ export default function AgentSkillsPage() {
             agent sees them
           </p>
         </div>
-        <Button variant="outline" onClick={() => setInstallOpen(true)}>
-          <Download className="h-4 w-4 mr-2" />
-          Install Skill
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setUploadOpen(true)}>
+            <Upload className="h-4 w-4 mr-2" />
+            Upload Skills
+          </Button>
+          <Button variant="outline" onClick={() => setInstallOpen(true)}>
+            <Download className="h-4 w-4 mr-2" />
+            Install Skill
+          </Button>
+        </div>
       </div>
 
       {loading ? (
@@ -192,6 +266,127 @@ export default function AgentSkillsPage() {
           ))}
         </div>
       )}
+
+      <Dialog open={uploadOpen} onOpenChange={handleUploadOpenChange}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Upload skill</DialogTitle>
+          </DialogHeader>
+
+          {/* Hidden input — both the drop zone click and the "click to upload"
+              text trigger it. accept= filters the OS picker to .zip; we still
+              re-validate in JS for drops since accept doesn't apply there. */}
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept=".zip,application/zip,application/x-zip-compressed"
+            className="hidden"
+            onChange={(e) => acceptDroppedFiles(e.target.files)}
+          />
+
+          {/* Drop zone. Keeps a constant footprint (32rem-ish content,
+              ~12rem tall) so the dialog doesn't jump when a file is
+              picked — empty state shows the icon + prompt, populated
+              state shows the chosen filename inline. */}
+          <button
+            type="button"
+            onClick={() => uploadInputRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              acceptDroppedFiles(e.dataTransfer.files);
+            }}
+            className={`flex h-48 w-full flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed bg-muted/20 px-6 py-8 text-center transition-colors hover:bg-muted/40 ${
+              dragOver ? "border-primary bg-primary/5" : "border-border"
+            }`}
+          >
+            <Files
+              className={`h-10 w-10 ${
+                uploadFile ? "text-primary" : "text-muted-foreground/60"
+              }`}
+              strokeWidth={1.4}
+            />
+            {uploadFile ? (
+              <div className="space-y-1">
+                <p className="text-sm font-medium break-all">{uploadFile.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  {(uploadFile.size / 1024).toFixed(1)} KB · click to choose a different file
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Drag and drop or click to upload
+              </p>
+            )}
+          </button>
+
+          <div className="space-y-2">
+            <p className="text-sm font-medium">File requirements</p>
+            <ul className="space-y-1.5 text-sm text-muted-foreground">
+              <li className="flex gap-2">
+                <span className="text-muted-foreground/60">•</span>
+                <span>
+                  <code className="text-foreground">.zip</code> file that includes a{" "}
+                  <code className="text-foreground">SKILL.md</code> at the root level
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-muted-foreground/60">•</span>
+                <span>
+                  <code className="text-foreground">SKILL.md</code> contains a skill name
+                  and description formatted in YAML
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Info className="h-3.5 w-3.5 shrink-0" />
+            <a
+              href="https://docs.claude.com/en/docs/claude-code/skills"
+              target="_blank"
+              rel="noreferrer"
+              className="underline hover:text-foreground"
+            >
+              Read more about creating skills
+            </a>
+          </div>
+
+          {uploadError && (
+            <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive break-words">
+              {uploadError}
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              onClick={() => handleUploadOpenChange(false)}
+              disabled={uploading}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleUploadConfirm}
+              disabled={!uploadFile || uploading}
+            >
+              {uploading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Uploading…
+                </>
+              ) : (
+                "Upload"
+              )}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={!!deleteTarget} onOpenChange={() => setDeleteTarget(null)}>
         <AlertDialogContent>

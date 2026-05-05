@@ -884,6 +884,27 @@ export async function installSkill(req: InstallSkillRequest): Promise<InstallSki
   return res.json();
 }
 
+// uploadSkill installs a skill from a user-supplied .zip file. The zip is
+// extracted into <agent>/skills/<name>/ on the backend (or the global
+// skills dir when agentId is empty — admin only). `name` overrides the
+// inferred folder name; leave undefined to let the server pick (common
+// top-level dir → falls back to filename without extension).
+export async function uploadSkill(
+  file: File,
+  agentId?: string,
+  name?: string,
+): Promise<InstallSkillResponse> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  if (name) fd.append("name", name);
+  const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : "";
+  const res = await apiFetch(`/api/skills/upload${qs}`, {
+    method: "POST",
+    body: fd,
+  });
+  return res.json();
+}
+
 // --- Tools (provider-backed capabilities: web_search, image_gen, tts, ...) ---
 
 export interface ToolProviderCatalog {
@@ -1170,6 +1191,73 @@ export async function connectAgentSlack(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ botToken, appToken }),
+  });
+  return res.json();
+}
+
+export async function startAgentWeChatLogin(
+  agentId: string,
+): Promise<{ sessionId?: string; qrCode?: string; qrCodeImg?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/wechat/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function pollAgentWeChatLoginStatus(
+  agentId: string,
+  sessionId: string,
+): Promise<{
+  status?: "wait" | "scaned" | "confirmed" | "expired";
+  connected?: boolean;
+  accountId?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/wechat/login/status?session=${encodeURIComponent(sessionId)}`,
+  );
+  return res.json();
+}
+
+export async function connectAgentLINE(
+  agentId: string,
+  channelToken: string,
+  channelSecret: string,
+): Promise<{
+  ok: boolean;
+  botUserId?: string;
+  botName?: string;
+  basicId?: string;
+  webhookUrl?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/line`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ channelToken, channelSecret }),
+  });
+  return res.json();
+}
+
+export async function connectAgentFeishu(
+  agentId: string,
+  appId: string,
+  appSecret: string,
+  verificationToken: string,
+): Promise<{
+  ok: boolean;
+  appId?: string;
+  botName?: string;
+  botOpenId?: string;
+  webhookUrl?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/feishu`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ appId, appSecret, verificationToken }),
   });
   return res.json();
 }

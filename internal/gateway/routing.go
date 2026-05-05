@@ -175,6 +175,17 @@ func (g *Gateway) matchAgent(space *UserSpace, msg bus.InboundMessage) *agent.Ag
 	if space == nil {
 		return nil
 	}
+	// Explicit agent target wins. Cron jobs, web chat, and sub-agent
+	// spawns all know the agent at the source — without this, multi-
+	// agent users with no web/cron binding fell back to DefaultAgent()
+	// which returns nil whenever the manager holds more than one
+	// agent, and the message got dropped with "no agent matched for
+	// DM, dropping" even though the cron row had AgentID right there.
+	if msg.AgentID != "" {
+		if ag := space.Agents.AgentByID(msg.AgentID); ag != nil {
+			return ag
+		}
+	}
 	bindings := space.Config.Bindings
 	if len(bindings) == 0 {
 		return space.Agents.DefaultAgent()

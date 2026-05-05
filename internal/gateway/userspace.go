@@ -75,69 +75,81 @@ func globalSkillsDirPath() (string, error) {
 	return filepath.Join(home, "skills"), nil
 }
 
-// attachSandboxToAgents wires a sandbox Executor (E2B or Docker) to every
-// agent in the manager, when any of the resolved agents has sandbox Enabled.
+// buildSystemSandboxPool constructs the gateway-wide sandbox pool from
+// the system-scope sandbox config. Returns nil when sandbox is not
+// enabled at system scope (each user space then attaches no pool, and
+// exec falls back to per-agent path roots).
 //
-// Docker sandbox uses ~/.fastclaw as workspaceRoot so its internal
-// <root>/workspaces/<agent>/sessions/<sid>/ layout aligns with
-// workspace.LocalFS — files written by the sandbox and files written by
-// workspace.Store land in the same path.
+// Lives at gateway scope, not per-UserSpace. The previous design built
+// one pool per user, which (a) duplicated docker pools across users
+// sharing the same image, and (b) left ad-hoc UserSpaces (notably the
+// `app_user` identity that API-key callers get switched to) without
+// any pool — those UserSpaces have zero of their own agents, so the
+// per-user builder ran with `resolved=[]` and produced nil. Lazy-
+// injected agents (super_admin chat, app-mode access) then ran exec
+// with sandbox Enabled but no executor and surfaced "sandbox required
+// but no executor available" to the user. Pulling the pool up to
+// gateway scope makes the borrow path the default for every UserSpace.
+func buildSystemSandboxPool(cfg config.SandboxCfg, ws workspace.Store) sandbox.ExecutorPool {
+	if !cfg.Enabled {
+		return nil
+	}
+	var inner sandbox.ExecutorPool
+	home, _ := config.HomeDir()
+	switch cfg.Backend {
+	case "e2b":
+		apiKey := cfg.E2BKey
+		if apiKey == "" {
+			apiKey = os.Getenv("E2B_API_KEY")
+		}
+		template := cfg.Image
+		if template == "" {
+			template = "base"
+		}
+		inner = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute)
+		slog.Info("system sandbox executor pool created",
+			"backend", "e2b", "template", template)
+	default:
+		policy := &sandbox.Policy{NetMode: cfg.Network}
+		inner = sandbox.NewDockerExecutorPool(cfg.Image, home, policy)
+		slog.Info("system sandbox executor pool created",
+			"backend", "docker", "network", cfg.Network)
+	}
+	idle := time.Duration(cfg.IdleTTLSec) * time.Second
+	if idle <= 0 {
+		idle = 10 * time.Minute
+	}
+	lp := sandbox.NewLifecyclePool(inner, idle, 30*time.Second)
+	if ws != nil {
+		lp.SetWorkspace(ws)
+	}
+	lp.Start()
+	slog.Info("system sandbox lifecycle pool enabled",
+		"idleTTL", idle, "hydrate", ws != nil)
+	return lp
+}
+
+// attachSandboxToAgents wires the gateway's shared sandbox pool to every
+// agent in `agentMgr`. When `systemPool` is nil (sandbox disabled or
+// not configured at system scope), falls back to the path-only mode:
+// each agent's file tools are restricted to its own workspace dir.
 //
-// Path-only fallback (sandbox disabled): each agent's file tools are
-// restricted to its own workspace dir, agent-by-agent — agents are the
-// atomic unit, so we don't lump them under any per-user namespace.
+// Pool ownership stays at the gateway: UserSpace eviction MUST NOT
+// close the pool. The returned reference is the same pointer the
+// gateway holds — kept on UserSpace.SandboxPool so per-request hot
+// paths (EnsureAgent for lazy-injected agents) can pick it up without
+// reaching back into the gateway.
 func attachSandboxToAgents(
+	systemPool sandbox.ExecutorPool,
 	userID string,
 	resolved []config.ResolvedAgent,
 	agentMgr *agent.Manager,
-	ws workspace.Store,
 ) sandbox.ExecutorPool {
-	var pool sandbox.ExecutorPool
-	var sandboxCfg config.SandboxCfg
-	for _, rc := range resolved {
-		if rc.Sandbox.Enabled {
-			sandboxCfg = rc.Sandbox
-			switch rc.Sandbox.Backend {
-			case "e2b":
-				apiKey := rc.Sandbox.E2BKey
-				if apiKey == "" {
-					apiKey = os.Getenv("E2B_API_KEY")
-				}
-				template := rc.Sandbox.Image
-				if template == "" {
-					template = "base"
-				}
-				home, _ := config.HomeDir()
-				pool = sandbox.NewE2BExecutorPool(apiKey, template, home, 30*time.Minute)
-				slog.Info("sandbox executor pool created",
-					"user", userID, "backend", "e2b", "template", template)
-			default:
-				home, _ := config.HomeDir()
-				policy := &sandbox.Policy{NetMode: rc.Sandbox.Network}
-				pool = sandbox.NewDockerExecutorPool(rc.Sandbox.Image, home, policy)
-				slog.Info("sandbox executor pool created",
-					"user", userID, "backend", "docker", "network", rc.Sandbox.Network)
-			}
-			break
-		}
-	}
-	if pool != nil {
-		idle := time.Duration(sandboxCfg.IdleTTLSec) * time.Second
-		if idle <= 0 {
-			idle = 10 * time.Minute
-		}
-		lp := sandbox.NewLifecyclePool(pool, idle, 30*time.Second)
-		if ws != nil {
-			lp.SetWorkspace(ws)
-		}
-		lp.Start()
-		pool = lp
-		slog.Info("sandbox lifecycle pool enabled",
-			"user", userID, "idleTTL", idle, "hydrate", ws != nil)
+	if systemPool != nil {
 		for _, ag := range agentMgr.All() {
-			ag.SetSandboxPool(pool)
+			ag.SetSandboxPool(systemPool)
 		}
-		return pool
+		return systemPool
 	}
 	for _, rc := range resolved {
 		if rc.Workspace == "" {
@@ -148,7 +160,7 @@ func attachSandboxToAgents(
 			ag.ToolRegistry().SetSandboxRoot(rc.Workspace)
 		}
 	}
-	slog.Info("path sandbox enabled", "user", userID)
+	slog.Info("path sandbox enabled (no system pool configured)", "user", userID)
 	return nil
 }
 
@@ -249,7 +261,13 @@ func assembleConfig(ctx context.Context, st store.Store, userID, agentID string)
 }
 
 // UserSpace holds the per-user runtime: their config snapshot, LLM
-// provider, agent manager, and sandbox pool. Lazy-loaded on first auth.
+// provider, agent manager, and a sandbox pool reference. Lazy-loaded
+// on first auth.
+//
+// SandboxPool is BORROWED from the gateway — every UserSpace shares
+// the same pointer (or nil, when sandbox is disabled at system scope).
+// Eviction must not call CloseAll on it; the gateway owns the
+// lifecycle and tears it down once on shutdown.
 type UserSpace struct {
 	UserID      string
 	Config      *config.Config
@@ -319,7 +337,47 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 			slog.Warn("skill hydrate failed", "agent", rc.ID, "error", err)
 		}
 	}
-	if err := sp.Agents.AddAgent(rc, sp.Provider, mb); err != nil {
+	// Build a one-shot skills cfg that injects this agent's own
+	// agent-scope skill env (e.g. image-tool's REPLICATE_API_TOKEN)
+	// into the SkillsLoader closure the new agent will use.
+	//
+	// Why we can't just patch sp.Config: the manager's globalSkillsCfg
+	// is captured by-value at manager-construction time and again by
+	// the per-agent SkillsLoader on agent build, so patching sp.Config
+	// after the fact never reaches the closure. AddAgentWithSkillsCfg
+	// swaps the override only for the duration of this build.
+	//
+	// Symptom this fixes: web chat under the agent's owner works (the
+	// owner's user-space cfg already carries the agent's skill env),
+	// but API calls under an apikey/app_user that lands here silently
+	// fall through to whatever keyless path the skill provides (e.g.
+	// image-tool → pollinations, or "no provider configured" when
+	// edit mode has no free fallback).
+	//
+	// Scope is deliberately tight: only the agent-scope row keyed by
+	// rc.ID. We do NOT pull the owner's user-scope global skill env —
+	// that would leak the owner's API keys into another user's session
+	// for skills they may not even be invoking.
+	skillsCfg := sp.Config.Skills
+	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, rc.ID, "skills.entries"); err == nil && cfgRec != nil && len(cfgRec.Data) > 0 {
+		blob, _ := json.Marshal(cfgRec.Data)
+		var entries map[string]config.SkillEntryCfg
+		if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
+			if skillsCfg.AgentEntries == nil {
+				skillsCfg.AgentEntries = map[string]map[string]config.SkillEntryCfg{}
+			} else {
+				// Copy-on-write: don't mutate the shared map the rest
+				// of UserSpace.Config still points at.
+				cp := make(map[string]map[string]config.SkillEntryCfg, len(skillsCfg.AgentEntries)+1)
+				for k, v := range skillsCfg.AgentEntries {
+					cp[k] = v
+				}
+				skillsCfg.AgentEntries = cp
+			}
+			skillsCfg.AgentEntries[rc.ID] = entries
+		}
+	}
+	if err := sp.Agents.AddAgentWithSkillsCfg(rc, sp.Provider, mb, skillsCfg); err != nil {
 		return fmt.Errorf("EnsureAgent: add agent: %w", err)
 	}
 	if sp.SandboxPool != nil {
@@ -343,7 +401,12 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 //  2. layering the user's own providers + channels rows on top
 //  3. listing the user's agent rows from the DB
 //  4. building an agent.Manager that owns those agents
-func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store) (*UserSpace, error) {
+//
+// `systemSandboxPool` is the gateway-wide pool — borrowed, not owned,
+// by the resulting UserSpace. Pass nil when sandbox is disabled at
+// system scope; agents will run with path-only file roots in that
+// case.
+func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, systemSandboxPool sandbox.ExecutorPool) (*UserSpace, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("loadUserSpace: userID required")
 	}
@@ -460,7 +523,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 
 	registerAgentToolChains(cfg, agentMgr.All())
 
-	pool := attachSandboxToAgents(userID, resolved, agentMgr, ws)
+	pool := attachSandboxToAgents(systemSandboxPool, userID, resolved, agentMgr)
 
 	slog.Info("loaded user space", "user", userID, "agents", agentMgr.Names())
 
@@ -516,13 +579,17 @@ func providerKeyList(m map[string]config.ProviderConfig) []string {
 // userSpaceRegistry is a thread-safe lazy-loaded map of user spaces. There
 // are no preloaded / pinned spaces; every user is loaded on first auth and
 // evicted after idleTTL of inactivity.
+//
+// `systemSandboxPool` is held as a borrowed reference and handed to
+// each UserSpace at load time. The gateway owns its lifecycle.
 type userSpaceRegistry struct {
-	mu        sync.RWMutex
-	spaces    map[string]*userSpaceEntry
-	bus       *bus.MessageBus
-	store     store.Store
-	workspace workspace.Store
-	idleTTL   time.Duration
+	mu                sync.RWMutex
+	spaces            map[string]*userSpaceEntry
+	bus               *bus.MessageBus
+	store             store.Store
+	workspace         workspace.Store
+	systemSandboxPool sandbox.ExecutorPool
+	idleTTL           time.Duration
 }
 
 type userSpaceEntry struct {
@@ -530,13 +597,14 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
-func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store) *userSpaceRegistry {
+func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, systemSandboxPool sandbox.ExecutorPool) *userSpaceRegistry {
 	return &userSpaceRegistry{
-		spaces:    make(map[string]*userSpaceEntry),
-		bus:       mb,
-		store:     st,
-		workspace: ws,
-		idleTTL:   30 * time.Minute,
+		spaces:            make(map[string]*userSpaceEntry),
+		bus:               mb,
+		store:             st,
+		workspace:         ws,
+		systemSandboxPool: systemSandboxPool,
+		idleTTL:           30 * time.Minute,
 	}
 }
 
@@ -563,7 +631,7 @@ func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*User
 		e.lastUsed = time.Now()
 		return e.space, nil
 	}
-	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace)
+	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.systemSandboxPool)
 	if err != nil {
 		return nil, err
 	}

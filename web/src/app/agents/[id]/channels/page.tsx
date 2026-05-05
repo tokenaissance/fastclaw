@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,14 +29,21 @@ import {
   Plus,
   Trash2,
   Send,
+  MessageSquare,
   CheckCircle2,
   ExternalLink,
+  Loader2,
+  QrCode,
 } from "lucide-react";
 import {
   listAgentChannels,
   connectAgentTelegram,
   connectAgentDiscord,
   connectAgentSlack,
+  connectAgentLINE,
+  connectAgentFeishu,
+  startAgentWeChatLogin,
+  pollAgentWeChatLoginStatus,
   disconnectAgentChannel,
   type AgentChannel,
 } from "@/lib/api";
@@ -68,6 +76,24 @@ const CATALOG: { type: string; label: string; description: string; available: bo
     description: "Connect a Slack app via Socket Mode (bot token + app token).",
     available: true,
   },
+  {
+    type: "line",
+    label: "LINE",
+    description: "Connect a LINE Messaging API channel via webhook (channel access token + channel secret).",
+    available: true,
+  },
+  {
+    type: "wechat",
+    label: "WeChat",
+    description: "Scan a QR code with the WeChat phone app to relay messages to this agent.",
+    available: true,
+  },
+  {
+    type: "feishu",
+    label: "Feishu",
+    description: "Connect a Feishu custom-app bot via webhook (App ID + App Secret).",
+    available: true,
+  },
 ];
 
 export default function AgentChannelsPage() {
@@ -81,6 +107,9 @@ export default function AgentChannelsPage() {
   const [telegramOpen, setTelegramOpen] = useState(false);
   const [discordOpen, setDiscordOpen] = useState(false);
   const [slackOpen, setSlackOpen] = useState(false);
+  const [lineOpen, setLineOpen] = useState(false);
+  const [wechatOpen, setWechatOpen] = useState(false);
+  const [feishuOpen, setFeishuOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentChannel | null>(null);
 
   const refresh = useCallback(() => {
@@ -165,6 +194,9 @@ export default function AgentChannelsPage() {
                   if (entry.type === "telegram") setTelegramOpen(true);
                   else if (entry.type === "discord") setDiscordOpen(true);
                   else if (entry.type === "slack") setSlackOpen(true);
+                  else if (entry.type === "line") setLineOpen(true);
+                  else if (entry.type === "wechat") setWechatOpen(true);
+                  else if (entry.type === "feishu") setFeishuOpen(true);
                 }}
               />
             );
@@ -189,6 +221,27 @@ export default function AgentChannelsPage() {
       <ConnectSlackDialog
         open={slackOpen}
         onOpenChange={setSlackOpen}
+        agentId={agentId}
+        onConnected={refresh}
+      />
+
+      <ConnectLINEDialog
+        open={lineOpen}
+        onOpenChange={setLineOpen}
+        agentId={agentId}
+        onConnected={refresh}
+      />
+
+      <ConnectWeChatDialog
+        open={wechatOpen}
+        onOpenChange={setWechatOpen}
+        agentId={agentId}
+        onConnected={refresh}
+      />
+
+      <ConnectFeishuDialog
+        open={feishuOpen}
+        onOpenChange={setFeishuOpen}
         agentId={agentId}
         onConnected={refresh}
       />
@@ -324,16 +377,32 @@ function ConnectedCard({
 }
 
 function ChannelIcon({ type }: { type: string }) {
-  // Lucide doesn't ship brand icons. Pick a recognizable approximation
-  // per platform and tint with their canonical accent color so users
-  // can visually distinguish at a glance.
-  switch (type) {
-    case "telegram":
-      return <Send className="h-4 w-4 text-sky-500" />;
-    case "discord":
-      return <Radio className="h-4 w-4 text-indigo-500" />;
-    case "slack":
-      return <Radio className="h-4 w-4 text-fuchsia-500" />;
+  // Brand SVG/PNG assets live in /public/channels — copied from the
+  // workany-web icon set. We size them at 16x16 to match the lucide
+  // icons they replace; the asset's intrinsic colors carry the brand
+  // tint so we don't need a `text-*` class. WeChat has no asset yet so
+  // it falls through to the lucide MessageSquare in emerald.
+  const asset: Record<string, string> = {
+    telegram: "/channels/telegram.svg",
+    discord: "/channels/discord.svg",
+    slack: "/channels/slack.svg",
+    line: "/channels/line.png",
+    feishu: "/channels/feishu.png",
+    wechat: "/channels/wechat.svg",
+  };
+  if (asset[type]) {
+    // WeChat's artwork is non-square (50×40) — object-contain letterboxes
+    // it inside the 16×16 box, leaving a visible gap on top/bottom. Scale
+    // up just this one so it reads at the same visual weight as the
+    // square brand icons next to it.
+    const extra = type === "wechat" ? "scale-150" : "";
+    return (
+      <img
+        src={asset[type]}
+        alt={type}
+        className={`h-4 w-4 object-contain ${extra}`}
+      />
+    );
   }
   return <Radio className="h-4 w-4 text-muted-foreground" />;
 }
@@ -382,7 +451,7 @@ function ConnectTelegramDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Send className="h-5 w-5 text-sky-500" />
+            <img src="/channels/telegram.svg" alt="Telegram" className="h-5 w-5 object-contain" />
             Connect Telegram bot
           </DialogTitle>
           <DialogDescription>
@@ -507,7 +576,7 @@ function ConnectDiscordDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Radio className="h-5 w-5 text-indigo-500" />
+            <img src="/channels/discord.svg" alt="Discord" className="h-5 w-5 object-contain" />
             Connect Discord bot
           </DialogTitle>
           <DialogDescription>
@@ -626,7 +695,7 @@ function ConnectSlackDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Radio className="h-5 w-5 text-fuchsia-500" />
+            <img src="/channels/slack.svg" alt="Slack" className="h-5 w-5 object-contain" />
             Connect Slack app
           </DialogTitle>
           <DialogDescription>
@@ -704,6 +773,546 @@ function ConnectSlackDialog({
                 disabled={submitting || !botToken.trim() || !appToken.trim()}
               >
                 {submitting ? "Connecting…" : "Connect"}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// LINE Messaging API connect dialog. Two-step UX matching Feishu:
+//   1. User pastes Channel access token + Channel secret; we hit
+//      /v2/bot/info to validate and capture the bot's userId.
+//   2. On success, surface the public webhook URL — user pastes it
+//      into LINE Developers Console under "Messaging API → Webhook URL"
+//      and toggles "Use webhook" on.
+function ConnectLINEDialog({
+  open,
+  onOpenChange,
+  agentId,
+  onConnected,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  agentId: string;
+  onConnected: () => void;
+}) {
+  const [channelToken, setChannelToken] = useState("");
+  const [channelSecret, setChannelSecret] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [connected, setConnected] = useState<{ botName: string; basicId: string; webhookUrl: string } | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setChannelToken("");
+      setChannelSecret("");
+      setError("");
+      setSubmitting(false);
+      setConnected(null);
+    }
+  }, [open]);
+
+  const submit = async () => {
+    if (!channelToken.trim() || !agentId) return;
+    setSubmitting(true);
+    setError("");
+    const res = await connectAgentLINE(
+      agentId,
+      channelToken.trim(),
+      channelSecret.trim(),
+    );
+    setSubmitting(false);
+    if (res.error || !res.ok) {
+      setError(res.error || "Failed to connect");
+      return;
+    }
+    setConnected({
+      botName: res.botName || "",
+      basicId: res.basicId || "",
+      webhookUrl: res.webhookUrl || "",
+    });
+    onConnected();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <img src="/channels/line.png" alt="LINE" className="h-5 w-5 object-contain" />
+            Connect LINE channel
+          </DialogTitle>
+          <DialogDescription>
+            Create a Messaging API channel at{" "}
+            <a
+              href="https://developers.line.biz"
+              target="_blank"
+              rel="noreferrer"
+              className="underline"
+            >
+              developers.line.biz
+            </a>
+            . Under <strong>Messaging API</strong> issue a long-lived{" "}
+            <strong>Channel access token</strong>, and copy the{" "}
+            <strong>Channel secret</strong> from the Basic settings tab. Toggle
+            on <em>Use webhook</em> after saving the URL we&apos;ll generate.
+          </DialogDescription>
+        </DialogHeader>
+
+        {connected ? (
+          <div className="space-y-3 py-2">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                <span className="text-sm font-medium">Credentials valid</span>
+              </div>
+              <p className="text-sm">
+                Bot identified as{" "}
+                <strong>{connected.botName || "(unnamed)"}</strong>{" "}
+                {connected.basicId && (
+                  <code className="font-mono text-xs">{connected.basicId}</code>
+                )}.
+              </p>
+            </div>
+            <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
+              <p className="text-sm font-medium">One last step</p>
+              <p className="text-xs text-muted-foreground">
+                Paste this into LINE Developers Console →{" "}
+                <strong>Messaging API → Webhook URL</strong>, click{" "}
+                <em>Verify</em>, then toggle{" "}
+                <strong>Use webhook</strong> on.
+              </p>
+              <Input
+                readOnly
+                value={connected.webhookUrl}
+                className="font-mono text-xs"
+                onFocus={(e) => e.currentTarget.select()}
+              />
+              <p className="text-xs text-muted-foreground">
+                Add the bot as a friend (search the basic ID), or invite it to
+                a group, then send a message to test.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="line-channel-token">Channel access token</Label>
+              <Input
+                id="line-channel-token"
+                value={channelToken}
+                onChange={(e) => setChannelToken(e.target.value)}
+                placeholder="long-lived token"
+                type="password"
+                className="font-mono text-sm"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="line-channel-secret">Channel secret</Label>
+              <Input
+                id="line-channel-secret"
+                value={channelSecret}
+                onChange={(e) => setChannelSecret(e.target.value)}
+                placeholder="from Basic settings"
+                className="font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Optional but strongly recommended — fastclaw verifies inbound
+                webhook payloads via HMAC-SHA256 against this secret.
+              </p>
+            </div>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        )}
+
+        <DialogFooter>
+          {connected ? (
+            <Button onClick={() => onOpenChange(false)}>Done</Button>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                disabled={submitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={submit}
+                disabled={submitting || !channelToken.trim()}
+              >
+                {submitting ? "Validating…" : "Connect"}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ConnectWeChatDialog drives the QR-scan login: fetch a session token,
+// render its `qrCode` string as a QR image, then poll the server every
+// 3s for state. The polling endpoint does ONE upstream round-trip per
+// call (no long-poll on our side), so the lifecycle is purely client-
+// driven — closing the dialog cleans up via the polling ref.
+function ConnectWeChatDialog({
+  open,
+  onOpenChange,
+  agentId,
+  onConnected,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  agentId: string;
+  onConnected: () => void;
+}) {
+  type WechatStatus = "wait" | "scaned" | "confirmed" | "expired" | "";
+  const [qrPayload, setQrPayload] = useState("");
+  const [sessionId, setSessionId] = useState("");
+  const [status, setStatus] = useState<WechatStatus>("");
+  const [accountId, setAccountId] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  // Cleanup on unmount and on dialog close.
+  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(() => {
+    if (!open) {
+      stopPolling();
+      setQrPayload("");
+      setSessionId("");
+      setStatus("");
+      setAccountId("");
+      setError("");
+      setLoading(false);
+    }
+  }, [open, stopPolling]);
+
+  const startLogin = useCallback(async () => {
+    if (!agentId) return;
+    setLoading(true);
+    setError("");
+    setStatus("");
+    setAccountId("");
+    setQrPayload("");
+    stopPolling();
+    const res = await startAgentWeChatLogin(agentId);
+    setLoading(false);
+    if (res.error || !res.sessionId || !res.qrCodeImg) {
+      setError(res.error || "Failed to fetch QR code");
+      return;
+    }
+    setSessionId(res.sessionId);
+    setQrPayload(res.qrCodeImg);
+    setStatus("wait");
+    pollRef.current = setInterval(async () => {
+      const s = await pollAgentWeChatLoginStatus(agentId, res.sessionId!);
+      if (s.error) {
+        // Don't kill the loop on a single transient error — iLink's
+        // status endpoint occasionally hiccups, and the next tick
+        // usually recovers. Surface it as a banner only.
+        setError(s.error);
+        return;
+      }
+      setError("");
+      if (s.status) setStatus(s.status as WechatStatus);
+      if (s.connected) {
+        stopPolling();
+        if (s.accountId) setAccountId(s.accountId);
+        onConnected();
+      }
+      if (s.status === "expired") {
+        stopPolling();
+      }
+    }, 3000);
+  }, [agentId, onConnected, stopPolling]);
+
+  // Auto-fetch a QR as soon as the dialog opens (no separate "name"
+  // step — fastclaw doesn't surface per-account names, accountID is
+  // ilink_bot_id).
+  useEffect(() => {
+    if (open && !qrPayload && !loading && !error) {
+      startLogin();
+    }
+  }, [open, qrPayload, loading, error, startLogin]);
+
+  const connected = !!accountId;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <img src="/channels/wechat.svg" alt="WeChat" className="h-5 w-5 object-contain scale-150" />
+            Connect WeChat
+          </DialogTitle>
+          <DialogDescription>
+            Scan the QR code with the WeChat phone app to bind a personal
+            WeChat account as the bot for this agent. Inbound DMs will be
+            relayed to the agent; the agent's replies are sent back as
+            plain text.
+          </DialogDescription>
+        </DialogHeader>
+
+        {connected ? (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              <span className="text-sm font-medium">Connected</span>
+            </div>
+            <p className="text-sm">
+              Bot is live as <code className="font-mono text-xs">{accountId}</code>.
+              Send it a WeChat message to test.
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-4 py-2">
+            {loading ? (
+              <div className="flex h-56 w-56 items-center justify-center">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : qrPayload ? (
+              <div className="rounded-lg border bg-white p-4">
+                <QRCodeSVG value={qrPayload} size={224} level="M" />
+              </div>
+            ) : (
+              <div className="flex h-56 w-56 items-center justify-center text-sm text-muted-foreground">
+                <QrCode className="h-8 w-8 opacity-50" />
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              {status === "wait" && <>Waiting for scan…</>}
+              {status === "scaned" && (
+                <>
+                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                  Scanned — confirm on your phone.
+                </>
+              )}
+              {status === "confirmed" && (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Connecting…
+                </>
+              )}
+              {status === "expired" && (
+                <span className="text-destructive">QR code expired.</span>
+              )}
+            </div>
+
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        )}
+
+        <DialogFooter>
+          {connected ? (
+            <Button onClick={() => onOpenChange(false)}>Done</Button>
+          ) : (
+            <>
+              {status === "expired" && (
+                <Button onClick={startLogin} disabled={loading}>
+                  {loading ? "Refreshing…" : "Refresh QR"}
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                Cancel
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Feishu / Feishu connect dialog. Two-step UX:
+//   1. User pastes App ID + App Secret + Verification Token, we validate
+//      via /tenant_access_token + /bot/v3/info.
+//   2. On success, we surface the webhook URL — user must paste it
+//      into the Feishu Developer Console under "Event Subscriptions →
+//      Request URL" and re-trigger Feishu's URL verification handshake
+//      from there before the bot starts receiving messages.
+function ConnectFeishuDialog({
+  open,
+  onOpenChange,
+  agentId,
+  onConnected,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  agentId: string;
+  onConnected: () => void;
+}) {
+  const [appId, setAppId] = useState("");
+  const [appSecret, setAppSecret] = useState("");
+  const [verificationToken, setVerificationToken] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [connected, setConnected] = useState<{ botName: string; webhookUrl: string } | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setAppId("");
+      setAppSecret("");
+      setVerificationToken("");
+      setError("");
+      setSubmitting(false);
+      setConnected(null);
+    }
+  }, [open]);
+
+  const submit = async () => {
+    if (!appId.trim() || !appSecret.trim() || !agentId) return;
+    setSubmitting(true);
+    setError("");
+    const res = await connectAgentFeishu(
+      agentId,
+      appId.trim(),
+      appSecret.trim(),
+      verificationToken.trim(),
+    );
+    setSubmitting(false);
+    if (res.error || !res.ok) {
+      setError(res.error || "Failed to connect");
+      return;
+    }
+    setConnected({
+      botName: res.botName || "",
+      webhookUrl: res.webhookUrl || "",
+    });
+    onConnected();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <img src="/channels/feishu.png" alt="Feishu" className="h-5 w-5 object-contain" />
+            Connect Feishu app
+          </DialogTitle>
+          <DialogDescription>
+            Create a custom app at{" "}
+            <a
+              href="https://open.feishu.cn"
+              target="_blank"
+              rel="noreferrer"
+              className="underline"
+            >
+              open.feishu.cn
+            </a>
+            . Enable the bot capability, request{" "}
+            <code>im:message</code> + <code>im:message:send_as_bot</code>{" "}
+            scopes, and copy the App ID + App Secret + Verification Token from
+            <strong> Credentials & Basic Info</strong> and{" "}
+            <strong>Event Subscriptions</strong>.
+          </DialogDescription>
+        </DialogHeader>
+
+        {connected ? (
+          <div className="space-y-3 py-2">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                <span className="text-sm font-medium">Credentials valid</span>
+              </div>
+              <p className="text-sm">
+                Bot identified as{" "}
+                <strong>{connected.botName || "(unnamed)"}</strong>.
+              </p>
+            </div>
+            <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
+              <p className="text-sm font-medium">One last step</p>
+              <p className="text-xs text-muted-foreground">
+                Paste this into Feishu Developer Console →{" "}
+                <strong>Event Subscriptions → Request URL</strong>, then click{" "}
+                <em>Save</em>. Feishu will POST a verification challenge here and
+                this fastclaw instance will echo it automatically.
+              </p>
+              <Input
+                readOnly
+                value={connected.webhookUrl}
+                className="font-mono text-xs"
+                onFocus={(e) => e.currentTarget.select()}
+              />
+              <p className="text-xs text-muted-foreground">
+                Subscribe to <code>im.message.receive_v1</code> to receive
+                messages.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="feishu-app-id">App ID</Label>
+              <Input
+                id="feishu-app-id"
+                value={appId}
+                onChange={(e) => setAppId(e.target.value)}
+                placeholder="cli_..."
+                className="font-mono text-sm"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="feishu-app-secret">App Secret</Label>
+              <Input
+                id="feishu-app-secret"
+                value={appSecret}
+                onChange={(e) => setAppSecret(e.target.value)}
+                placeholder="..."
+                type="password"
+                className="font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="feishu-verification-token">Verification Token</Label>
+              <Input
+                id="feishu-verification-token"
+                value={verificationToken}
+                onChange={(e) => setVerificationToken(e.target.value)}
+                placeholder="from Event Subscriptions tab"
+                className="font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Optional but recommended — fastclaw rejects webhook payloads
+                whose <code>header.token</code> doesn&apos;t match.
+              </p>
+            </div>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        )}
+
+        <DialogFooter>
+          {connected ? (
+            <Button onClick={() => onOpenChange(false)}>Done</Button>
+          ) : (
+            <>
+              <Button
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                disabled={submitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={submit}
+                disabled={submitting || !appId.trim() || !appSecret.trim()}
+              >
+                {submitting ? "Validating…" : "Connect"}
               </Button>
             </>
           )}

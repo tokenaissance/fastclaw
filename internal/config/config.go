@@ -363,6 +363,16 @@ type ChannelConfig struct {
 
 type AccountConfig struct {
 	BotToken string `json:"botToken,omitempty"`
+	// BaseURL is the per-account API base used by adapters whose
+	// upstream isn't a fixed hostname (e.g. WeChat iLink hands out a
+	// region-specific baseurl on QR confirmation). Empty for
+	// Telegram/Discord/Slack — they all hit fixed endpoints.
+	BaseURL string `json:"baseUrl,omitempty"`
+	// UserID is an extra account-scoped identifier some adapters need
+	// alongside BotToken (WeChat iLink's `ilink_user_id`, used as the
+	// X-WECHAT-UIN seed and for typing/getconfig calls). Empty when
+	// not applicable.
+	UserID string `json:"userId,omitempty"`
 }
 
 type Binding struct {

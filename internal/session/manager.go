@@ -40,9 +40,20 @@ func (s *Session) ctx() context.Context {
 
 // Manager manages sessions, keyed by "channel_chat_id".
 // SessionStore is an optional interface for database-backed session persistence.
+//
+// Two parallel persistence shapes:
+//   - GetSession / SaveSession operate on the LLM-facing working set
+//     (post-compaction). This is what the agent loop reads/writes every
+//     turn.
+//   - AppendMessage / ListMessages operate on the append-only per-turn
+//     archive (session_messages table). Compaction never touches it, so
+//     UI history / audit reads see the original conversation regardless
+//     of how many times the working set has been pruned/summarized.
 type SessionStore interface {
 	GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
 	SaveSession(ctx context.Context, agentID, sessionKey string, messages []provider.Message) error
+	AppendMessage(ctx context.Context, agentID, sessionKey string, msg provider.Message) error
+	ListMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
 	ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error)
 	DeleteSession(ctx context.Context, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, agentID, sessionKey, title string) error
@@ -150,6 +161,17 @@ func (m *Manager) Get(channel, chatID string) *Session {
 }
 
 // Append adds a message to the session and persists it.
+//
+// Store-backed mode writes to TWO places:
+//   - SaveSession overwrites the LLM-facing working set in the sessions
+//     table (the array the agent loop reads next turn);
+//   - AppendMessage inserts the new turn into session_messages, the
+//     append-only archive that survives compaction.
+//
+// The archive write is best-effort (logged on failure but not surfaced)
+// — losing one archive row is recoverable from the working set, and we
+// don't want history to silently drop chat replies if the audit table
+// hiccups.
 func (s *Session) Append(msg provider.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,9 +185,32 @@ func (s *Session) Append(msg provider.Message) {
 
 	if s.store != nil {
 		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.Messages)
+		if err := s.store.AppendMessage(s.ctx(), s.agentID, s.sessionKey, msg); err != nil {
+			fmt.Fprintf(os.Stderr, "session archive append error: %v\n", err)
+		}
 	} else {
 		s.appendToFile(msg)
 	}
+}
+
+// ArchivedMessages returns the full append-only history for this session.
+// Falls back to the in-memory working set when no store is configured or
+// the archive is empty (e.g. file-backed mode, or a session created
+// before the archive table existed).
+func (s *Session) ArchivedMessages() []provider.Message {
+	s.mu.Lock()
+	store := s.store
+	agentID := s.agentID
+	sessionKey := s.sessionKey
+	s.mu.Unlock()
+	if store == nil {
+		return s.GetMessages()
+	}
+	msgs, err := store.ListMessages(s.ctx(), agentID, sessionKey)
+	if err != nil || len(msgs) == 0 {
+		return s.GetMessages()
+	}
+	return msgs
 }
 
 // GetMessages returns a copy of all messages.

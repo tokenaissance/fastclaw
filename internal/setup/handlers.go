@@ -693,10 +693,76 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 // --- chat handlers (delegate to per-user agent) ---
 
 type chatRequest struct {
-	AgentID   string   `json:"agentId,omitempty"`
-	SessionID string   `json:"sessionId"`
-	Message   string   `json:"message"`
-	Images    []string `json:"images,omitempty"`
+	AgentID   string         `json:"agentId,omitempty"`
+	SessionID string         `json:"sessionId"`
+	Message   string         `json:"message"`
+	// Images carries data URLs / HTTPS URLs for image attachments. The
+	// web client historically sends them under `imageUrls` (camelCase)
+	// while the API path uses `images`; we accept both and merge below
+	// so server-side plumbing has one canonical slice. Without this the
+	// web's image_url content parts never reach the agent (empty slice
+	// → no ContentParts persisted → history reload shows no image, and
+	// vision LLMs see only the text breadcrumb).
+	Images    []string       `json:"images,omitempty"`
+	ImageURLs []string       `json:"imageUrls,omitempty"`
+	Params    map[string]any `json:"params,omitempty"`
+}
+
+// allImages flattens both legacy field names into a single ordered
+// slice (Images first, then ImageURLs). De-dup is intentionally skipped
+// — clients send one or the other, never both.
+func (r chatRequest) allImages() []string {
+	if len(r.ImageURLs) == 0 {
+		return r.Images
+	}
+	if len(r.Images) == 0 {
+		return r.ImageURLs
+	}
+	out := make([]string, 0, len(r.Images)+len(r.ImageURLs))
+	out = append(out, r.Images...)
+	out = append(out, r.ImageURLs...)
+	return out
+}
+
+// preMaterialized reports whether the caller already uploaded the
+// attachments + prefixed `[Attached: /workspace/...]` breadcrumb into
+// the message. The web client does this end-to-end (uploadAgentFiles +
+// inline breadcrumb in chat/page.tsx); doing it again server-side
+// double-writes the file under a generated name and emits a second
+// breadcrumb, which the LLM reads as two distinct images and tries to
+// edit each separately. API callers that just send raw images via the
+// chat-completions extension have no breadcrumb, so the server has to
+// materialize on their behalf.
+func (r chatRequest) preMaterialized() bool {
+	return strings.HasPrefix(r.Message, "[Attached:")
+}
+
+// annotateMessageWithAttachments prepends one `[Attached: /workspace/<file>]`
+// line per attachment to the user message — same breadcrumb format the web
+// UI uses (see web/src/app/agents/[id]/chat/page.tsx:639-645), so the wire
+// shape the LLM sees is identical regardless of whether the turn arrived
+// via the web chat or the chat API. provider.StripAttachedPrefix scrubs
+// these tags from stored history before they hit UI bubbles / page titles.
+//
+// We deliberately do NOT add a trailing "do not probe" block. An earlier
+// pass tried that — but the explicit negative directive triggered the
+// opposite of its intent (models reflexively `which`/`ls`/`file`'d the
+// path "to confirm" before using it). The web path proves a single bare
+// breadcrumb is enough; mirror that exactly.
+func annotateMessageWithAttachments(message string, paths []string) string {
+	if len(paths) == 0 {
+		return message
+	}
+	var b strings.Builder
+	for _, p := range paths {
+		b.WriteString("[Attached: /workspace/")
+		b.WriteString(p)
+		b.WriteString("]\n")
+	}
+	if message != "" {
+		b.WriteString(message)
+	}
+	return b.String()
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -710,7 +776,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
-	reply := ag.HandleWebChat(r.Context(), req.SessionID, req.Message)
+	images := req.allImages()
+	msgText := req.Message
+	if !req.preMaterialized() {
+		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, images)
+		msgText = annotateMessageWithAttachments(req.Message, paths)
+	}
+	reply := ag.HandleWebChat(r.Context(), req.SessionID, msgText, images, req.Params)
 	jsonResponse(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
@@ -734,6 +806,12 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	flusher.Flush()
+	images := req.allImages()
+	msgText := req.Message
+	if !req.preMaterialized() {
+		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, images)
+		msgText = annotateMessageWithAttachments(req.Message, paths)
+	}
 	events := make(chan agentChatEvent, 32)
 	done := make(chan struct{})
 	go func() {
@@ -744,7 +822,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}()
-	_ = ag.HandleWebChatStream(r.Context(), req.SessionID, req.Message, req.Images, events)
+	_ = ag.HandleWebChatStream(r.Context(), req.SessionID, msgText, images, req.Params, events)
 	close(events)
 	<-done
 }
@@ -872,6 +950,87 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleFeishuWebhook receives Feishu / Feishu event POSTs. The route is
+// public (Feishu doesn't auth via fastclaw bearer); per-event security
+// is enforced inside the Feishu adapter by validating the payload's
+// header.token against the verification token stored at connect time.
+//
+// Hands the raw body to the gateway (via type-asserted dispatcher
+// hook) which finds the right adapter by accountID. The adapter
+// returns an HTTP body + status — handler just relays it. URL
+// verification challenges and real events both go through this same
+// path; the adapter discriminates internally.
+func (s *Server) handleFeishuWebhook(w http.ResponseWriter, r *http.Request) {
+	appID := r.PathValue("appId")
+	if appID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "appId required"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	type feishuDispatcher interface {
+		DispatchFeishuWebhook(accountID string, body []byte) ([]byte, int, error)
+	}
+	d, ok := s.userResolver.(feishuDispatcher)
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "feishu webhook dispatch not available"})
+		return
+	}
+	respBody, status, derr := d.DispatchFeishuWebhook(appID, body)
+	if derr != nil {
+		slog.Warn("feishu webhook dispatch error", "appId", appID, "status", status, "error", derr)
+		if respBody == nil {
+			respBody = []byte(`{"ok":false}`)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(respBody)
+}
+
+// handleLINEWebhook receives LINE Messaging API event POSTs. The route
+// is public (LINE doesn't auth via fastclaw bearer); per-event security
+// comes from the HMAC-SHA256 signature in `x-line-signature` which the
+// adapter validates against channel_secret + the raw body.
+//
+// Reads the body once, hands the raw bytes + signature to the gateway
+// dispatcher (re-encoding the JSON would change the bytes the HMAC was
+// computed over and break verification).
+func (s *Server) handleLINEWebhook(w http.ResponseWriter, r *http.Request) {
+	accountID := r.PathValue("accountId")
+	if accountID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "accountId required"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	signature := r.Header.Get("x-line-signature")
+	type lineDispatcher interface {
+		DispatchLINEWebhook(accountID string, body []byte, signature string) ([]byte, int, error)
+	}
+	d, ok := s.userResolver.(lineDispatcher)
+	if !ok {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "line webhook dispatch not available"})
+		return
+	}
+	respBody, status, derr := d.DispatchLINEWebhook(accountID, body, signature)
+	if derr != nil {
+		slog.Warn("line webhook dispatch error", "accountId", accountID, "status", status, "error", derr)
+		if respBody == nil {
+			respBody = []byte(`{"ok":false}`)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(respBody)
 }
 
 // --- Helpers ---
