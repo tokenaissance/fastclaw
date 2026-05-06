@@ -1977,20 +1977,49 @@ func (d *DBStore) IncrementCronJobFailure(ctx context.Context, jobID string) (in
 }
 
 func (d *DBStore) GetNextDueTime(ctx context.Context) (time.Time, error) {
-	var t sql.NullTime
 	var q string
 	if d.dialect == "postgres" {
+		// Postgres returns a proper timestamp — sql.NullTime works.
 		q = `SELECT MIN(next_run) FROM cron_jobs WHERE enabled = true AND next_run IS NOT NULL`
-	} else {
-		q = `SELECT MIN(next_run) FROM cron_jobs WHERE enabled = 1 AND next_run IS NOT NULL`
+		var t sql.NullTime
+		if err := d.db.QueryRowContext(ctx, q).Scan(&t); err != nil {
+			return time.Time{}, err
+		}
+		if !t.Valid {
+			return time.Time{}, nil
+		}
+		return t.Time, nil
 	}
-	if err := d.db.QueryRowContext(ctx, q).Scan(&t); err != nil {
+	// SQLite returns MIN() as a string — scan into NullString, then parse.
+	q = `SELECT MIN(next_run) FROM cron_jobs WHERE enabled = 1 AND next_run IS NOT NULL`
+	var s sql.NullString
+	if err := d.db.QueryRowContext(ctx, q).Scan(&s); err != nil {
 		return time.Time{}, err
 	}
-	if !t.Valid {
+	if !s.Valid || s.String == "" {
 		return time.Time{}, nil
 	}
-	return t.Time, nil
+	return parseTimeString(s.String), nil
+}
+
+// parseTimeString tries common time formats that modernc.org/sqlite may
+// produce for TIMESTAMP columns (RFC3339, RFC3339Nano, and the Go default
+// format that older code paths wrote).
+func parseTimeString(s string) time.Time {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
