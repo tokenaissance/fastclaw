@@ -208,6 +208,12 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	// in-memory job list, no fastclaw.json copy. Each fired job carries
 	// its OwnerUserID so processInbound can route into the right space.
 	scheduler := cron.NewSchedulerFromStore(&cronStoreAdapter{st: st}, mb)
+	// Pre-flight delivery check: when the configured destination
+	// channel adapter isn't registered (e.g. wechat token died and
+	// the row got purged), the scheduler increments failure_count
+	// instead of firing into the void; rows that miss too many
+	// consecutive ticks are auto-deleted.
+	scheduler.SetChannelChecker(chanMgr)
 
 	systemHooks := readSystemHooks(st)
 	var webhookSrv *webhook.Server
@@ -601,7 +607,7 @@ func registerChannelsFromStore(st store.Store, mb *bus.MessageBus, chanMgr *chan
 		if !r.Enabled {
 			continue
 		}
-		if err := registerChannelInstance(r, mb, chanMgr, false); err != nil {
+		if err := registerChannelInstance(r, mb, chanMgr, st, false); err != nil {
 			slog.Warn("register channel failed",
 				"type", r.Name, "scope", r.Scope, "scope_id", r.ScopeID, "error", err)
 		}

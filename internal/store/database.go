@@ -90,6 +90,28 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateUsersAvatarURL(ctx); err != nil {
 		return fmt.Errorf("migrate users.avatar_url: %w", err)
 	}
+	if err := d.migrateCronJobsFailureCount(ctx); err != nil {
+		return fmt.Errorf("migrate cron_jobs.failure_count: %w", err)
+	}
+	return nil
+}
+
+// migrateCronJobsFailureCount retrofits the failure_count column onto
+// pre-feature installs. Default 0 backfills existing rows as "healthy"
+// so the auto-delete threshold doesn't fire on first tick after the
+// upgrade.
+func (d *DBStore) migrateCronJobsFailureCount(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "cron_jobs", "failure_count")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE cron_jobs ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("add failure_count: %w", err)
+	}
 	return nil
 }
 
@@ -554,6 +576,22 @@ func (d *DBStore) migrationSQL() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_user ON agents (user_id)`,
+		// agent_grants is the read-only sharing table: rows here let a
+		// non-owner user load and chat with someone else's agent. The
+		// agent owner (agents.user_id) issues grants; granted_by records
+		// who issued the grant for audit. Sessions/memory/agent_files
+		// stay user_id-keyed so each grantee gets their own private
+		// chat history and per-user files (MEMORY.md, USER.md), while
+		// the owner-keyed agent_files row (SOUL.md, IDENTITY.md, etc.)
+		// is read by everyone via GetAgentFile's overlay fallback.
+		`CREATE TABLE IF NOT EXISTS agent_grants (
+				agent_id TEXT NOT NULL,
+				user_id TEXT NOT NULL,
+				granted_by TEXT NOT NULL DEFAULT '',
+				granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (agent_id, user_id)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_grants_user ON agent_grants (user_id)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
@@ -590,6 +628,26 @@ func (d *DBStore) migrationSQL() []string {
 			PRIMARY KEY (user_id, agent_id, session_key, seq)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_messages_lookup ON session_messages (user_id, agent_id, session_key, seq)`,
+		// chat_events is the real-time event stream the agent emits
+		// during a turn (content chunks, tool_call, error, done).
+		// Persisted so that a client that refreshes / reconnects
+		// mid-turn can resume from its last-seen seq instead of
+		// missing the in-flight delta. seq is per-(user, agent,
+		// session) and assigned on INSERT via COALESCE(MAX(seq),-1)+1
+		// — same pattern as session_messages. Compaction never
+		// touches this table; the row only goes away when the parent
+		// session is deleted (DeleteSession cascade).
+		`CREATE TABLE IF NOT EXISTS chat_events (
+				user_id TEXT NOT NULL,
+				agent_id TEXT NOT NULL,
+				session_key TEXT NOT NULL,
+				seq INTEGER NOT NULL,
+				type TEXT NOT NULL,
+				data TEXT NOT NULL DEFAULT '',
+				created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (user_id, agent_id, session_key, seq)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_chat_events_lookup ON chat_events (user_id, agent_id, session_key, seq)`,
 		// agent_files holds the agent's own files: SOUL.md, IDENTITY.md,
 		// MEMORY.md, AGENTS.md, BOOTSTRAP.md, etc.
 		//
@@ -641,6 +699,12 @@ func (d *DBStore) migrationSQL() []string {
 			next_run TIMESTAMP,
 			locked_by TEXT,
 			locked_at TIMESTAMP,
+			-- failure_count tracks consecutive fire-attempts whose
+			-- destination channel was missing/unreachable. The cron
+			-- scheduler increments it on each miss and self-deletes the
+			-- row once it crosses the threshold so a dead bot doesn't
+			-- log forever.
+			failure_count INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_cron_jobs_schedule ON cron_jobs (enabled, next_run)`,
@@ -789,7 +853,7 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 	}
 	rows.Close()
 	for _, aid := range ownedAgents {
-		for _, t := range []string{"agent_files", "sessions", "cron_jobs"} {
+		for _, t := range []string{"agent_files", "sessions", "session_messages", "chat_events", "cron_jobs", "agent_grants"} {
 			if _, err := tx.ExecContext(ctx,
 				fmt.Sprintf("DELETE FROM %s WHERE agent_id = %s", t, d.ph(1)), aid); err != nil {
 				return err
@@ -804,12 +868,17 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 			return err
 		}
 	}
+	// Also revoke any inbound grants this user held on other peoples' agents.
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM agent_grants WHERE user_id = %s", d.ph(1)), id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM agents WHERE user_id = %s", d.ph(1)), id); err != nil {
 		return err
 	}
 	// Per-user state that's not agent-scoped (agent_files is now agent-only).
-	for _, t := range []string{"web_sessions", "apikeys", "sessions"} {
+	for _, t := range []string{"web_sessions", "apikeys", "sessions", "session_messages", "chat_events"} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %s WHERE user_id = %s", t, d.ph(1)), id); err != nil {
 			return err
@@ -1066,7 +1135,7 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, t := range []string{"agent_files", "sessions", "cron_jobs"} {
+	for _, t := range []string{"agent_files", "sessions", "session_messages", "chat_events", "cron_jobs", "agent_grants"} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s WHERE agent_id = %s`, t, d.ph(1)), agentID); err != nil {
 			return err
@@ -1095,6 +1164,87 @@ func (d *DBStore) ListAllAgents(ctx context.Context) ([]AgentRecord, error) {
 	}
 	defer rows.Close()
 	return scanAgents(rows)
+}
+
+// --- Agent grants ---
+
+func (d *DBStore) GrantAgent(ctx context.Context, agentID, userID, grantedBy string) error {
+	if agentID == "" || userID == "" {
+		return errors.New("store: agentID and userID required")
+	}
+	now := time.Now().UTC()
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO agent_grants (agent_id, user_id, granted_by, granted_at)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (agent_id, user_id) DO UPDATE
+				SET granted_by = EXCLUDED.granted_by`,
+			agentID, userID, grantedBy, now)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO agent_grants (agent_id, user_id, granted_by, granted_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT (agent_id, user_id) DO UPDATE SET
+			  granted_by = excluded.granted_by`,
+		agentID, userID, grantedBy, now)
+	return err
+}
+
+func (d *DBStore) RevokeAgent(ctx context.Context, agentID, userID string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM agent_grants WHERE agent_id = %s AND user_id = %s`,
+			d.ph(1), d.ph(2)),
+		agentID, userID)
+	return err
+}
+
+func (d *DBStore) ListAgentGrants(ctx context.Context, agentID string) ([]AgentGrantRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT agent_id, user_id, granted_by, granted_at FROM agent_grants
+			WHERE agent_id = %s ORDER BY granted_at`, d.ph(1)),
+		agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentGrantRecord
+	for rows.Next() {
+		var g AgentGrantRecord
+		if err := rows.Scan(&g.AgentID, &g.UserID, &g.GrantedBy, &g.GrantedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// ListAgentsSharedWith returns every agent that has been granted to
+// userID (i.e., the user is a grantee, not the owner). Used by the
+// gateway's per-user space loader and the /api/agents listing handler
+// to surface "Shared with me" alongside owned agents.
+func (d *DBStore) ListAgentsSharedWith(ctx context.Context, userID string) ([]AgentRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT a.id, a.user_id, a.name, a.config, a.created_at, a.updated_at
+			FROM agents a
+			JOIN agent_grants g ON g.agent_id = a.id
+			WHERE g.user_id = %s
+			ORDER BY g.granted_at`, d.ph(1)),
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgents(rows)
+}
+
+func (d *DBStore) IsAgentGrantedTo(ctx context.Context, agentID, userID string) (bool, error) {
+	var n int
+	err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM agent_grants WHERE agent_id = %s AND user_id = %s`,
+			d.ph(1), d.ph(2)),
+		agentID, userID).Scan(&n)
+	return n > 0, err
 }
 
 func scanAgents(rows *sql.Rows) ([]AgentRecord, error) {
@@ -1173,11 +1323,13 @@ func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]S
 }
 
 func (d *DBStore) DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error {
-	if _, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM session_messages WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
-			d.ph(1), d.ph(2), d.ph(3)),
-		userID, agentID, sessionKey); err != nil {
-		return err
+	for _, t := range []string{"session_messages", "chat_events"} {
+		if _, err := d.db.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM %s WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
+				t, d.ph(1), d.ph(2), d.ph(3)),
+			userID, agentID, sessionKey); err != nil {
+			return err
+		}
 	}
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM sessions WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
@@ -1228,6 +1380,105 @@ func (d *DBStore) AppendSessionMessage(ctx context.Context, userID, agentID, ses
 		msg.ToolCallID, msg.Name, string(metadata), msg.Thinking, rawAssistant, ts,
 		userID, agentID, sessionKey)
 	return err
+}
+
+// AppendChatEvent persists one streaming-event delta and returns the
+// assigned seq. seq is per-(user, agent, session) — same pattern as
+// session_messages — and is allocated atomically inside a transaction
+// so concurrent appenders (e.g. fan-out + replay) can't collide on the
+// PK. Used by reconnecting clients to skip past events they've
+// already rendered.
+func (d *DBStore) AppendChatEvent(ctx context.Context, userID, agentID, sessionKey, eventType string, data []byte) (int64, error) {
+	if userID == "" || agentID == "" || sessionKey == "" {
+		return 0, errors.New("store: AppendChatEvent requires user_id, agent_id, session_key")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var seq int64
+	if d.dialect == "postgres" {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(seq), -1) + 1 FROM chat_events
+				WHERE user_id = $1 AND agent_id = $2 AND session_key = $3`,
+			userID, agentID, sessionKey).Scan(&seq); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO chat_events (user_id, agent_id, session_key, seq, type, data, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			userID, agentID, sessionKey, seq, eventType, string(data), time.Now().UTC()); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(seq), -1) + 1 FROM chat_events
+				WHERE user_id = ? AND agent_id = ? AND session_key = ?`,
+			userID, agentID, sessionKey).Scan(&seq); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO chat_events (user_id, agent_id, session_key, seq, type, data, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			userID, agentID, sessionKey, seq, eventType, string(data), time.Now().UTC()); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
+// ListChatEventsSince returns every chat event with seq strictly
+// greater than sinceSeq, ascending. Pass sinceSeq=-1 to get all.
+func (d *DBStore) ListChatEventsSince(ctx context.Context, userID, agentID, sessionKey string, sinceSeq int64) ([]ChatEventRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT seq, type, data, created_at FROM chat_events
+			WHERE user_id = %s AND agent_id = %s AND session_key = %s AND seq > %s
+			ORDER BY seq ASC`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		userID, agentID, sessionKey, sinceSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChatEventRecord
+	for rows.Next() {
+		var rec ChatEventRecord
+		var dataStr string
+		if err := rows.Scan(&rec.Seq, &rec.Type, &dataStr, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		rec.UserID = userID
+		rec.AgentID = agentID
+		rec.SessionKey = sessionKey
+		if dataStr != "" {
+			rec.Data = []byte(dataStr)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// LatestChatEventSeq returns the highest seq for the session, or -1 if
+// none. Surfaced to clients via the chat history response so they
+// know where to subscribe from on a fresh page load.
+func (d *DBStore) LatestChatEventSeq(ctx context.Context, userID, agentID, sessionKey string) (int64, error) {
+	var seq sql.NullInt64
+	err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT MAX(seq) FROM chat_events
+			WHERE user_id = %s AND agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, sessionKey).Scan(&seq)
+	if err != nil {
+		return -1, err
+	}
+	if !seq.Valid {
+		return -1, nil
+	}
+	return seq.Int64, nil
 }
 
 // ListSessionMessages returns every archived turn for one session in
@@ -1567,11 +1818,11 @@ func scanConfigs(rows *sql.Rows) ([]ConfigRecord, error) {
 
 // --- Cron jobs ---
 
-const cronSelectCols = `id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, created_at`
+const cronSelectCols = `id, agent_id, name, type, schedule, message, channel, chat_id, account_id, timezone, enabled, last_run, next_run, failure_count, created_at`
 
 func (d *DBStore) ListCronJobsByOwner(ctx context.Context, ownerUserID string) ([]CronJobRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT cj.id, cj.agent_id, cj.name, cj.type, cj.schedule, cj.message, cj.channel, cj.chat_id, cj.account_id, cj.timezone, cj.enabled, cj.last_run, cj.next_run, cj.created_at
+		fmt.Sprintf(`SELECT cj.id, cj.agent_id, cj.name, cj.type, cj.schedule, cj.message, cj.channel, cj.chat_id, cj.account_id, cj.timezone, cj.enabled, cj.last_run, cj.next_run, cj.failure_count, cj.created_at
 			FROM cron_jobs cj JOIN agents a ON cj.agent_id = a.id
 			WHERE a.user_id = %s ORDER BY cj.created_at`, d.ph(1)),
 		ownerUserID)
@@ -1598,7 +1849,7 @@ func (d *DBStore) GetCronJob(ctx context.Context, jobID string) (*CronJobRecord,
 		fmt.Sprintf(`SELECT `+cronSelectCols+` FROM cron_jobs WHERE id = %s`, d.ph(1)), jobID)
 	var j CronJobRecord
 	var lastRun, nextRun sql.NullTime
-	if err := row.Scan(&j.ID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.CreatedAt); err != nil {
+	if err := row.Scan(&j.ID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.FailureCount, &j.CreatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	if lastRun.Valid {
@@ -1684,16 +1935,45 @@ func (d *DBStore) LockCronJob(ctx context.Context, jobID, instanceID string) (bo
 }
 
 func (d *DBStore) UpdateCronJobRun(ctx context.Context, jobID string, lastRun, nextRun time.Time) error {
+	// A successful tick clears failure_count too — the row only
+	// auto-deletes on a *consecutive* run of misses.
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`UPDATE cron_jobs SET last_run=$1, next_run=$2, locked_by=NULL, locked_at=NULL WHERE id=$3`,
+			`UPDATE cron_jobs SET last_run=$1, next_run=$2, failure_count=0, locked_by=NULL, locked_at=NULL WHERE id=$3`,
 			lastRun, nextRun, jobID)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`UPDATE cron_jobs SET last_run=?, next_run=?, locked_by=NULL, locked_at=NULL WHERE id=?`,
+		`UPDATE cron_jobs SET last_run=?, next_run=?, failure_count=0, locked_by=NULL, locked_at=NULL WHERE id=?`,
 		lastRun, nextRun, jobID)
 	return err
+}
+
+// IncrementCronJobFailure atomically bumps failure_count and returns
+// the new total. Also clears the lock so the next tick is free to
+// retry (or, if the caller decides to delete the row at threshold,
+// the row goes away cleanly without a stuck lock).
+func (d *DBStore) IncrementCronJobFailure(ctx context.Context, jobID string) (int, error) {
+	if d.dialect == "postgres" {
+		var n int
+		err := d.db.QueryRowContext(ctx,
+			`UPDATE cron_jobs SET failure_count = failure_count + 1, locked_by=NULL, locked_at=NULL
+				WHERE id = $1 RETURNING failure_count`, jobID).Scan(&n)
+		if err != nil {
+			return 0, scanErr(err)
+		}
+		return n, nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`UPDATE cron_jobs SET failure_count = failure_count + 1, locked_by=NULL, locked_at=NULL WHERE id=?`,
+		jobID); err != nil {
+		return 0, err
+	}
+	var n int
+	if err := d.db.QueryRowContext(ctx, `SELECT failure_count FROM cron_jobs WHERE id = ?`, jobID).Scan(&n); err != nil {
+		return 0, scanErr(err)
+	}
+	return n, nil
 }
 
 func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
@@ -1701,7 +1981,7 @@ func scanCronJobs(rows *sql.Rows) ([]CronJobRecord, error) {
 	for rows.Next() {
 		var j CronJobRecord
 		var lastRun, nextRun sql.NullTime
-		if err := rows.Scan(&j.ID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.CreatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.AgentID, &j.Name, &j.Type, &j.Schedule, &j.Message, &j.Channel, &j.ChatID, &j.AccountID, &j.Timezone, &j.Enabled, &lastRun, &nextRun, &j.FailureCount, &j.CreatedAt); err != nil {
 			return nil, err
 		}
 		if lastRun.Valid {

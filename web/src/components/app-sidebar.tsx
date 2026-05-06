@@ -78,19 +78,32 @@ const ADMIN_NAV: NavItem[] = [
 //   2. /customize/ and /skills/ → suppress (`!hasSession` alone made
 //      New chat light up on every sibling agent page since pathname
 //      didn't match anyway).
+//
+// `viewer` is true when the active agent was shared with the caller by
+// another user. Configuration tabs (Customize / Models / Skills /
+// Channels / Scheduler) are gated to owners only — viewers see just
+// "New chat" so the chat surface stays usable but the read-only nature
+// of the relationship is obvious in the sidebar.
 const AGENT_NAV = (
   agentId: string,
   pathname: string,
   hasSession: boolean,
+  viewer: boolean,
 ): NavItem[] => {
   const onChatRoute = pathname.startsWith(`/agents/${agentId}/chat`);
-  return [
+  const items: NavItem[] = [
     {
       title: "New chat",
       url: `/agents/${agentId}/chat/`,
       icon: PlusIcon,
       active: onChatRoute && !hasSession,
     },
+  ];
+  if (viewer) {
+    return items;
+  }
+  return [
+    ...items,
     { title: "Customize", url: `/agents/${agentId}/customize/`, icon: Wand2Icon },
     { title: "Models", url: `/agents/${agentId}/models/`, icon: BrainIcon },
     { title: "Skills", url: `/agents/${agentId}/skills/`, icon: SparklesIcon },
@@ -108,6 +121,10 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const [status, setStatus] = React.useState<StatusResponse | null>(null);
   const [me, setMe] = React.useState<MeResponse | null>(null);
   const [agents, setAgents] = React.useState<AgentSwitcherItem[]>([]);
+  // role flag per agent the caller can see — owner vs viewer (read-only
+  // shared from another user). Drives whether the AGENT_NAV exposes
+  // configuration tabs.
+  const [agentRoles, setAgentRoles] = React.useState<Record<string, "owner" | "viewer">>({});
   const [sessions, setSessions] = React.useState<SessionItem[]>([]);
 
   // Keep status polling so the online dot / admin flag stay fresh.
@@ -127,16 +144,22 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   // Agent list drives the switcher dropdown at the top of the sidebar.
   React.useEffect(() => {
     getAgents()
-      .then((list) =>
-        setAgents(list.map((a) => ({ id: a.id, name: a.name, model: a.model }))),
-      )
+      .then((list) => {
+        setAgents(list.map((a) => ({ id: a.id, name: a.name, model: a.model })));
+        const roles: Record<string, "owner" | "viewer"> = {};
+        for (const a of list) {
+          roles[a.id] = a.role === "viewer" ? "viewer" : "owner";
+        }
+        setAgentRoles(roles);
+      })
       .catch(() => {});
   }, []);
 
   // When the active agent isn't in the caller's owned list — e.g. a
   // super_admin chatting with another user's agent — fetch its name
   // separately and splice it in so the switcher header shows the real
-  // name instead of falling back to "FastClaw".
+  // name instead of falling back to "FastClaw". The single-agent
+  // endpoint also returns role, so capture it here too.
   React.useEffect(() => {
     if (!activeAgentId) return;
     if (agents.some((a) => a.id === activeAgentId)) return;
@@ -149,6 +172,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             ? prev
             : [...prev, { id: a.id, name: a.name, model: a.model }],
         );
+        if (a.role === "viewer" || a.role === "owner") {
+          setAgentRoles((prev) => ({ ...prev, [a.id]: a.role as "owner" | "viewer" }));
+        }
       })
       .catch(() => {});
     return () => {
@@ -201,7 +227,15 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         {activeAgentId ? (
-          <NavMain label="Agent" items={AGENT_NAV(activeAgentId, pathname, hasOpenSession)} />
+          <NavMain
+            label="Agent"
+            items={AGENT_NAV(
+              activeAgentId,
+              pathname,
+              hasOpenSession,
+              agentRoles[activeAgentId] === "viewer",
+            )}
+          />
         ) : (
           <NavMain label="Platform" items={platformItems} />
         )}

@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgent, getChatHistory, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { getAgent, getChatHistoryWithCursor, getChatSessions, listAgentFiles, renameChatSession, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -298,6 +298,22 @@ export default function AgentChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Dedupe events arriving on both the active POST stream and the
+  // parallel /api/chat/subscribe SSE — both subscribe to the same
+  // chat-events hub on the server. Tracks the highest seq we've
+  // already rendered for the current session.
+  const maxSeqRef = useRef<number>(-1);
+  // Resume cursor handed to /api/chat/subscribe so a freshly reloaded
+  // page replays only deltas it didn't see. Captured from the chat
+  // history endpoint, refreshed when sessionId changes.
+  const subscribeSinceRef = useRef<number>(-1);
+  // Transient assistant bubble created from subscribe-replayed content
+  // events (i.e. when the user reloaded mid-turn and we're catching up
+  // before the agent's "done" lands). Cleared on the next history
+  // reload, which replaces the placeholder with the canonical message
+  // pulled from session_messages.
+  const transientBubbleIdRef = useRef<string | null>(null);
   // AbortController for the in-flight chat stream so the Stop button can
   // cancel both the upload and the SSE connection. Reset on every new turn.
   const abortRef = useRef<AbortController | null>(null);
@@ -411,33 +427,116 @@ export default function AgentChatPage() {
     loadSessions(selectedAgent);
   }, [selectedAgent, loadSessions]);
 
-  // Live subscription for cron-fired (and other async) replies. The
-  // server's WebChannel fans out every outbound bus message routed to
-  // (agent, session) here as an SSE event; we append it to messages so
-  // the user sees scheduled jokes / reminders without reloading.
-  // Re-runs whenever (agent, session) changes — closing the previous
-  // EventSource so we don't double-receive after switching sessions.
+  // Live + replay subscription. Two job:
+  //
+  //   1. Cron-fired (and other async) plain text messages routed
+  //      through the server's WebChannel — these arrive with shape
+  //      { text } and get appended as a new agent bubble.
+  //
+  //   2. Resume-on-reload of a turn that was in flight when the user
+  //      refreshed. The server replays chat_events with seq > since
+  //      and then keeps the connection live for new events. These
+  //      arrive with ChatStreamEvent shape ({ seq, type, data }).
+  //
+  // Dedupe across this connection AND the parallel POST sendChatStream
+  // (both subscribe to the same hub server-side) by skipping events
+  // whose seq is <= maxSeqRef.
   useEffect(() => {
     if (!selectedAgent || !sessionId) return;
-    const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}`;
+    const since = subscribeSinceRef.current;
+    const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}&since=${since}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (ev) => {
+      let data: { seq?: number; type?: string; text?: string; data?: { content?: string; message?: string } };
       try {
-        const data = JSON.parse(ev.data) as { text?: string };
-        const text = data.text || "";
-        if (!text) return;
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `async-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            role: "agent",
-            content: text,
-            timestamp: Date.now(),
-          },
-        ]);
+        data = JSON.parse(ev.data);
       } catch {
-        // ignore malformed events
+        return;
       }
+      // Shape A: ChatStreamEvent (in-flight turn deltas).
+      if (typeof data.type === "string") {
+        const seq = typeof data.seq === "number" ? data.seq : -1;
+        if (seq >= 0 && seq <= maxSeqRef.current) return; // already rendered via POST stream
+        if (seq >= 0) maxSeqRef.current = seq;
+        switch (data.type) {
+          case "content": {
+            const content = data.data?.content || "";
+            if (!content) break;
+            setMessages((prev) => {
+              if (transientBubbleIdRef.current) {
+                const idx = prev.findIndex((m) => m.id === transientBubbleIdRef.current);
+                if (idx >= 0) {
+                  const updated = [...prev];
+                  updated[idx] = {
+                    ...updated[idx],
+                    content: (updated[idx].content || "") + content,
+                  };
+                  return updated;
+                }
+              }
+              const id = `resume-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+              transientBubbleIdRef.current = id;
+              return [...prev, { id, role: "agent", content, timestamp: Date.now() }];
+            });
+            break;
+          }
+          case "error": {
+            const msg = data.data?.message || "Unknown error";
+            setMessages((prev) => [
+              ...prev,
+              { id: `e-${Date.now()}`, role: "agent", content: `Error: ${msg}`, timestamp: Date.now() },
+            ]);
+            break;
+          }
+          case "done": {
+            // Only reload history when we actually built a transient
+            // bubble from subscribe-replayed content events (i.e. the
+            // user reloaded mid-turn and we need to swap the
+            // placeholder for the canonical message saved in
+            // session_messages). When the active POST stream rendered
+            // the turn directly, transient bubble is null — a reload
+            // here would clobber any rendered error bubbles too,
+            // because LLM-error turns never write an assistant
+            // message to session_messages.
+            if (transientBubbleIdRef.current) {
+              transientBubbleIdRef.current = null;
+              getChatHistoryWithCursor(selectedAgent, sessionId)
+                .then(({ history, latestEventSeq }) => {
+                  if (latestEventSeq > maxSeqRef.current) maxSeqRef.current = latestEventSeq;
+                  subscribeSinceRef.current = latestEventSeq;
+                  setMessages(buildChatMessages(history));
+                })
+                .catch(() => {});
+            }
+            // Tell the sidebar to refresh — the new turn may have
+            // produced an updated session title.
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(
+                new CustomEvent("fastclaw:sessions-changed", {
+                  detail: { agentId: selectedAgent },
+                }),
+              );
+            }
+            break;
+          }
+          // tool_call / tool_result during catch-up are skipped here —
+          // the next history reload (on `done`) will render them
+          // properly via buildChatMessages.
+        }
+        return;
+      }
+      // Shape B: legacy WebChannel { text } — cron-fired async messages.
+      const text = data.text || "";
+      if (!text) return;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `async-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          role: "agent",
+          content: text,
+          timestamp: Date.now(),
+        },
+      ]);
     };
     es.onerror = () => {
       // EventSource auto-reconnects on transient errors; only close on
@@ -532,8 +631,16 @@ export default function AgentChatPage() {
   // hanging it off the last agent message.
   useEffect(() => {
     if (!selectedAgent || !sessionId) return;
-    getChatHistory(selectedAgent, sessionId)
-      .then(async (history) => {
+    // Reset dedup state when session changes — events from a previous
+    // session must not bias the new session's seq filter, and any
+    // transient placeholder is no longer relevant.
+    maxSeqRef.current = -1;
+    subscribeSinceRef.current = -1;
+    transientBubbleIdRef.current = null;
+    getChatHistoryWithCursor(selectedAgent, sessionId)
+      .then(async ({ history, latestEventSeq }) => {
+        if (latestEventSeq > maxSeqRef.current) maxSeqRef.current = latestEventSeq;
+        subscribeSinceRef.current = latestEventSeq;
         if (!history || history.length === 0) {
           setMessages([]);
           return;
@@ -686,6 +793,16 @@ export default function AgentChatPage() {
 
     try {
       await sendChatStream(selectedAgent, sessionId, fullText, (evt: ChatStreamEvent) => {
+        // Dedup against /api/chat/subscribe SSE, which subscribes to
+        // the same chat-events hub server-side. Whichever path arrives
+        // first renders; the other skips. seq < 0 means persistence
+        // failed for this event — fall through and accept the
+        // possibility of a double-render rather than dropping the
+        // event entirely.
+        if (typeof evt.seq === "number" && evt.seq >= 0) {
+          if (evt.seq <= maxSeqRef.current) return;
+          maxSeqRef.current = evt.seq;
+        }
         switch (evt.type) {
           case "content": {
             const content = evt.data?.content || "";

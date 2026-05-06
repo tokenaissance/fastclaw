@@ -897,6 +897,8 @@ type connectFeishuRequest struct {
 	AppID             string `json:"appId"`
 	AppSecret         string `json:"appSecret"`
 	VerificationToken string `json:"verificationToken"`
+	EncryptKey        string `json:"encryptKey"`
+	UseLongConn       bool   `json:"useLongConn"`
 }
 
 // handleConnectAgentFeishu validates a Feishu custom-app credential triple
@@ -927,6 +929,8 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 	appID := strings.TrimSpace(req.AppID)
 	appSecret := strings.TrimSpace(req.AppSecret)
 	verificationToken := strings.TrimSpace(req.VerificationToken)
+	encryptKey := strings.TrimSpace(req.EncryptKey)
+	useLongConn := req.UseLongConn
 	if appID == "" || appSecret == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "appId and appSecret required"})
 		return
@@ -946,8 +950,10 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		Enabled: true,
 		Accounts: map[string]config.AccountConfig{
 			appID: {
-				BotToken: appSecret,
-				UserID:   verificationToken, // see channels/feishu.go field-mapping note
+				BotToken:    appSecret,
+				UserID:      verificationToken, // see channels/feishu.go field-mapping note
+				EncryptKey:  encryptKey,
+				UseLongConn: useLongConn,
 			},
 		},
 	}
@@ -971,13 +977,21 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "feishu", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{
-		"ok":         true,
-		"appId":      appID,
-		"botName":    botName,
-		"botOpenId":  botOpenID,
-		"webhookUrl": feishuWebhookPathFor(r, appID),
-	})
+	resp := map[string]any{
+		"ok":          true,
+		"appId":       appID,
+		"botName":     botName,
+		"botOpenId":   botOpenID,
+		"useLongConn": useLongConn,
+	}
+	// Webhook URL is only meaningful when the user picked the
+	// public-URL transport. Long-connection accounts don't need it
+	// (no public ingress required) — omit so the UI doesn't show a
+	// step the user can't / shouldn't do.
+	if !useLongConn {
+		resp["webhookUrl"] = feishuWebhookPathFor(r, appID)
+	}
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 // feishuWebhookPathFor builds the URL the user should paste into the

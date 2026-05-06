@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
@@ -19,7 +21,7 @@ import (
 // fans out everything in one go); dashboard mutations use
 // RegisterAndStart so a freshly-saved bot starts receiving updates
 // without restarting the process.
-func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
+func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr *channels.Manager, st store.Store, hot bool) error {
 	cc := decodeChannelConfig(rec)
 	switch rec.Name {
 	case "telegram":
@@ -31,7 +33,7 @@ func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr
 	case "line":
 		return registerLINEChannels(cc, mb, chanMgr, hot)
 	case "wechat":
-		return registerWeChatChannels(cc, mb, chanMgr, hot)
+		return registerWeChatChannels(rec, cc, mb, chanMgr, st, hot)
 	case "feishu":
 		return registerFeishuChannels(cc, mb, chanMgr, hot)
 	}
@@ -159,7 +161,12 @@ func registerFeishuChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chan
 		}
 		// AccountConfig.UserID carries the verification token (see
 		// channels/feishu.go for the field-mapping rationale).
-		lk, err := channels.NewFeishu(accountID, secret, acct.UserID, accountID, mb)
+		// AccountConfig.EncryptKey is set when the user enabled 加密
+		// 策略 in the Feishu console; empty = plaintext webhook bodies.
+		// AccountConfig.UseLongConn switches the adapter to outbound
+		// WebSocket mode (no public URL needed); when true the
+		// verificationToken/encryptKey fields are unused.
+		lk, err := channels.NewFeishu(accountID, secret, acct.UserID, acct.EncryptKey, acct.UseLongConn, accountID, mb)
 		if err != nil {
 			return err
 		}
@@ -168,7 +175,7 @@ func registerFeishuChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chan
 	return nil
 }
 
-func registerWeChatChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
+func registerWeChatChannels(rec store.ConfigRecord, chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, st store.Store, hot bool) error {
 	// WeChat is multi-account by design — every QR scan mints a new
 	// (botToken, ilink_user_id, baseURL) triple keyed under a fresh
 	// accountID. The legacy "no Accounts map → single bot from
@@ -184,9 +191,60 @@ func registerWeChatChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chan
 		if err != nil {
 			return err
 		}
+		// On confirmed token-expiry the adapter exits; clean up the
+		// configs row so the next process restart doesn't re-register
+		// a known-dead bot (which would log the same warning again on
+		// boot). The user has to rescan the QR through the dashboard
+		// — that flow re-creates the Accounts entry from scratch.
+		if st != nil {
+			rowID := rec.ID
+			wc.SetOnExpired(func(deadAccount string) {
+				if err := purgeWeChatAccount(st, rowID, deadAccount); err != nil {
+					slog.Warn("wechat token-expired cleanup failed",
+						"account", deadAccount, "error", err)
+				}
+				chanMgr.Unregister("wechat", deadAccount)
+			})
+		}
 		register(chanMgr, wc, hot)
 	}
 	return nil
+}
+
+// purgeWeChatAccount removes one account from the configs row's
+// Accounts map. If the row is left empty after the removal the whole
+// row gets deleted. Runs in the adapter's polling goroutine so the
+// HTTP request ctx isn't available — use a fresh background ctx.
+func purgeWeChatAccount(st store.Store, rowID, deadAccount string) error {
+	ctx := context.Background()
+	rec, err := st.GetConfig(ctx, rowID)
+	if err != nil {
+		return err
+	}
+	if rec == nil {
+		return nil
+	}
+	cc := config.ChannelConfig{Enabled: rec.Enabled}
+	if blob, mErr := json.Marshal(rec.Data); mErr == nil && len(blob) > 0 {
+		_ = json.Unmarshal(blob, &cc)
+	}
+	if _, ok := cc.Accounts[deadAccount]; !ok {
+		return nil
+	}
+	delete(cc.Accounts, deadAccount)
+	if len(cc.Accounts) == 0 {
+		return st.DeleteConfig(ctx, rec.ID)
+	}
+	blob, mErr := json.Marshal(cc)
+	if mErr != nil {
+		return mErr
+	}
+	var data map[string]interface{}
+	if mErr := json.Unmarshal(blob, &data); mErr != nil {
+		return mErr
+	}
+	rec.Data = data
+	return st.SaveConfig(ctx, rec)
 }
 
 // buildBotUsernames creates agentID -> botUsername mapping by looking at

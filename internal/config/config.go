@@ -373,6 +373,19 @@ type AccountConfig struct {
 	// X-WECHAT-UIN seed and for typing/getconfig calls). Empty when
 	// not applicable.
 	UserID string `json:"userId,omitempty"`
+	// EncryptKey is the symmetric key used by adapters whose upstream
+	// optionally encrypts webhook payloads (Feishu's "加密策略 →
+	// Encrypt Key"). Empty when the user hasn't configured encryption
+	// in the upstream console — adapters then expect plaintext bodies.
+	EncryptKey string `json:"encryptKey,omitempty"`
+	// UseLongConn switches inbound transport to a long-lived
+	// connection (WebSocket) initiated outbound from fastclaw rather
+	// than the platform POSTing to a public webhook. Currently only
+	// honored by the Feishu adapter; ignored by adapters that don't
+	// offer this mode. When true, verification/encrypt keys are
+	// unused (the WS connection is authenticated by appID/appSecret)
+	// and no public URL needs to be reachable.
+	UseLongConn bool `json:"useLongConn,omitempty"`
 }
 
 type Binding struct {

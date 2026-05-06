@@ -45,7 +45,27 @@ type StoreInterface interface {
 	GetDueCronJobs(ctx context.Context, now time.Time) ([]StoreJob, error)
 	LockCronJob(ctx context.Context, jobID, instanceID string) (bool, error)
 	UpdateCronJobRun(ctx context.Context, jobID string, lastRun, nextRun time.Time) error
+	// IncrementCronJobFailure bumps the row's consecutive-failure
+	// counter and returns the new total. The scheduler self-deletes
+	// the row once the counter crosses cronMaxConsecutiveFailures.
+	IncrementCronJobFailure(ctx context.Context, jobID string) (int, error)
+	DeleteCronJob(ctx context.Context, jobID string) error
 }
+
+// ChannelChecker is the bit of channels.Manager the scheduler needs to
+// pre-flight a tick: "is the bot adapter for (channel, accountID)
+// actually registered right now?". Optional — without it the scheduler
+// fires every due job blindly (legacy behaviour).
+type ChannelChecker interface {
+	Has(channel, accountID string) bool
+}
+
+// cronMaxConsecutiveFailures is the threshold at which a cron row gets
+// auto-deleted because its destination channel has been missing for
+// too many consecutive ticks. Tuned for the IM-bot use case: ~3
+// minutes of dead destination is enough signal to give up (the bot
+// adapter is gone, the user has to reschedule anyway).
+const cronMaxConsecutiveFailures = 3
 
 // StoreJob mirrors store.CronJobRecord to avoid import cycle. The fired
 // job carries OwnerUserID resolved by the adapter (= agents.owner_user_id
@@ -61,6 +81,7 @@ type StoreJob struct {
 	Message     string
 	Channel     string
 	ChatID      string
+	AccountID   string
 }
 
 // Scheduler manages cron job execution.
@@ -69,10 +90,19 @@ type Scheduler struct {
 	jobs       []Job
 	bus        *bus.MessageBus
 	store      StoreInterface
+	channels   ChannelChecker
 	instanceID string
 	// hot-reload support
 	parentCtx context.Context
 	jobCancel context.CancelFunc
+}
+
+// SetChannelChecker enables pre-flight delivery checks. When set, jobs
+// whose destination channel adapter is missing get their failure_count
+// bumped instead of firing into the void; rows that hit
+// cronMaxConsecutiveFailures consecutive misses are deleted.
+func (s *Scheduler) SetChannelChecker(c ChannelChecker) {
+	s.channels = c
 }
 
 // NewScheduler creates a scheduler from config.
@@ -174,6 +204,41 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 			continue
 		}
 
+		// Pre-flight: if the destination IM channel adapter isn't
+		// registered (e.g. the bot token died and the gateway tore
+		// it down), there's no point queuing the inbound — the
+		// agent's reply would just hit "unknown outbound channel"
+		// and be dropped. Instead, bump the failure counter; after
+		// cronMaxConsecutiveFailures consecutive misses, delete
+		// the row so the scheduler stops re-trying forever.
+		// "web" channel is the dashboard SSE — always considered
+		// alive; same for empty Channel (legacy rows that don't
+		// route through any IM bot).
+		if s.channels != nil && j.Channel != "" && j.Channel != "web" {
+			if !s.channels.Has(j.Channel, j.AccountID) {
+				count, ferr := s.store.IncrementCronJobFailure(ctx, j.ID)
+				if ferr != nil {
+					slog.Error("failed to bump cron failure count", "id", j.ID, "error", ferr)
+					continue
+				}
+				if count >= cronMaxConsecutiveFailures {
+					slog.Warn("auto-deleting cron job — destination channel missing for too many consecutive ticks",
+						"id", j.ID, "name", j.Name,
+						"channel", j.Channel, "account", j.AccountID,
+						"failures", count)
+					if derr := s.store.DeleteCronJob(ctx, j.ID); derr != nil {
+						slog.Error("failed to delete dead cron job", "id", j.ID, "error", derr)
+					}
+					continue
+				}
+				slog.Warn("cron destination channel missing, skipping fire",
+					"id", j.ID, "name", j.Name,
+					"channel", j.Channel, "account", j.AccountID,
+					"failures", count, "threshold", cronMaxConsecutiveFailures)
+				continue
+			}
+		}
+
 		slog.Info("firing store-backed cron job", "id", j.ID, "name", j.Name)
 
 		text := j.Message
@@ -191,7 +256,10 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 			PeerKind:    "dm",
 		}
 
-		// Calculate next run (simple: add 60s for now; real implementation would parse schedule)
+		// Calculate next run (simple: add 60s for now; real
+		// implementation would parse schedule). UpdateCronJobRun
+		// also resets failure_count to 0 — a single successful
+		// fire is enough to clear prior misses.
 		nextRun := now.Add(60 * time.Second)
 		if err := s.store.UpdateCronJobRun(ctx, j.ID, now, nextRun); err != nil {
 			slog.Error("failed to update cron job run", "id", j.ID, "error", err)

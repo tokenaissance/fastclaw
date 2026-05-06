@@ -3,6 +3,10 @@ package channels
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +54,16 @@ type Feishu struct {
 	appID             string
 	appSecret         string
 	verificationToken string
+	// encryptKey, when non-empty, signals the Feishu app has "加密策略"
+	// configured. Inbound webhook bodies arrive as {"encrypt": "<b64>"}
+	// and must be AES-256-CBC-decrypted (key = sha256(encryptKey),
+	// IV = first 16 bytes of the ciphertext) before JSON parsing.
+	encryptKey string
+	// useLongConn switches inbound to Feishu's WebSocket/长连接 path
+	// (no public URL required). When true, Start() boots the SDK ws
+	// client + dispatcher in startLongConn(); when false, inbound
+	// arrives via the public HTTP webhook handled in HandleWebhook().
+	useLongConn bool
 
 	httpClient *http.Client
 
@@ -64,7 +78,7 @@ type Feishu struct {
 // configured under "Event Subscriptions → Verification Token" in the
 // Feishu Developer Console; we use it to validate inbound webhook
 // payloads.
-func NewFeishu(appID, appSecret, verificationToken, accountID string, mb *bus.MessageBus) (*Feishu, error) {
+func NewFeishu(appID, appSecret, verificationToken, encryptKey string, useLongConn bool, accountID string, mb *bus.MessageBus) (*Feishu, error) {
 	if appID == "" || appSecret == "" {
 		return nil, errors.New("feishu: appID and appSecret required")
 	}
@@ -77,6 +91,8 @@ func NewFeishu(appID, appSecret, verificationToken, accountID string, mb *bus.Me
 		appID:             appID,
 		appSecret:         appSecret,
 		verificationToken: verificationToken,
+		encryptKey:        encryptKey,
+		useLongConn:       useLongConn,
 		httpClient:        &http.Client{Timeout: feishuSendTimeout},
 	}, nil
 }
@@ -100,6 +116,13 @@ func (l *Feishu) Start(ctx context.Context) error {
 		l.botOpenID = openID
 		l.mu.Unlock()
 		slog.Info("feishu bot connected", "account", l.accountID, "name", name)
+	}
+	if l.useLongConn {
+		// Long-connection mode: outbound WS to Feishu, no public URL
+		// needed. startLongConn() blocks until ctx is done or the SDK
+		// client returns a fatal error. Implementation lives in
+		// feishu_ws.go to keep the SDK import scoped.
+		return l.startLongConn(ctx)
 	}
 	<-ctx.Done()
 	return nil
@@ -240,6 +263,27 @@ type feishuMessageEvent struct {
 // retries on non-200, so we'd rather block briefly than ack early and
 // drop on a panic.
 func (l *Feishu) HandleWebhook(body []byte) (responseBody []byte, status int, err error) {
+	// If 加密策略 is on, body arrives as {"encrypt": "<b64>"} and must
+	// be decrypted to plaintext JSON before further parsing. Detect the
+	// encrypted shape by peeking — a body with a non-empty "encrypt"
+	// field but no encryptKey configured is a misconfiguration we want
+	// to surface (otherwise feishu just sees opaque "Challenge code 没
+	// 有返回" with no clue why).
+	var peek struct {
+		Encrypt string `json:"encrypt"`
+	}
+	_ = json.Unmarshal(body, &peek)
+	if peek.Encrypt != "" {
+		if l.encryptKey == "" {
+			return nil, http.StatusBadRequest, errors.New("feishu webhook is encrypted but no encryptKey configured (set 加密策略 → Encrypt Key in fastclaw connect dialog, or clear it in feishu console)")
+		}
+		plain, derr := decryptFeishuPayload(l.encryptKey, peek.Encrypt)
+		if derr != nil {
+			return nil, http.StatusBadRequest, fmt.Errorf("decrypt: %w", derr)
+		}
+		body = plain
+	}
+
 	var env FeishuEventEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, http.StatusBadRequest, fmt.Errorf("parse: %w", err)
@@ -464,4 +508,49 @@ func FeishuValidateCredentials(ctx context.Context, appID, appSecret string) (bo
 		return "", "", err
 	}
 	return stub.fetchBotInfo(ctx)
+}
+
+// decryptFeishuPayload decrypts a base64-encoded ciphertext from a
+// Feishu webhook's `encrypt` field. The scheme (per Feishu docs):
+//   - aesKey = sha256(encryptKey)             // 32 bytes → AES-256
+//   - raw = base64-decode(b64ciphertext)
+//   - iv = raw[:16], ciphertext = raw[16:]
+//   - plain = AES-256-CBC-decrypt(ciphertext, aesKey, iv), PKCS7-unpadded
+//
+// Returns the JSON plaintext body the rest of HandleWebhook can
+// unmarshal as a normal FeishuEventEnvelope.
+func decryptFeishuPayload(encryptKey, b64ciphertext string) ([]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(b64ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("base64: %w", err)
+	}
+	if len(raw) < aes.BlockSize {
+		return nil, fmt.Errorf("ciphertext too short (%d bytes)", len(raw))
+	}
+	keySum := sha256.Sum256([]byte(encryptKey))
+	block, err := aes.NewCipher(keySum[:])
+	if err != nil {
+		return nil, fmt.Errorf("aes: %w", err)
+	}
+	iv, ct := raw[:aes.BlockSize], raw[aes.BlockSize:]
+	if len(ct)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext not block-aligned (%d bytes)", len(ct))
+	}
+	plain := make([]byte, len(ct))
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plain, ct)
+	// PKCS7 unpad. Final byte = pad length (1..blockSize). Validate
+	// before trimming so a malformed payload doesn't yield garbage.
+	if len(plain) == 0 {
+		return nil, errors.New("empty plaintext")
+	}
+	pad := int(plain[len(plain)-1])
+	if pad < 1 || pad > aes.BlockSize || pad > len(plain) {
+		return nil, fmt.Errorf("bad padding (pad=%d, len=%d)", pad, len(plain))
+	}
+	for _, b := range plain[len(plain)-pad:] {
+		if int(b) != pad {
+			return nil, errors.New("bad padding bytes")
+		}
+	}
+	return plain[:len(plain)-pad], nil
 }

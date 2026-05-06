@@ -42,6 +42,7 @@ func (a *cronStoreAdapter) GetDueCronJobs(ctx context.Context, now time.Time) ([
 			Message:     r.Message,
 			Channel:     r.Channel,
 			ChatID:      r.ChatID,
+			AccountID:   r.AccountID,
 		})
 	}
 	return out, nil
@@ -53,4 +54,12 @@ func (a *cronStoreAdapter) LockCronJob(ctx context.Context, jobID, instanceID st
 
 func (a *cronStoreAdapter) UpdateCronJobRun(ctx context.Context, jobID string, lastRun, nextRun time.Time) error {
 	return a.st.UpdateCronJobRun(ctx, jobID, lastRun, nextRun)
+}
+
+func (a *cronStoreAdapter) IncrementCronJobFailure(ctx context.Context, jobID string) (int, error) {
+	return a.st.IncrementCronJobFailure(ctx, jobID)
+}
+
+func (a *cronStoreAdapter) DeleteCronJob(ctx context.Context, jobID string) error {
+	return a.st.DeleteCronJob(ctx, jobID)
 }

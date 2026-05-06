@@ -64,8 +64,12 @@ type Server struct {
 	dataStore      store.Store
 	workspaceStore workspace.Store
 	webChan        *channels.WebChannel
-	usage          usage.Meter
-	startedAt      time.Time
+	// chatEvents fans live agent chat events out to subscribed SSE
+	// clients across browser tabs. Lazy-init on first use so older
+	// callers that didn't wire it explicitly still work.
+	chatEvents *agent.EventHub
+	usage      usage.Meter
+	startedAt  time.Time
 }
 
 // NewServer creates a setup wizard server on the given port.
@@ -130,6 +134,16 @@ func (s *Server) SetAuth(resolver *auth.Resolver) {
 // agent replies live in the dashboard chat panel.
 func (s *Server) SetWebChannel(wc *channels.WebChannel) {
 	s.webChan = wc
+}
+
+// chatEventHub returns the lazy-initialized hub. Centralized so every
+// chat handler reaches the same instance — without this, the streaming
+// handler's hub publish would never reach the subscribe handler.
+func (s *Server) chatEventHub() *agent.EventHub {
+	if s.chatEvents == nil {
+		s.chatEvents = agent.NewEventHub()
+	}
+	return s.chatEvents
 }
 
 // authMiddleware wraps the auth.Resolver's Middleware. Required for every
@@ -216,6 +230,11 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/agents/{id}/files.zip", auth(s.handleAgentFilesZip))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
+
+	// Agent sharing: owner-only grants table.
+	mux.HandleFunc("GET /api/agents/{id}/grants", auth(s.handleListAgentGrants))
+	mux.HandleFunc("POST /api/agents/{id}/grants", auth(s.handleCreateAgentGrant))
+	mux.HandleFunc("DELETE /api/agents/{id}/grants/{userId}", auth(s.handleDeleteAgentGrant))
 
 	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", auth(s.handleGetAgentSystemFile))
 	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", auth(s.handlePutAgentSystemFile))

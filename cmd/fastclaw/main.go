@@ -65,6 +65,14 @@ func (a *apiResolver) UnregisterChannel(channelType, accountID string) {
 	a.gw.UnregisterChannel(channelType, accountID)
 }
 
+func (a *apiResolver) DispatchFeishuWebhook(accountID string, body []byte) ([]byte, int, error) {
+	return a.gw.DispatchFeishuWebhook(accountID, body)
+}
+
+func (a *apiResolver) DispatchLINEWebhook(accountID string, body []byte, signature string) ([]byte, int, error) {
+	return a.gw.DispatchLINEWebhook(accountID, body, signature)
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "fastclaw",

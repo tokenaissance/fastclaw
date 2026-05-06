@@ -10,12 +10,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
+	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
@@ -786,6 +788,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"reply": reply})
 }
 
+// agentTurnTimeout is the upper bound on how long an agent goroutine
+// is allowed to run after the client connection drops. Long enough for
+// realistic multi-step ReAct turns (several minutes of LLM + tool
+// time), bounded so runaway loops don't pin a goroutine forever.
+const agentTurnTimeout = 15 * time.Minute
+
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -802,9 +810,18 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
 		return
 	}
+	uid := s.effectiveUserID(r)
+	if uid == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Defeat nginx / Cloudflare buffering of long-lived responses; the
+	// agent loop emits chunks at human-typing pace and we want them on
+	// the wire immediately, not held until the response closes.
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
 	images := req.allImages()
 	msgText := req.Message
@@ -812,35 +829,106 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		paths := ag.WriteSessionAttachments(r.Context(), req.SessionID, images)
 		msgText = annotateMessageWithAttachments(req.Message, paths)
 	}
-	events := make(chan agentChatEvent, 32)
-	done := make(chan struct{})
+
+	// Subscribe to the hub BEFORE starting the agent so we don't race
+	// the first emitted event. The hub buffers in-flight events so
+	// dispatch from emitEvent never blocks even if we're slow to drain.
+	hub := s.chatEventHub()
+	agentID := ag.Name()
+	sub, unsubscribe := hub.Subscribe(uid, agentID, req.SessionID)
+	defer unsubscribe()
+
+	// Detach the agent's ctx from the request: when the browser tab
+	// disconnects (refresh, close, network blip) we want the agent to
+	// keep running so its already-paid-for LLM call finishes and the
+	// reply lands in chat_events. The 15-minute cap is the only thing
+	// that can kill it.
+	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
+	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
+
+	agentDone := make(chan struct{})
 	go func() {
-		defer close(done)
-		for ev := range events {
-			data, _ := json.Marshal(ev)
+		defer close(agentDone)
+		defer cancel()
+		// events param stays nil — emitEvent now fans out via the
+		// streamCtx attached above (persist + hub). The legacy channel
+		// path is no longer needed for this handler.
+		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, msgText, images, req.Params, nil)
+	}()
+
+	// Heartbeat keeps proxies (nginx 60s default, Cloudflare 100s, ELB
+	// 60s) from killing an idle SSE connection while the agent is
+	// thinking but not yet emitting content.
+	keepalive := time.NewTicker(30 * time.Second)
+	defer keepalive.Stop()
+
+	clientGone := r.Context().Done()
+	for {
+		select {
+		case <-clientGone:
+			// Client dropped; the agent goroutine keeps running on
+			// its detached ctx and persists every event it emits.
+			// User reloading the chat page will pick up the rest via
+			// /api/chat/subscribe?since=N.
+			return
+		case <-agentDone:
+			return
+		case <-keepalive.C:
+			fmt.Fprintf(w, ": ping\n\n")
+			flusher.Flush()
+		case env, ok := <-sub:
+			if !ok {
+				return
+			}
+			// Include seq inline in the JSON payload (in addition to
+			// the SSE `id:` line) so the fetch-based parser used by
+			// the frontend's POST sendChatStream can dedup events
+			// it ALSO sees on its parallel /api/chat/subscribe SSE
+			// connection. Without this dedup, every chunk renders
+			// twice during an active turn.
+			payload := map[string]any{
+				"seq":  env.Seq,
+				"type": env.Event.Type,
+			}
+			if env.Event.Data != nil {
+				payload["data"] = env.Event.Data
+			}
+			data, _ := json.Marshal(payload)
+			if env.Seq >= 0 {
+				fmt.Fprintf(w, "id: %d\n", env.Seq)
+			}
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+			if env.Event.Type == "done" {
+				return
+			}
 		}
-	}()
-	_ = ag.HandleWebChatStream(r.Context(), req.SessionID, msgText, images, req.Params, events)
-	close(events)
-	<-done
+	}
 }
 
 // handleChatSubscribe holds an SSE connection open for one (agent,
-// session) pair and forwards every bus.OutboundMessage routed through
-// the WebChannel to that pair. Used by the dashboard chat panel to see
-// cron-fired (and other async) agent replies live.
+// session) pair and forwards three kinds of traffic:
+//
+//   1. Replay: chat_events rows with seq > since (or > Last-Event-ID)
+//      that the client missed before connecting. Lets a freshly
+//      reloaded page pick up an in-flight turn without the rest of the
+//      reply disappearing.
+//
+//   2. Live agent chat events from the hub — every emitEvent call from
+//      the agent loop fans through here. This covers both the
+//      synchronous POST /api/chat/stream path AND turns started by
+//      other tabs / cron firings, so any open chat panel sees them
+//      regardless of who triggered the work.
+//
+//   3. Legacy WebChannel bus messages — cron-fired final replies that
+//      route through bus.Outbound rather than the chat-event path.
+//      Kept so we don't lose pre-existing functionality during the
+//      transition.
 //
 // Auth gating reuses resolveAgent, so the caller must already have
 // permission to chat with this agent. The subscription doesn't
-// generate any traffic on its own — closes are silent (client gone)
-// and the server only writes when an outbound message arrives.
+// generate any traffic on its own — closes are silent (client gone).
 func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
-	if s.webChan == nil {
-		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "web channel not configured"})
-		return
-	}
 	agentID := r.URL.Query().Get("agentId")
 	sessionID := r.URL.Query().Get("sessionId")
 	if agentID == "" || sessionID == "" {
@@ -851,6 +939,11 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
+	uid := s.effectiveUserID(r)
+	if uid == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
@@ -859,23 +952,103 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	// Initial flush so the client EventSource fires `open` immediately
-	// — without it browsers wait for the first event and the chat
-	// panel can't tell whether the subscription is live yet.
+	w.Header().Set("X-Accel-Buffering", "no")
+	// Initial flush so the client EventSource fires `open` immediately.
 	fmt.Fprintf(w, ": ok\n\n")
 	flusher.Flush()
 
-	out, unsubscribe := s.webChan.Subscribe(agentID, sessionID)
-	defer unsubscribe()
+	// Resume point: prefer Last-Event-ID (browser-managed reconnect),
+	// fall back to ?since=N for callers that pass it explicitly. -1
+	// means "stream live only, no replay".
+	sinceSeq := int64(-1)
+	if hdr := r.Header.Get("Last-Event-ID"); hdr != "" {
+		if v, err := strconv.ParseInt(hdr, 10, 64); err == nil {
+			sinceSeq = v
+		}
+	}
+	if q := r.URL.Query().Get("since"); q != "" {
+		if v, err := strconv.ParseInt(q, 10, 64); err == nil {
+			sinceSeq = v
+		}
+	}
+
+	hub := s.chatEventHub()
+	// Subscribe BEFORE replay so any event that lands while we're
+	// scanning the DB ends up either in the replayed range OR in the
+	// live channel — never both, never lost.
+	live, unsubscribeLive := hub.Subscribe(uid, agentID, sessionID)
+	defer unsubscribeLive()
+
+	// Replay missed events from the persistent log.
+	if s.dataStore != nil {
+		rows, err := s.dataStore.ListChatEventsSince(r.Context(), uid, agentID, sessionID, sinceSeq)
+		if err != nil {
+			slog.Warn("chat_events replay failed", "agent", agentID, "session", sessionID, "since", sinceSeq, "error", err)
+		}
+		for _, rec := range rows {
+			fmt.Fprintf(w, "id: %d\n", rec.Seq)
+			if len(rec.Data) == 0 || string(rec.Data) == "null" {
+				fmt.Fprintf(w, "data: {\"seq\":%d,\"type\":%q}\n\n", rec.Seq, rec.Type)
+			} else {
+				fmt.Fprintf(w, "data: {\"seq\":%d,\"type\":%q,\"data\":%s}\n\n", rec.Seq, rec.Type, string(rec.Data))
+			}
+			flusher.Flush()
+			if rec.Seq > sinceSeq {
+				sinceSeq = rec.Seq
+			}
+		}
+	}
+
+	// Legacy webChan path: cron-fired bus.Outbound messages. Kept until
+	// the cron path is refactored to emit through the chat-event hub
+	// (then this can go away).
+	var outbound <-chan bus.OutboundMessage
+	var unsubscribeOutbound func() = func() {}
+	if s.webChan != nil {
+		outbound, unsubscribeOutbound = s.webChan.Subscribe(agentID, sessionID)
+	}
+	defer unsubscribeOutbound()
+
+	keepalive := time.NewTicker(30 * time.Second)
+	defer keepalive.Stop()
 
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case msg, ok := <-out:
+		case <-keepalive.C:
+			fmt.Fprintf(w, ": ping\n\n")
+			flusher.Flush()
+		case env, ok := <-live:
 			if !ok {
 				return
+			}
+			// Drop replay-overlap events: any event with seq <= the
+			// highest seq we already streamed during replay. Without
+			// this, a browser that reconnects at exactly the wrong
+			// moment would render the same content chunk twice.
+			if env.Seq >= 0 && env.Seq <= sinceSeq {
+				continue
+			}
+			if env.Seq >= 0 {
+				sinceSeq = env.Seq
+				fmt.Fprintf(w, "id: %d\n", env.Seq)
+			}
+			payload := map[string]any{
+				"seq":  env.Seq,
+				"type": env.Event.Type,
+			}
+			if env.Event.Data != nil {
+				payload["data"] = env.Event.Data
+			}
+			data, _ := json.Marshal(payload)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		case msg, ok := <-outbound:
+			if !ok {
+				outbound = nil
+				continue
 			}
 			payload := map[string]any{
 				"text":      msg.Text,
@@ -906,7 +1079,22 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"history": ag.WebChatHistory(sessionID)})
+	resp := map[string]any{"history": ag.WebChatHistory(sessionID)}
+	// latestEventSeq is the resume cursor for /api/chat/subscribe — the
+	// client opens that endpoint with `since=<latestEventSeq>` so a
+	// fresh page load picks up only deltas it hasn't already rendered.
+	// Best-effort: a missing/zero value just means "stream live only,
+	// no replay", which is the right fallback when the session has no
+	// in-flight turn or when chat_events isn't backfilled.
+	if s.dataStore != nil {
+		uid := s.effectiveUserID(r)
+		if uid != "" {
+			if seq, err := s.dataStore.LatestChatEventSeq(r.Context(), uid, ag.Name(), sessionID); err == nil {
+				resp["latestEventSeq"] = seq
+			}
+		}
+	}
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {

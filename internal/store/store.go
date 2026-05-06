@@ -60,6 +60,20 @@ type Store interface {
 	DeleteAgent(ctx context.Context, agentID string) error
 	ListAllAgents(ctx context.Context) ([]AgentRecord, error)
 
+	// --- Agent grants (read-only sharing of an owner's agent with other users) ---
+	//
+	// A grant lets `user_id` load and chat with `agent_id` without
+	// owning it. Mutations (renaming, editing SOUL, channel binding,
+	// deletion) stay strictly with the agent owner. Per-(user, agent)
+	// state — sessions, cron_jobs, agent_files at user_id != owner —
+	// is keyed off the chatter's user_id, so each grantee gets their
+	// own private chat history and per-user file overlays.
+	GrantAgent(ctx context.Context, agentID, userID, grantedBy string) error
+	RevokeAgent(ctx context.Context, agentID, userID string) error
+	ListAgentGrants(ctx context.Context, agentID string) ([]AgentGrantRecord, error)
+	ListAgentsSharedWith(ctx context.Context, userID string) ([]AgentRecord, error)
+	IsAgentGrantedTo(ctx context.Context, agentID, userID string) (bool, error)
+
 	// --- Sessions (per user, per agent — chat history is private) ---
 	GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error)
 	SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error
@@ -77,6 +91,19 @@ type Store interface {
 	// untouched by compaction. DeleteSession cascades to clean these up.
 	AppendSessionMessage(ctx context.Context, userID, agentID, sessionKey string, msg SessionMessage) error
 	ListSessionMessages(ctx context.Context, userID, agentID, sessionKey string) ([]SessionMessage, error)
+
+	// --- Chat events (in-flight streaming deltas, persisted for resume) ---
+	//
+	// Every event the agent emits during a turn (content chunk,
+	// tool_call, error, done) lands here with a per-session
+	// auto-incremented seq. Clients that disconnect mid-turn (refresh,
+	// network blip, mobile app backgrounded) reconnect with their
+	// last-seen seq and receive the missed delta — without this the
+	// agent's reply becomes invisible until the parent session row is
+	// next loaded. Cleared by DeleteSession alongside session_messages.
+	AppendChatEvent(ctx context.Context, userID, agentID, sessionKey, eventType string, data []byte) (int64, error)
+	ListChatEventsSince(ctx context.Context, userID, agentID, sessionKey string, sinceSeq int64) ([]ChatEventRecord, error)
+	LatestChatEventSeq(ctx context.Context, userID, agentID, sessionKey string) (int64, error)
 
 	// --- Agent files ---
 	//
@@ -127,6 +154,11 @@ type Store interface {
 	GetDueCronJobs(ctx context.Context, now time.Time) ([]CronJobRecord, error)
 	LockCronJob(ctx context.Context, jobID, instanceID string) (bool, error)
 	UpdateCronJobRun(ctx context.Context, jobID string, lastRun, nextRun time.Time) error
+	// IncrementCronJobFailure atomically bumps failure_count and returns
+	// the new count. Used by the scheduler when a tick can't deliver to
+	// the configured channel; the caller decides whether to delete the
+	// row at threshold.
+	IncrementCronJobFailure(ctx context.Context, jobID string) (int, error)
 
 	Close() error
 }
@@ -202,6 +234,16 @@ type AgentRecord struct {
 	UpdatedAt time.Time              `json:"updatedAt"`
 }
 
+// AgentGrantRecord is one row of agent_grants — a single (agent, user)
+// share. GrantedBy is the user_id of whoever issued the grant (usually
+// the agent owner; super_admin can also issue grants on a foreign agent).
+type AgentGrantRecord struct {
+	AgentID   string    `json:"agentId"`
+	UserID    string    `json:"userId"`
+	GrantedBy string    `json:"grantedBy,omitempty"`
+	GrantedAt time.Time `json:"grantedAt"`
+}
+
 // SessionRecord holds a conversation session.
 type SessionRecord struct {
 	Messages  []SessionMessage `json:"messages"`
@@ -220,6 +262,19 @@ type SessionMessage struct {
 	Timestamp    time.Time              `json:"timestamp"`
 	Thinking     string                 `json:"thinking,omitempty"`
 	RawAssistant json.RawMessage        `json:"rawAssistant,omitempty"`
+}
+
+// ChatEventRecord is one row of chat_events — a single delta the
+// agent emitted during a turn. Data is opaque JSON whose shape depends
+// on Type ("content", "tool_call", "error", "done", ...).
+type ChatEventRecord struct {
+	UserID     string    `json:"userId,omitempty"`
+	AgentID    string    `json:"agentId,omitempty"`
+	SessionKey string    `json:"sessionKey,omitempty"`
+	Seq        int64     `json:"seq"`
+	Type       string    `json:"type"`
+	Data       []byte    `json:"data,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 // SessionMeta is summary info for a session (for listing).
@@ -287,7 +342,12 @@ type CronJobRecord struct {
 	Enabled   bool       `json:"enabled"`
 	LastRun   *time.Time `json:"lastRun,omitempty"`
 	NextRun   *time.Time `json:"nextRun,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
+	// FailureCount is the number of consecutive fire-attempts whose
+	// destination channel was missing/unreachable. UpdateCronJobRun
+	// resets it to 0; IncrementCronJobFailure bumps it. The scheduler
+	// deletes the row once it crosses an internal threshold.
+	FailureCount int       `json:"failureCount,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 

@@ -25,7 +25,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, Plus, Trash2, ImagePlus, Pencil } from "lucide-react";
+import { Bot, Plus, Trash2, ImagePlus, Pencil, Share2, X as XIcon } from "lucide-react";
 import {
   adminListAgents,
   apiFetch,
@@ -34,7 +34,11 @@ import {
   createAgent,
   updateAgent,
   deleteAgent,
+  listAgentGrants,
+  createAgentGrant,
+  deleteAgentGrant,
   type AgentDetail,
+  type AgentGrant,
 } from "@/lib/api";
 
 interface OtherAgent {
@@ -87,11 +91,20 @@ export default function AgentsPage() {
   const [otherAgents, setOtherAgents] = useState<OtherAgent[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"own" | "others">("own");
+  const [activeTab, setActiveTab] = useState<"own" | "shared" | "others">("own");
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AgentDetail | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Share dialog state — owner-only management of who can chat with one
+  // of their agents. Non-owners never see the Share button.
+  const [shareTarget, setShareTarget] = useState<AgentDetail | null>(null);
+  const [shareGrants, setShareGrants] = useState<AgentGrant[]>([]);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareIdentifier, setShareIdentifier] = useState("");
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [shareSaving, setShareSaving] = useState(false);
   // Bumped after avatar upload so <img> re-fetches the new file.
   const [avatarBust, setAvatarBust] = useState<Record<string, number>>({});
 
@@ -138,8 +151,11 @@ export default function AgentsPage() {
 
   const fetchAgents = async () => {
     setLoading(true);
-    const own = await getAgents().catch(() => [] as AgentDetail[]);
-    setAgents(own);
+    // /api/agents returns owned + shared with role flag. Split here so
+    // the rest of the page renders the two groups separately and only
+    // exposes Edit / Remove / Share on owned cards.
+    const list = await getAgents().catch(() => [] as AgentDetail[]);
+    setAgents(list);
     // Admins also see other users' agents (read-only) below their own.
     // We resolve isAdmin from /api/status and only call adminListAgents
     // when entitled — non-admins would 403 and the UI would flash an error.
@@ -147,14 +163,68 @@ export default function AgentsPage() {
     const admin = !!status?.isAdmin;
     setIsAdmin(admin);
     if (admin) {
-      const ownIds = new Set(own.map((a) => a.id));
+      const visibleIds = new Set(list.map((a) => a.id));
       const res = await adminListAgents().catch(() => null);
       const all: OtherAgent[] = (res?.agents || []) as OtherAgent[];
-      setOtherAgents(all.filter((a) => !ownIds.has(a.id)));
+      setOtherAgents(all.filter((a) => !visibleIds.has(a.id)));
     } else {
       setOtherAgents([]);
     }
     setLoading(false);
+  };
+
+  const ownedAgents = agents.filter((a) => a.role !== "viewer");
+  const sharedAgents = agents.filter((a) => a.role === "viewer");
+
+  const openShareDialog = async (agent: AgentDetail) => {
+    setShareTarget(agent);
+    setShareGrants([]);
+    setShareIdentifier("");
+    setShareError(null);
+    setShareLoading(true);
+    try {
+      const grants = await listAgentGrants(agent.id);
+      setShareGrants(grants);
+    } catch {
+      setShareError("Failed to load existing shares");
+    } finally {
+      setShareLoading(false);
+    }
+  };
+
+  const closeShareDialog = () => {
+    setShareTarget(null);
+    setShareGrants([]);
+    setShareIdentifier("");
+    setShareError(null);
+  };
+
+  const handleAddGrant = async () => {
+    if (!shareTarget) return;
+    const id = shareIdentifier.trim();
+    if (!id) return;
+    setShareSaving(true);
+    setShareError(null);
+    const resp = await createAgentGrant(shareTarget.id, id);
+    if (!resp.ok) {
+      setShareError(resp.error || "Failed to add share");
+      setShareSaving(false);
+      return;
+    }
+    setShareIdentifier("");
+    try {
+      const grants = await listAgentGrants(shareTarget.id);
+      setShareGrants(grants);
+    } catch {
+      // non-fatal — leave existing list as-is
+    }
+    setShareSaving(false);
+  };
+
+  const handleRemoveGrant = async (granteeUserId: string) => {
+    if (!shareTarget) return;
+    await deleteAgentGrant(shareTarget.id, granteeUserId);
+    setShareGrants((rows) => rows.filter((g) => g.userId !== granteeUserId));
   };
 
   useEffect(() => {
@@ -249,7 +319,7 @@ export default function AgentsPage() {
             <Skeleton key={i} className="h-48" />
           ))}
         </div>
-      ) : agents.length === 0 && otherAgents.length === 0 ? (
+      ) : ownedAgents.length === 0 && sharedAgents.length === 0 && otherAgents.length === 0 ? (
         <div className="rounded-lg border border-border bg-card">
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
@@ -267,7 +337,7 @@ export default function AgentsPage() {
         </div>
       ) : (
         <>
-        {isAdmin && otherAgents.length > 0 && (
+        {(sharedAgents.length > 0 || (isAdmin && otherAgents.length > 0)) && (
           <div className="flex gap-1 border-b border-border overflow-x-auto">
             <button
               onClick={() => setActiveTab("own")}
@@ -279,27 +349,44 @@ export default function AgentsPage() {
             >
               Your agents
               <span className="ml-1.5 text-xs text-muted-foreground/70">
-                {agents.length}
+                {ownedAgents.length}
               </span>
             </button>
-            <button
-              onClick={() => setActiveTab("others")}
-              className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
-                activeTab === "others"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Others&apos; agents
-              <span className="ml-1.5 text-xs text-muted-foreground/70">
-                {otherAgents.length}
-              </span>
-            </button>
+            {sharedAgents.length > 0 && (
+              <button
+                onClick={() => setActiveTab("shared")}
+                className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                  activeTab === "shared"
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Shared with me
+                <span className="ml-1.5 text-xs text-muted-foreground/70">
+                  {sharedAgents.length}
+                </span>
+              </button>
+            )}
+            {isAdmin && otherAgents.length > 0 && (
+              <button
+                onClick={() => setActiveTab("others")}
+                className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                  activeTab === "others"
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Others&apos; agents
+                <span className="ml-1.5 text-xs text-muted-foreground/70">
+                  {otherAgents.length}
+                </span>
+              </button>
+            )}
           </div>
         )}
-        {(activeTab === "own" || !(isAdmin && otherAgents.length > 0)) && agents.length > 0 && (
+        {(activeTab === "own" || (sharedAgents.length === 0 && !(isAdmin && otherAgents.length > 0))) && ownedAgents.length > 0 && (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {agents.map((agent) => (
+          {ownedAgents.map((agent) => (
             <div
               key={agent.id}
               className="group flex h-full flex-col rounded-lg border border-border bg-card p-5 transition-colors hover:bg-muted/50 cursor-pointer"
@@ -347,6 +434,18 @@ export default function AgentsPage() {
                 <Button
                   variant="ghost"
                   size="sm"
+                  className="h-8 text-xs"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openShareDialog(agent);
+                  }}
+                >
+                  <Share2 className="h-3 w-3 mr-1.5" />
+                  Share
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
                   className="h-8 text-xs text-destructive hover:text-destructive"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -360,6 +459,48 @@ export default function AgentsPage() {
             </div>
           ))}
         </div>
+        )}
+
+        {activeTab === "shared" && sharedAgents.length > 0 && (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {sharedAgents.map((agent) => (
+              <div
+                key={agent.id}
+                className="group flex h-full flex-col rounded-lg border border-border bg-card p-5 transition-colors hover:bg-muted/50 cursor-pointer"
+                onClick={() => (window.location.href = `/agents/${agent.id}/chat/`)}
+              >
+                <div className="flex items-start justify-between mb-4">
+                  <AgentAvatar agent={agent} bust={avatarBust[agent.id]} size={48} />
+                  <Badge
+                    variant="outline"
+                    className="bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20"
+                  >
+                    Shared with you
+                  </Badge>
+                </div>
+                <p className="text-base font-medium mb-1 truncate">
+                  {agent.name || agent.id}
+                </p>
+                <p
+                  className={`font-mono text-xs text-muted-foreground truncate ${
+                    agent.description ? "" : "mb-3"
+                  }`}
+                >
+                  {agent.id}
+                </p>
+                {agent.description && (
+                  <p className="mt-2 mb-3 text-sm text-muted-foreground line-clamp-2">
+                    {agent.description}
+                  </p>
+                )}
+                <div className="mt-auto pt-3 border-t border-border">
+                  <p className="text-xs text-muted-foreground">
+                    Click to chat — only the owner can edit this agent.
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {isAdmin && otherAgents.length > 0 && activeTab === "others" && (
@@ -597,6 +738,104 @@ export default function AgentsPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Share dialog */}
+      <Dialog
+        open={!!shareTarget}
+        onOpenChange={(v) => {
+          if (!v) closeShareDialog();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Share &ldquo;{shareTarget?.name || shareTarget?.id}&rdquo;
+            </DialogTitle>
+            <DialogDescription>
+              Anyone you share with can chat with this agent under their own
+              account. They can&apos;t edit the agent, its skills, channels, or
+              schedule. Their conversation history stays private to them.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="share-identifier">Add by email or username</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="share-identifier"
+                  placeholder="alice@example.com"
+                  value={shareIdentifier}
+                  onChange={(e) => {
+                    setShareIdentifier(e.target.value);
+                    setShareError(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !shareSaving) {
+                      e.preventDefault();
+                      handleAddGrant();
+                    }
+                  }}
+                />
+                <Button
+                  onClick={handleAddGrant}
+                  disabled={shareSaving || !shareIdentifier.trim()}
+                >
+                  {shareSaving ? "Adding…" : "Add"}
+                </Button>
+              </div>
+              {shareError && (
+                <p className="text-xs text-destructive">{shareError}</p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+                People with access
+              </Label>
+              {shareLoading ? (
+                <Skeleton className="h-12" />
+              ) : shareGrants.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Not shared with anyone yet.
+                </p>
+              ) : (
+                <ul className="divide-y divide-border rounded-md border border-border">
+                  {shareGrants.map((g) => (
+                    <li
+                      key={g.userId}
+                      className="flex items-center justify-between px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">
+                          {g.displayName || g.username || g.email || g.userId}
+                        </p>
+                        <p className="font-mono text-xs text-muted-foreground truncate">
+                          {g.email || g.username || g.userId}
+                        </p>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => handleRemoveGrant(g.userId)}
+                      >
+                        <XIcon className="h-4 w-4" />
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closeShareDialog}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

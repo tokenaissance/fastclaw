@@ -40,7 +40,12 @@ export interface AgentDetail {
   name?: string;
   description?: string;
   avatarUrl?: string;       // /api/agents/{id}/files/avatar.png — may 404
-  userId?: string;
+  userId?: string;          // owner's user id (agents.user_id)
+  // role distinguishes agents the caller owns from agents shared with
+  // them by another user. "viewer" gates UI out of configuration tabs
+  // (Customize / Skills / Channels / Scheduler / Models) and the Share
+  // dialog. Backend always sends one of these on /api/agents.
+  role?: "owner" | "viewer";
   model: string;
   workspace?: string;
   maxTokens?: number;
@@ -592,6 +597,29 @@ export async function getChatHistory(agentId: string, sessionId: string): Promis
   return Array.isArray(data) ? data : [];
 }
 
+// ChatHistoryWithCursor returns the same history list plus the latest
+// chat_events.seq for this session — the resume cursor that the
+// subscribe SSE wants. Use this when mounting the chat panel; the
+// cursor is fed into /api/chat/subscribe?since=N so a freshly reloaded
+// page picks up any in-flight turn that's still streaming on the
+// server.
+export interface ChatHistoryResult {
+  history: ChatHistoryMessage[];
+  latestEventSeq: number; // -1 when there's nothing logged yet
+}
+
+export async function getChatHistoryWithCursor(agentId: string, sessionId: string): Promise<ChatHistoryResult> {
+  const res = await apiFetch(`/api/chat/history?agentId=${encodeURIComponent(agentId)}&sessionId=${encodeURIComponent(sessionId)}`);
+  if (!res.ok) return { history: [], latestEventSeq: -1 };
+  const data = await res.json();
+  const history: ChatHistoryMessage[] = Array.isArray(data?.history)
+    ? data.history
+    : Array.isArray(data) ? data : [];
+  const seqRaw = data?.latestEventSeq;
+  const latestEventSeq = typeof seqRaw === "number" ? seqRaw : -1;
+  return { history, latestEventSeq };
+}
+
 export async function getChatSessions(agentId: string): Promise<{ id: string; title?: string; preview: string; thumbnailUrl?: string; createdAt?: number; updatedAt?: number }[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);
   if (!res.ok) return [];
@@ -634,6 +662,11 @@ export interface ToolResultMetadata {
 
 export interface ChatStreamEvent {
   type: "content" | "tool_call" | "tool_result" | "error" | "done";
+  // Per-session monotonic sequence assigned by chat_events. Lets the
+  // chat page dedupe events arriving on both the active POST stream
+  // and the parallel /api/chat/subscribe SSE connection. -1 means
+  // "not assigned" (legacy / pre-persist code path).
+  seq?: number;
   data?: {
     content?: string;
     id?: string;
@@ -808,6 +841,52 @@ export async function deleteAgent(id: string) {
   const res = await apiFetch(`/api/agents/${id}`, {
     method: "DELETE",
   });
+  return res.json();
+}
+
+// Agent share grants — owner-only views and mutations. Each grant lets
+// one named user chat with the agent; the agent itself stays owned by
+// the caller.
+export interface AgentGrant {
+  userId: string;
+  username?: string;
+  email?: string;
+  displayName?: string;
+  grantedBy?: string;
+  grantedAt?: string;
+}
+
+export async function listAgentGrants(agentId: string): Promise<AgentGrant[]> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/grants`);
+  if (!res.ok) throw new Error(`listAgentGrants failed: ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data?.grants) ? (data.grants as AgentGrant[]) : [];
+}
+
+// createAgentGrant accepts an email or username for the grantee. The
+// backend resolves it to a real users.id row before inserting; pass
+// userId directly when the caller already has it.
+export async function createAgentGrant(
+  agentId: string,
+  identifier: string,
+): Promise<{ ok: boolean; error?: string; grant?: AgentGrant }> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/grants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ identifier }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { ok: false, error: data?.error || `request failed: ${res.status}` };
+  }
+  return { ok: true, grant: data?.grant as AgentGrant };
+}
+
+export async function deleteAgentGrant(agentId: string, granteeUserId: string) {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/grants/${encodeURIComponent(granteeUserId)}`,
+    { method: "DELETE" },
+  );
   return res.json();
 }
 
@@ -1246,18 +1325,27 @@ export async function connectAgentFeishu(
   appId: string,
   appSecret: string,
   verificationToken: string,
+  encryptKey: string,
+  useLongConn: boolean,
 ): Promise<{
   ok: boolean;
   appId?: string;
   botName?: string;
   botOpenId?: string;
   webhookUrl?: string;
+  useLongConn?: boolean;
   error?: string;
 }> {
   const res = await apiFetch(`/api/agents/${agentId}/channels/feishu`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ appId, appSecret, verificationToken }),
+    body: JSON.stringify({
+      appId,
+      appSecret,
+      verificationToken,
+      encryptKey,
+      useLongConn,
+    }),
   });
   return res.json();
 }

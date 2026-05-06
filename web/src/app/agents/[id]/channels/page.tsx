@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -710,10 +711,14 @@ function ConnectSlackDialog({
             </a>
             . Enable <strong>Socket Mode</strong>, generate an{" "}
             <strong>app-level token</strong> (xapp-…) with{" "}
-            <code>connections:write</code>, then under OAuth & Permissions copy
-            the <strong>Bot User OAuth Token</strong> (xoxb-…). Subscribe to
-            <code>message.channels</code>, <code>message.im</code>, and{" "}
-            <code>app_mention</code>.
+            <code>connections:write</code>, then under{" "}
+            <strong>OAuth & Permissions</strong> copy the{" "}
+            <strong>Bot User OAuth Token</strong> (xoxb-…). Then go to{" "}
+            <strong>Event Subscriptions → Subscribe to bot events</strong> and
+            add <code>message.channels</code>, <code>message.im</code>, and{" "}
+            <code>app_mention</code> (Slack will prompt for the matching scopes
+            — <code>channels:history</code>, <code>im:history</code>,{" "}
+            <code>app_mentions:read</code> — and ask you to reinstall).
           </DialogDescription>
         </DialogHeader>
 
@@ -1159,15 +1164,23 @@ function ConnectFeishuDialog({
   const [appId, setAppId] = useState("");
   const [appSecret, setAppSecret] = useState("");
   const [verificationToken, setVerificationToken] = useState("");
+  const [encryptKey, setEncryptKey] = useState("");
+  const [useLongConn, setUseLongConn] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const [connected, setConnected] = useState<{ botName: string; webhookUrl: string } | null>(null);
+  const [connected, setConnected] = useState<{
+    botName: string;
+    webhookUrl: string;
+    useLongConn: boolean;
+  } | null>(null);
 
   useEffect(() => {
     if (!open) {
       setAppId("");
       setAppSecret("");
       setVerificationToken("");
+      setEncryptKey("");
+      setUseLongConn(true);
       setError("");
       setSubmitting(false);
       setConnected(null);
@@ -1183,6 +1196,8 @@ function ConnectFeishuDialog({
       appId.trim(),
       appSecret.trim(),
       verificationToken.trim(),
+      encryptKey.trim(),
+      useLongConn,
     );
     setSubmitting(false);
     if (res.error || !res.ok) {
@@ -1192,6 +1207,7 @@ function ConnectFeishuDialog({
     setConnected({
       botName: res.botName || "",
       webhookUrl: res.webhookUrl || "",
+      useLongConn: !!res.useLongConn,
     });
     onConnected();
   };
@@ -1216,8 +1232,10 @@ function ConnectFeishuDialog({
             </a>
             . Enable the bot capability, request{" "}
             <code>im:message</code> + <code>im:message:send_as_bot</code>{" "}
-            scopes, and copy the App ID + App Secret + Verification Token from
-            <strong> Credentials & Basic Info</strong> and{" "}
+            scopes, then copy the App ID + App Secret from{" "}
+            <strong>Credentials & Basic Info</strong>. Long-connection mode
+            (recommended) needs nothing else; webhook mode also needs the
+            Verification Token / Encrypt Key from{" "}
             <strong>Event Subscriptions</strong>.
           </DialogDescription>
         </DialogHeader>
@@ -1234,28 +1252,59 @@ function ConnectFeishuDialog({
                 <strong>{connected.botName || "(unnamed)"}</strong>.
               </p>
             </div>
-            <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
-              <p className="text-sm font-medium">One last step</p>
-              <p className="text-xs text-muted-foreground">
-                Paste this into Feishu Developer Console →{" "}
-                <strong>Event Subscriptions → Request URL</strong>, then click{" "}
-                <em>Save</em>. Feishu will POST a verification challenge here and
-                this fastclaw instance will echo it automatically.
-              </p>
-              <Input
-                readOnly
-                value={connected.webhookUrl}
-                className="font-mono text-xs"
-                onFocus={(e) => e.currentTarget.select()}
-              />
-              <p className="text-xs text-muted-foreground">
-                Subscribe to <code>im.message.receive_v1</code> to receive
-                messages.
-              </p>
-            </div>
+            {connected.useLongConn ? (
+              <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
+                <p className="text-sm font-medium">Long-connection mode</p>
+                <p className="text-xs text-muted-foreground">
+                  fastclaw is now opening a WebSocket to Feishu — no public
+                  URL setup needed. In the Feishu Developer Console under{" "}
+                  <strong>事件与回调 → 事件配置 → 订阅方式</strong>, pick{" "}
+                  <strong>使用长连接接收事件</strong>, then under{" "}
+                  <strong>Subscribe to bot events</strong> add{" "}
+                  <code>im.message.receive_v1</code>.
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
+                <p className="text-sm font-medium">One last step</p>
+                <p className="text-xs text-muted-foreground">
+                  Paste this into Feishu Developer Console →{" "}
+                  <strong>Event Subscriptions → Request URL</strong>, then
+                  click <em>Save</em>. Feishu will POST a verification
+                  challenge here and this fastclaw instance will echo it
+                  automatically.
+                </p>
+                <Input
+                  readOnly
+                  value={connected.webhookUrl}
+                  className="font-mono text-xs"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Subscribe to <code>im.message.receive_v1</code> to receive
+                  messages.
+                </p>
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-3 py-2">
+            <div className="flex items-start justify-between gap-3 rounded-lg border bg-muted/30 p-3">
+              <div className="space-y-0.5">
+                <Label htmlFor="feishu-long-conn" className="text-sm">
+                  Long-connection mode
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  fastclaw opens a WebSocket to Feishu — no public URL
+                  required. Turn off to use the classic webhook flow.
+                </p>
+              </div>
+              <Switch
+                id="feishu-long-conn"
+                checked={useLongConn}
+                onCheckedChange={setUseLongConn}
+              />
+            </div>
             <div className="space-y-1.5">
               <Label htmlFor="feishu-app-id">App ID</Label>
               <Input
@@ -1278,6 +1327,8 @@ function ConnectFeishuDialog({
                 className="font-mono text-sm"
               />
             </div>
+            {!useLongConn && (
+              <>
             <div className="space-y-1.5">
               <Label htmlFor="feishu-verification-token">Verification Token</Label>
               <Input
@@ -1292,6 +1343,24 @@ function ConnectFeishuDialog({
                 whose <code>header.token</code> doesn&apos;t match.
               </p>
             </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="feishu-encrypt-key">Encrypt Key</Label>
+              <Input
+                id="feishu-encrypt-key"
+                value={encryptKey}
+                onChange={(e) => setEncryptKey(e.target.value)}
+                placeholder="leave empty if 加密策略 is not configured"
+                type="password"
+                className="font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Only required if you set an Encrypt Key under{" "}
+                <strong>加密策略</strong> in the Feishu console. Empty = expect
+                plaintext webhook bodies.
+              </p>
+            </div>
+              </>
+            )}
             {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
         )}

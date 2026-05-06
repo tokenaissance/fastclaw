@@ -85,6 +85,18 @@ type WeChat struct {
 	// — the cache is best-effort, not a hard prerequisite.
 	ctxTokensMu sync.Mutex
 	ctxTokens   map[string]string
+
+	// onExpired fires once when the iLink server has confirmed the bot
+	// token is dead (operator must rescan). Set by the gateway so it
+	// can disable the configs row + unregister the adapter; without it
+	// the loop would log the same warning every 5s forever.
+	onExpired func(accountID string)
+}
+
+// SetOnExpired registers a callback that fires when the bot token is
+// confirmed dead. The callback runs once; Start exits afterwards.
+func (w *WeChat) SetOnExpired(fn func(accountID string)) {
+	w.onExpired = fn
 }
 
 // NewWeChat creates a new WeChat channel adapter from a connected
@@ -149,15 +161,23 @@ func (w *WeChat) Start(ctx context.Context) error {
 			if w.getUpdatesBuf != "" {
 				slog.Info("wechat session expired, resetting sync buf", "account", w.accountID)
 				w.getUpdatesBuf = ""
-			} else {
-				slog.Warn("wechat bot token expired — user must rescan QR", "account", w.accountID)
+				select {
+				case <-time.After(5 * time.Second):
+				case <-ctx.Done():
+					return nil
+				}
+				continue
 			}
-			select {
-			case <-time.After(5 * time.Second):
-			case <-ctx.Done():
-				return nil
+			// Sync buf was already empty: server is telling us the bot
+			// token itself is dead. Continuing to poll just spams the
+			// same warning every 5s forever — instead, log once, fire
+			// the registered onExpired callback (the gateway disables
+			// the configs row + unregisters us), and exit.
+			slog.Warn("wechat bot token expired — user must rescan QR", "account", w.accountID)
+			if w.onExpired != nil {
+				w.onExpired(w.accountID)
 			}
-			continue
+			return nil
 		}
 		if resp.Ret != 0 && resp.ErrCode != 0 {
 			slog.Warn("wechat server error",

@@ -76,13 +76,18 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
-	records, err := s.dataStore.ListAgents(r.Context(), uid)
+	owned, err := s.dataStore.ListAgents(r.Context(), uid)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	out := make([]map[string]any, 0, len(records))
-	for _, ar := range records {
+	shared, err := s.dataStore.ListAgentsSharedWith(r.Context(), uid)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(owned)+len(shared))
+	emit := func(ar store.AgentRecord, role string) {
 		desc, _ := ar.Config["description"].(string)
 		out = append(out, map[string]any{
 			"id":          ar.ID,
@@ -91,7 +96,20 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			"model":       s.agentScopeModel(r, ar.ID),
 			"avatarUrl":   "/api/agents/" + ar.ID + "/files/avatar.png",
 			"createdAt":   ar.CreatedAt,
+			"userId":      ar.UserID,
+			"role":        role,
 		})
+	}
+	seen := make(map[string]struct{}, len(owned))
+	for _, ar := range owned {
+		seen[ar.ID] = struct{}{}
+		emit(ar, "owner")
+	}
+	for _, ar := range shared {
+		if _, dup := seen[ar.ID]; dup {
+			continue
+		}
+		emit(ar, "viewer")
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
 }
@@ -177,7 +195,8 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 }
 
 // requireAgentReadable allows access when the caller is the owner OR the
-// caller's identity is granted access via the apikey ACL (CanAccessAgent).
+// caller's identity is granted access via the apikey ACL (CanAccessAgent)
+// OR the caller has been issued a share grant for this agent.
 // This is the same gate /api/chat/history uses, so app_user requests
 // proxied through an integration with X-Fastclaw-End-User can read agent
 // artifacts (files, file list, zip) for sessions they own without
@@ -195,6 +214,11 @@ func (s *Server) requireAgentReadable(w http.ResponseWriter, r *http.Request, ag
 	}
 	if ident.CanAccessAgent(agentID) {
 		return true
+	}
+	if uid != "" {
+		if granted, err := s.dataStore.IsAgentGrantedTo(r.Context(), agentID, uid); err == nil && granted {
+			return true
+		}
 	}
 	jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
 	return false
@@ -259,22 +283,31 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 // handleGetAgent returns the basic AgentRecord (id, name, description,
 // userId) for one agent. Used by the chat header / sidebar switcher to
-// resolve a display name when the agent isn't in the caller's own
-// list — e.g. super_admin viewing another user's agent. Permission is
-// the same as the rest of the agent endpoints: owner or super_admin.
+// resolve a display name. Permission is read-level — owner, super_admin,
+// or any grantee of a sharing record.
 func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	rec := s.requireAgentOwner(w, r, id)
-	if rec == nil {
+	if !s.requireAgentReadable(w, r, id) {
+		return
+	}
+	rec, err := s.dataStore.GetAgent(r.Context(), id)
+	if err != nil || rec == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
 	desc, _ := rec.Config["description"].(string)
+	uid := s.effectiveUserID(r)
+	role := "owner"
+	if rec.UserID != uid {
+		role = "viewer"
+	}
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
 			"id":          rec.ID,
 			"name":        rec.Name,
 			"description": desc,
 			"userId":      rec.UserID,
+			"role":        role,
 			"model":       s.agentScopeModel(r, rec.ID),
 			"avatarUrl":   "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":   rec.CreatedAt,

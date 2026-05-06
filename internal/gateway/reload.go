@@ -49,7 +49,7 @@ func (g *Gateway) RegisterChannelFromConfig(rec store.ConfigRecord) error {
 	if g.chanMgr == nil || g.bus == nil {
 		return nil
 	}
-	return registerChannelInstance(rec, g.bus, g.chanMgr, true)
+	return registerChannelInstance(rec, g.bus, g.chanMgr, g.store, true)
 }
 
 // UnregisterChannel removes a channel from the routing table. Note:
