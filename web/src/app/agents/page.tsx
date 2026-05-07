@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,6 +32,7 @@ import {
   adminListAgents,
   apiFetch,
   getAgents,
+  getMe,
   getStatus,
   createAgent,
   updateAgent,
@@ -84,11 +86,18 @@ function AgentAvatar({
 }
 
 export default function AgentsPage() {
+  const router = useRouter();
   const [agents, setAgents] = useState<AgentDetail[]>([]);
   const [otherAgents, setOtherAgents] = useState<OtherAgent[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"own" | "others">("own");
+  // quotaLocked = true when the caller has agent_quota=0 (admin
+  // provisions only). For these single-agent users this whole list /
+  // create page is meaningless — we redirect into the one agent they
+  // own, or show a "contact your admin" empty state if none has been
+  // provisioned yet.
+  const [quotaLocked, setQuotaLocked] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AgentDetail | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -173,6 +182,30 @@ export default function AgentsPage() {
     fetchAgents();
   }, []);
 
+  // Quota-locked redirect: agent_quota === 0 means the caller can't
+  // self-create. They're typically a single-agent customer whose agent
+  // was admin-provisioned. Bounce them straight into chat instead of
+  // showing an empty list with a disabled Create button. We wait for
+  // both /api/me and the agent list to land before deciding so the
+  // redirect doesn't race ahead of the list.
+  useEffect(() => {
+    let aborted = false;
+    if (loading) return;
+    getMe()
+      .then((me) => {
+        if (aborted) return;
+        if (me?.user?.agentQuota !== 0) return;
+        setQuotaLocked(true);
+        if (agents.length > 0) {
+          router.replace(`/agents/${agents[0].id}/chat/`);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      aborted = true;
+    };
+  }, [loading, agents, router]);
+
   async function uploadAvatar(agentID: string, file: File) {
     const fd = new FormData();
     fd.append("file", file, "avatar.png");
@@ -241,6 +274,18 @@ export default function AgentsPage() {
     fetchAgents();
   };
 
+  // Quota-locked rendering: while the redirect to the single agent
+  // is in flight, paint a tiny "redirecting" state instead of the
+  // management UI flashing through. When the locked user has no agent
+  // yet, fall through to a "contact admin" empty state below.
+  if (quotaLocked && (loading || ownedAgents.length > 0)) {
+    return (
+      <div className="p-6 max-w-5xl mx-auto">
+        <Skeleton className="h-8 w-48" />
+      </div>
+    );
+  }
+
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
@@ -250,10 +295,12 @@ export default function AgentsPage() {
             Manage your AI agents and their configurations
           </p>
         </div>
-        <Button onClick={() => setCreateOpen(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Agent
-        </Button>
+        {!quotaLocked && (
+          <Button onClick={() => setCreateOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            New Agent
+          </Button>
+        )}
       </div>
 
       {loading ? (
@@ -268,14 +315,20 @@ export default function AgentsPage() {
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
               <Bot className="h-7 w-7 text-primary" />
             </div>
-            <p className="text-sm text-muted-foreground">No agents configured yet</p>
-            <Button
-              onClick={() => setCreateOpen(true)}
-              variant="outline"
-              className="mt-4"
-            >
-              Create your first agent
-            </Button>
+            <p className="text-sm text-muted-foreground">
+              {quotaLocked
+                ? "No agent has been provisioned for your account yet — contact your admin."
+                : "No agents configured yet"}
+            </p>
+            {!quotaLocked && (
+              <Button
+                onClick={() => setCreateOpen(true)}
+                variant="outline"
+                className="mt-4"
+              >
+                Create your first agent
+              </Button>
+            )}
           </div>
         </div>
       ) : (

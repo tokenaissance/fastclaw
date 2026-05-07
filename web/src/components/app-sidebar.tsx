@@ -218,7 +218,16 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   }, [activeAgentId]);
 
   const isAdmin = status?.isAdmin ?? false;
-  const platformItems = isAdmin ? ADMIN_NAV : USER_NAV;
+  // quotaLocked = caller has agent_quota=0 (admin-provisions-only,
+  // typical single-agent customer model). For these users we lock the
+  // agent switcher header (no menu / "Manage agents" link) and pull
+  // the "Agents" entry out of the platform nav — the /agents page
+  // itself redirects them straight into chat anyway.
+  const quotaLocked = me?.user?.agentQuota === 0;
+  const platformItemsRaw = isAdmin ? ADMIN_NAV : USER_NAV;
+  const platformItems = quotaLocked
+    ? platformItemsRaw.filter((it) => it.url !== "/agents/")
+    : platformItemsRaw;
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -227,7 +236,8 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           agents={agents}
           activeAgentId={activeAgentId}
           locked={
-            !!activeAgentId && agentRoles[activeAgentId] === "viewer"
+            quotaLocked ||
+            (!!activeAgentId && agentRoles[activeAgentId] === "viewer")
           }
         />
       </SidebarHeader>
