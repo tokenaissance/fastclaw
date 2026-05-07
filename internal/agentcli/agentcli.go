@@ -192,7 +192,13 @@ func ensureOwner(ctx context.Context, st store.Store, opts InitOptions) (*users.
 		generated = password
 	}
 	email := defaultStr(opts.Email, username+"@local.fastclaw")
-	acct, err := accts.Create(ctx, username, email, password, opts.DisplayName, users.RoleSuperAdmin, nil)
+	acct, err := accts.Create(ctx, users.CreateInput{
+		Username:    username,
+		Email:       email,
+		Password:    password,
+		DisplayName: opts.DisplayName,
+		Role:        users.RoleSuperAdmin,
+	})
 	return acct, err == nil, generated, err
 }
 

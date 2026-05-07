@@ -215,7 +215,13 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username, email, password required"})
 		return
 	}
-	acct, err := s.accounts.Create(r.Context(), req.Username, req.Email, req.Password, req.DisplayName, users.RoleSuperAdmin, nil)
+	acct, err := s.accounts.Create(r.Context(), users.CreateInput{
+		Username:    req.Username,
+		Email:       req.Email,
+		Password:    req.Password,
+		DisplayName: req.DisplayName,
+		Role:        users.RoleSuperAdmin,
+	})
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -324,6 +330,17 @@ type createUserReq struct {
 	// AgentQuota is a pointer so the admin can distinguish "unset →
 	// use the default unlimited" from "explicitly 0 → no self-creation".
 	AgentQuota *int64 `json:"agentQuota,omitempty"`
+	// AvatarURL is an optional inline data:image/* URL (≤256KB). Same
+	// shape and cap as the self-service /api/me endpoint.
+	AvatarURL string `json:"avatarUrl,omitempty"`
+	// ExternalID is the calling app's own user identifier. Combined
+	// with the auth-derived apikey_id (NOT taken from the body) it
+	// makes provisioning idempotent: the same upstream user always
+	// resolves to the same fastclaw user_id. Optional for session
+	// callers (web admin clicks); typical for upstream apikey
+	// provisioning where the caller wants a stable mapping back to
+	// their own user table.
+	ExternalID string `json:"externalId,omitempty"`
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -332,11 +349,39 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
 		return
 	}
+	if req.AvatarURL != "" {
+		if !strings.HasPrefix(req.AvatarURL, "data:image/") {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "avatar must be a data:image/* URL"})
+			return
+		}
+		if len(req.AvatarURL) > maxAvatarBytes {
+			jsonResponse(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "avatar too large (max 256KB)"})
+			return
+		}
+	}
+	// apikey_id is auth-derived, never trusted from the body — that
+	// row is what audits a provisioned user back to the key that
+	// minted them. Empty for session callers (web admin), populated
+	// when an admin apikey hits this endpoint.
+	apikeyID := ""
+	if ident, ok := auth.FromContext(r.Context()); ok {
+		apikeyID = ident.APIKeyID
+	}
 	role := req.Role
 	if role == "" {
 		role = users.RoleUser
 	}
-	acct, err := s.accounts.Create(r.Context(), req.Username, req.Email, req.Password, req.DisplayName, role, req.AgentQuota)
+	acct, err := s.accounts.Create(r.Context(), users.CreateInput{
+		Username:    req.Username,
+		Email:       req.Email,
+		Password:    req.Password,
+		DisplayName: req.DisplayName,
+		Role:        role,
+		AgentQuota:  req.AgentQuota,
+		AvatarURL:   req.AvatarURL,
+		APIKeyID:    apikeyID,
+		ExternalID:  req.ExternalID,
+	})
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return

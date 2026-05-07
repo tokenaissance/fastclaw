@@ -82,26 +82,53 @@ func (a *Accounts) Count(ctx context.Context) (int, error) {
 	return a.store.CountUsers(ctx)
 }
 
-// Create writes a new account. Password is hashed with bcrypt; plaintext
-// is never persisted. ID is generated when empty. agentQuota:
-//   *value < 0 — unlimited (the platform default for self-registered users)
-//   *value = 0 — caller cannot self-create agents (admin provisions only)
-//   *value > 0 — caller can hold up to N owned agents
+// CreateInput is the bag of fields Create writes onto a new user row.
+// Required: Username, Email, Password. Role defaults to RoleUser.
 //
-// Pass nil to use the unlimited default.
-func (a *Accounts) Create(ctx context.Context, username, email, password, displayName, role string, agentQuota *int64) (*Account, error) {
-	username = strings.TrimSpace(username)
-	email = strings.ToLower(strings.TrimSpace(email))
-	if username == "" || email == "" || password == "" {
+// AgentQuota:
+//   - nil           — unlimited (platform default for self-registered users)
+//   - *value < 0    — unlimited
+//   - *value = 0    — caller cannot self-create agents (admin provisions only)
+//   - *value > 0    — caller can hold up to N owned agents
+//
+// APIKeyID + ExternalID are the upstream-provisioning idempotency pair.
+// Set APIKeyID to the apikey that's minting this row (handler reads it
+// from auth.Identity, never from the request body) so the row is
+// auditable back to the provisioning key. Set ExternalID to the calling
+// app's own user identifier; the partial UNIQUE index on (apikey_id,
+// external_id) — see migrateUsersAppUserCols — means the same pair
+// always resolves to the same fastclaw user_id, so retries are safe.
+//
+// AvatarURL must be empty or a `data:image/*` URL ≤256KB; the handler
+// caller is responsible for that validation.
+type CreateInput struct {
+	Username    string
+	Email       string
+	Password    string
+	DisplayName string
+	Role        string
+	AgentQuota  *int64
+	AvatarURL   string
+	APIKeyID    string
+	ExternalID  string
+}
+
+// Create writes a new account. Password is hashed with bcrypt; plaintext
+// is never persisted. ID is always auto-generated.
+func (a *Accounts) Create(ctx context.Context, in CreateInput) (*Account, error) {
+	username := strings.TrimSpace(in.Username)
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	if username == "" || email == "" || in.Password == "" {
 		return nil, errors.New("users.Create: username, email, password are required")
 	}
+	role := in.Role
 	if role == "" {
 		role = RoleUser
 	}
 	if role != RoleSuperAdmin && role != RoleUser {
 		return nil, errors.New("users.Create: invalid role")
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}
@@ -110,17 +137,20 @@ func (a *Accounts) Create(ctx context.Context, username, email, password, displa
 		return nil, err
 	}
 	quota := int64(-1)
-	if agentQuota != nil {
-		quota = *agentQuota
+	if in.AgentQuota != nil {
+		quota = *in.AgentQuota
 	}
 	rec := &store.UserRecord{
 		ID:           id,
 		Username:     username,
 		Email:        email,
 		PasswordHash: string(hash),
-		DisplayName:  displayName,
+		DisplayName:  in.DisplayName,
 		Role:         role,
 		Status:       StatusActive,
+		APIKeyID:     in.APIKeyID,
+		ExternalID:   in.ExternalID,
+		AvatarURL:    in.AvatarURL,
 		AgentQuota:   quota,
 	}
 	if err := a.store.CreateUser(ctx, rec); err != nil {

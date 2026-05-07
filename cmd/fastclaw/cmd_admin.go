@@ -54,7 +54,13 @@ func adminCreateUserCmd() *cobra.Command {
 			if role == "" {
 				role = users.RoleUser
 			}
-			acct, err := accts.Create(context.Background(), username, email, password, displayName, role, nil)
+			acct, err := accts.Create(context.Background(), users.CreateInput{
+				Username:    username,
+				Email:       email,
+				Password:    password,
+				DisplayName: displayName,
+				Role:        role,
+			})
 			if err != nil {
 				return err
 			}

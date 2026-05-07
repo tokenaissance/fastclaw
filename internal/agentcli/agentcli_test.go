@@ -155,7 +155,13 @@ func TestInitRejectsRebindToOtherUser(t *testing.T) {
 
 	// Manually create bob.
 	accts, _ := users.NewAccounts(st)
-	if _, err := accts.Create(context.Background(), "bob", "bob@local", "secret-bob", "Bob", users.RoleUser, nil); err != nil {
+	if _, err := accts.Create(context.Background(), users.CreateInput{
+		Username:    "bob",
+		Email:       "bob@local",
+		Password:    "secret-bob",
+		DisplayName: "Bob",
+		Role:        users.RoleUser,
+	}); err != nil {
 		t.Fatalf("create bob: %v", err)
 	}
 
