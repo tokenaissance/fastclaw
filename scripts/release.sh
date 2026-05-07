@@ -24,27 +24,24 @@ echo ""
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-# Build matrix
+# Build matrix. linux/armv7 was dropped because a transitive lark/feishu
+# SDK assigns math.MaxInt64 into an `int` field, which overflows on
+# 32-bit. Keep this list aligned with what actually ships on Releases.
 PLATFORMS=(
     "darwin/amd64"
     "darwin/arm64"
     "linux/amd64"
     "linux/arm64"
-    "linux/armv7"
     "windows/amd64"
+    "windows/arm64"
 )
 
 for platform in "${PLATFORMS[@]}"; do
     os="${platform%/*}"
     arch="${platform#*/}"
 
-    # Handle armv7
     goarch="$arch"
     goarm=""
-    if [ "$arch" = "armv7" ]; then
-        goarch="arm"
-        goarm="7"
-    fi
 
     output="${BINARY}"
     [ "$os" = "windows" ] && output="${BINARY}.exe"
