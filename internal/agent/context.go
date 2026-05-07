@@ -111,14 +111,21 @@ Runtime info:
 OS: %s/%s
 Working Directory: %s
 
-File-tool routing: when you call write_file / read_file / list_dir with a
-relative path, the runtime automatically places it in the right directory:
+File-tool routing: when you call write_file / read_file / edit_file /
+list_dir with a relative path, the runtime automatically places it in
+the right directory:
 - A bare identity filename (SOUL.md, IDENTITY.md, USER.md, MEMORY.md,
   BOOTSTRAP.md, HEARTBEAT.md, AGENTS.md, TOOLS.md, agent.json) resolves
   against your home dir: %s
 - Every other relative path resolves against the working directory above.
 So to update your own identity, just pass "IDENTITY.md"; to save a document
-for the user, pass a meaningful filename like "report.md".`, runtime.GOOS, runtime.GOARCH, workdir, homeDesc)
+for the user, pass a meaningful filename like "report.md".
+
+Use edit_file (not write_file) when you only need to change part of an
+existing file — it's cheaper, can't accidentally drop unrelated content,
+and validates the replacement landed. Reserve write_file for creating
+new files or full rewrites. This matters most for MEMORY.md / SOUL.md /
+USER.md, which grow over time and would lose context if rewritten in full.`, runtime.GOOS, runtime.GOARCH, workdir, homeDesc)
 	parts = append(parts, runtimeInfo)
 
 	// 2. Sandbox capabilities (auto-injected when sandbox is enabled)
