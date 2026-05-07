@@ -473,7 +473,8 @@ func makeEditFile(r *Registry) ToolFunc {
 
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name)
+			uid := r.systemFileUserID(name)
+			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, uid, name)
 			if err != nil {
 				return "", fmt.Errorf("system file get: %w", err)
 			}
@@ -481,7 +482,7 @@ func makeEditFile(r *Registry) ToolFunc {
 			if err != nil {
 				return "", err
 			}
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(updated)); err != nil {
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, uid, name, []byte(updated)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			// Same disk-mirror invariant as makeWriteFile so this pod's
@@ -782,7 +783,8 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		// be invisible to the next read that goes through the store.
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name)
+			uid := r.systemFileUserID(name)
+			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, uid, name)
 			if err != nil {
 				return "", fmt.Errorf("system file get: %w", err)
 			}
@@ -790,7 +792,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			if err != nil {
 				return "", err
 			}
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(updated)); err != nil {
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, uid, name, []byte(updated)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			return fmt.Sprintf("Edited %s (%d replacement(s))", name, count), nil
