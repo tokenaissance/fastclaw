@@ -142,6 +142,12 @@ func runGateway(port int) error {
 	gwCfg := &config.GatewayCfg{
 		Port: port,
 		Bind: env.Gateway.Bind,
+		HTTP: config.GatewayHTTP{
+			Endpoints: config.GatewayHTTPEndpoints{
+				ChatCompletions: config.GatewayEndpoint{Enabled: true},
+				Agents:          config.GatewayEndpoint{Enabled: true},
+			},
+		},
 	}
 
 	webSrv := setup.NewServer(port)
