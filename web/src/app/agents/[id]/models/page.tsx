@@ -219,10 +219,13 @@ export default function AgentModelsPage() {
       setProviders(merged);
       setSystemDefault(cfg?.agents?.defaults?.model || "");
       setSystemProviders(toRows(sysScopeRes).map((r) => r.name));
-      // The agent's own model override comes from the merged
-      // /api/config row for this agent (agents.list).
-      const own = cfg?.agents?.list?.find((a) => a.id === agentId);
-      setModel(own?.model || "");
+      // The agent's own model override is already resolved server-side
+      // by handleGetAgent → agentScopeModel (configs row at scope=agent,
+      // name=agents.defaults). Reading from agentRec keeps this page in
+      // sync with the rest of the app — `cfg.agents.list` is a stale TS
+      // type from before per-agent overrides moved out of the merged
+      // config; the Go side never populates it.
+      setModel(agentRec?.model || "");
     } finally {
       setLoading(false);
     }
@@ -564,6 +567,13 @@ export default function AgentModelsPage() {
             <>
               Override applies to <strong>{agentName || "this agent"}</strong>{" "}
               only. Format <code className="text-[11px]">provider/modelId</code>.
+              {systemDefault && (
+                <>
+                  {" "}
+                  Clearing falls back to{" "}
+                  <code className="text-[11px]">{systemDefault}</code>.
+                </>
+              )}
             </>
           )}
         </p>

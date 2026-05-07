@@ -158,7 +158,6 @@ export interface ConfigResponse {
       temperature: number;
       maxToolIterations: number;
     };
-    list: Array<{ id: string; model?: string }>;
   };
   channels: Record<string, { enabled: boolean; botToken?: string }>;
   storage: { type: string; dsn?: string };
