@@ -25,6 +25,66 @@ type listDirArgs struct {
 	Path string `json:"path"`
 }
 
+type editFileArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
+// editSchema is the JSON schema advertised for edit_file. Defined once and
+// reused by registerFile / registerSandboxedFile so the two registration
+// paths can't drift on parameter shape.
+var editSchema = map[string]interface{}{
+	"type": "object",
+	"properties": map[string]interface{}{
+		"path": map[string]interface{}{
+			"type":        "string",
+			"description": "File path (relative to your working directory or absolute)",
+		},
+		"old_string": map[string]interface{}{
+			"type":        "string",
+			"description": "Exact text to replace. Must match a unique substring in the file unless replace_all is true.",
+		},
+		"new_string": map[string]interface{}{
+			"type":        "string",
+			"description": "Replacement text. Must differ from old_string.",
+		},
+		"replace_all": map[string]interface{}{
+			"type":        "boolean",
+			"description": "Replace every occurrence of old_string instead of requiring uniqueness. Defaults to false.",
+		},
+	},
+	"required": []string{"path", "old_string", "new_string"},
+}
+
+const editDescription = "Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text."
+
+// applyEdit performs the in-memory string replacement that backs edit_file.
+// Centralised so every backend (filesystem, workspaceStore, systemFileStore,
+// sandbox executor) shares the same uniqueness / not-found / no-op rules.
+// Returns the new content and a count of replacements; an error if the edit
+// can't be applied as requested.
+func applyEdit(path, content, oldStr, newStr string, replaceAll bool) (string, int, error) {
+	if oldStr == "" {
+		return "", 0, fmt.Errorf("edit_file: old_string is empty (use write_file to create a file)")
+	}
+	if oldStr == newStr {
+		return "", 0, fmt.Errorf("edit_file: new_string must differ from old_string")
+	}
+	count := strings.Count(content, oldStr)
+	if count == 0 {
+		return "", 0, fmt.Errorf("edit_file: old_string not found in %s — re-read the file and copy the exact text (whitespace/indentation matters)", path)
+	}
+	if count > 1 && !replaceAll {
+		return "", 0, fmt.Errorf("edit_file: old_string matches %d locations in %s — provide more surrounding context to make it unique, or set replace_all=true", count, path)
+	}
+	if replaceAll {
+		return strings.ReplaceAll(content, oldStr, newStr), count, nil
+	}
+	return strings.Replace(content, oldStr, newStr, 1), 1, nil
+}
+
 var errOutsideSandbox = fmt.Errorf("access denied: path is outside the allowed sandbox directory")
 
 // globalSkillsDirSuffix is used to detect attempts to write into the
@@ -137,6 +197,8 @@ func registerFile(r *Registry) {
 		},
 		"required": []string{"path"},
 	}, makeListDir(r))
+
+	r.Register("edit_file", editDescription, editSchema, makeEditFile(r))
 }
 
 func resolvePath(root, path string) string {
@@ -370,6 +432,92 @@ func makeWriteFile(r *Registry) ToolFunc {
 		}
 
 		return fmt.Sprintf("Written %d bytes to %s", len(args.Content), fullPath), nil
+	}
+}
+
+func makeEditFile(r *Registry) ToolFunc {
+	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		var args editFileArgs
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return "", fmt.Errorf("parse args: %w", err)
+		}
+
+		// Mirror makeWriteFile's routing precedence: workspace store first
+		// (user artifacts), then identity-file store (SOUL.md / IDENTITY.md /
+		// MEMORY.md …), then filesystem. The read and the write must hit
+		// the same backend or an edit could silently land in a different
+		// store than the one the agent later reads from.
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.sessionID, args.Path)
+			if err != nil {
+				return "", fmt.Errorf("workspace get: %w", err)
+			}
+			data, readErr := io.ReadAll(rc)
+			rc.Close()
+			if readErr != nil {
+				return "", fmt.Errorf("workspace read: %w", readErr)
+			}
+			if looksBinary(data) {
+				return binaryRefusal(args.Path, len(data)), nil
+			}
+			updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
+			if err != nil {
+				return "", err
+			}
+			if err := r.workspaceStore.Put(ctx, r.agentID, r.sessionID, args.Path,
+				strings.NewReader(updated), int64(len(updated)), ""); err != nil {
+				return "", fmt.Errorf("workspace put: %w", err)
+			}
+			return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
+		}
+
+		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+			name := filepath.Clean(args.Path)
+			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name)
+			if err != nil {
+				return "", fmt.Errorf("system file get: %w", err)
+			}
+			updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
+			if err != nil {
+				return "", err
+			}
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(updated)); err != nil {
+				return "", fmt.Errorf("system file save: %w", err)
+			}
+			// Same disk-mirror invariant as makeWriteFile so this pod's
+			// in-process readers (context builder, skills loader) see the
+			// new content immediately.
+			if r.systemRoot != "" {
+				disk := filepath.Join(r.systemRoot, name)
+				_ = os.MkdirAll(filepath.Dir(disk), 0o755)
+				_ = os.WriteFile(disk, []byte(updated), 0o644)
+			}
+			return fmt.Sprintf("Edited %s (%d replacement(s))", name, count), nil
+		}
+
+		root := r.rootForPath(args.Path)
+		fullPath, err := resolvePathSandboxed(root, r.effectiveSandboxRoot(root), args.Path)
+		if err != nil {
+			return "", err
+		}
+		if isGlobalSkillsPath(fullPath) {
+			return "", errGlobalSkillsDirWrite
+		}
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			return "", fmt.Errorf("read file: %w", err)
+		}
+		if looksBinary(data) {
+			return binaryRefusal(args.Path, len(data)), nil
+		}
+		updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
+		if err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(fullPath, []byte(updated), 0o644); err != nil {
+			return "", fmt.Errorf("write file: %w", err)
+		}
+		return fmt.Sprintf("Edited %s (%d replacement(s))", fullPath, count), nil
 	}
 }
 
@@ -620,5 +768,78 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 		out, err := ex.ListDir(ctx, args.Path)
 		return MetaSandboxPrefix + out, err
+	})
+
+	r.Register("edit_file", editDescription, editSchema, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		var args editFileArgs
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return "", fmt.Errorf("parse args: %w", err)
+		}
+
+		// Identity files live in the systemFileStore (Postgres in cloud
+		// deployments) — the sandbox FS doesn't have them. Read+write must
+		// hit the same backend, otherwise a successful edit on disk would
+		// be invisible to the next read that goes through the store.
+		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
+			name := filepath.Clean(args.Path)
+			data, err := r.systemFileStore.GetWorkspaceFile(ctx, r.agentID, r.userID, name)
+			if err != nil {
+				return "", fmt.Errorf("system file get: %w", err)
+			}
+			updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
+			if err != nil {
+				return "", err
+			}
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.userID, name, []byte(updated)); err != nil {
+				return "", fmt.Errorf("system file save: %w", err)
+			}
+			return fmt.Sprintf("Edited %s (%d replacement(s))", name, count), nil
+		}
+
+		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.sessionID, args.Path)
+			if err == nil {
+				data, readErr := io.ReadAll(rc)
+				rc.Close()
+				if readErr == nil {
+					if looksBinary(data) {
+						return binaryRefusal(args.Path, len(data)), nil
+					}
+					updated, count, err := applyEdit(args.Path, string(data), args.OldString, args.NewString, args.ReplaceAll)
+					if err != nil {
+						return "", err
+					}
+					if err := r.workspaceStore.Put(ctx, r.agentID, r.sessionID, args.Path,
+						strings.NewReader(updated), int64(len(updated)), ""); err != nil {
+						return "", fmt.Errorf("workspace put: %w", err)
+					}
+					return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
+				}
+			}
+			// Fall through to sandbox executor on store miss.
+		}
+
+		// Read-modify-write through the sandbox executor for paths that
+		// don't belong to a store (skills/, /tmp/, ad-hoc scripts, …).
+		// post-exec sync mirrors the resulting file back to workspace.Store
+		// just like a write_file call would.
+		content, err := ex.ReadFile(ctx, args.Path)
+		if err != nil {
+			return "", err
+		}
+		if looksBinary([]byte(content)) {
+			return binaryRefusal(args.Path, len(content)), nil
+		}
+		updated, count, err := applyEdit(args.Path, content, args.OldString, args.NewString, args.ReplaceAll)
+		if err != nil {
+			return "", err
+		}
+		// Discard the executor's confirmation string — we synthesise a
+		// "(N replacement(s))" message that's more informative than the
+		// generic write echo.
+		if _, err := ex.WriteFile(ctx, args.Path, updated); err != nil {
+			return "", err
+		}
+		return MetaSandboxPrefix + fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
 	})
 }
