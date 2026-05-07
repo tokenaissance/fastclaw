@@ -101,7 +101,7 @@ func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
 		slog.Warn("user space load failed", "user", msg.OwnerUserID, "error", err)
 		return
 	}
-	ag := g.matchAgent(space, msg)
+	ag := g.matchAgent(ctx, space, msg)
 	if ag == nil {
 		slog.Warn("no agent matched for DM, dropping",
 			"user", msg.OwnerUserID, "channel", msg.Channel,
@@ -120,7 +120,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 		slog.Warn("user space load failed", "user", msg.OwnerUserID, "error", err)
 		return
 	}
-	boundAgents := g.agentsBoundToMessage(space, msg)
+	boundAgents := g.agentsBoundToMessage(ctx, space, msg)
 	if len(boundAgents) == 0 {
 		slog.Warn("no agents bound for group message, dropping",
 			"user", msg.OwnerUserID, "chat_id", msg.ChatID)
@@ -171,7 +171,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 	}
 }
 
-func (g *Gateway) matchAgent(space *UserSpace, msg bus.InboundMessage) *agent.Agent {
+func (g *Gateway) matchAgent(ctx context.Context, space *UserSpace, msg bus.InboundMessage) *agent.Agent {
 	if space == nil {
 		return nil
 	}
@@ -197,8 +197,30 @@ func (g *Gateway) matchAgent(space *UserSpace, msg bus.InboundMessage) *agent.Ag
 		if ag := space.Agents.AgentByID(b.AgentID); ag != nil {
 			return ag
 		}
+		// Binding points to an agent the user doesn't own and hasn't
+		// been lazy-attached to this space yet — happens with the
+		// multi-user channel binding flow where a user binds their
+		// own bot to a public agent. Try EnsureAgent and re-check;
+		// missing agents (deleted / wrong id) just fall through.
+		if err := g.ensureForeignAgent(ctx, space, b.AgentID); err == nil {
+			if ag := space.Agents.AgentByID(b.AgentID); ag != nil {
+				return ag
+			}
+		}
 	}
 	return space.Agents.DefaultAgent()
+}
+
+// ensureForeignAgent lazy-attaches an agent that's not in the user's
+// own owned set. Wrapper around UserSpace.EnsureAgent that pulls the
+// shared store/bus/workspace from the Gateway so callers don't have to
+// thread them through. Idempotent: a no-op when the agent is already
+// loaded.
+func (g *Gateway) ensureForeignAgent(ctx context.Context, space *UserSpace, agentID string) error {
+	if space == nil || agentID == "" {
+		return nil
+	}
+	return space.EnsureAgent(ctx, g.store, g.bus, g.workspace, agentID)
 }
 
 func matchBinding(m config.Match, msg bus.InboundMessage) bool {
@@ -219,7 +241,7 @@ func matchBinding(m config.Match, msg bus.InboundMessage) bool {
 	return true
 }
 
-func (g *Gateway) agentsBoundToMessage(space *UserSpace, msg bus.InboundMessage) []*agent.Agent {
+func (g *Gateway) agentsBoundToMessage(ctx context.Context, space *UserSpace, msg bus.InboundMessage) []*agent.Agent {
 	if space == nil {
 		return nil
 	}
@@ -236,7 +258,14 @@ func (g *Gateway) agentsBoundToMessage(space *UserSpace, msg bus.InboundMessage)
 		if !matchBinding(b.Match, msg) || seen[b.AgentID] {
 			continue
 		}
-		if ag := space.Agents.AgentByID(b.AgentID); ag != nil {
+		ag := space.Agents.AgentByID(b.AgentID)
+		if ag == nil {
+			// Lazy-attach foreign agent (multi-user channel binding).
+			if err := g.ensureForeignAgent(ctx, space, b.AgentID); err == nil {
+				ag = space.Agents.AgentByID(b.AgentID)
+			}
+		}
+		if ag != nil {
 			seen[b.AgentID] = true
 			out = append(out, ag)
 		}
