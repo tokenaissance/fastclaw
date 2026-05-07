@@ -197,9 +197,16 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		userText = b.String()
 	}
 
-	// Build inbound message
+	// Build inbound message.
+	// X-Fastclaw-Channel lets callers override the reply channel so
+	// cron jobs created during this turn route through the right
+	// adapter (e.g. "pinclaw" → plugin channel.send → Cloud API).
+	channel := r.Header.Get("x-fastclaw-channel")
+	if channel == "" {
+		channel = "api"
+	}
 	msg := bus.InboundMessage{
-		Channel:   "api",
+		Channel:   channel,
 		ChatID:    sessionKey,
 		UserID:    "api-user",
 		Text:      userText,
