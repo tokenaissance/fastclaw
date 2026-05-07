@@ -76,18 +76,25 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
+	// ?all=true is the cross-tenant view (replaces /api/admin/agents).
+	// Admin-only — for the platform-wide "Agents" admin page that
+	// joins owner usernames in.
+	if r.URL.Query().Get("all") == "true" {
+		ident, _ := auth.FromContext(r.Context())
+		if !ident.CanAdminPlatform() {
+			jsonResponse(w, http.StatusForbidden, map[string]any{"error": "all=true requires admin"})
+			return
+		}
+		s.respondAllAgents(w, r)
+		return
+	}
 	owned, err := s.dataStore.ListAgents(r.Context(), uid)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	shared, err := s.dataStore.ListAgentsSharedWith(r.Context(), uid)
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	out := make([]map[string]any, 0, len(owned)+len(shared))
-	emit := func(ar store.AgentRecord, role string) {
+	out := make([]map[string]any, 0, len(owned))
+	for _, ar := range owned {
 		desc, _ := ar.Config["description"].(string)
 		out = append(out, map[string]any{
 			"id":          ar.ID,
@@ -97,19 +104,9 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			"avatarUrl":   "/api/agents/" + ar.ID + "/files/avatar.png",
 			"createdAt":   ar.CreatedAt,
 			"userId":      ar.UserID,
-			"role":        role,
+			"role":        "owner",
+			"isPublic":    ar.IsPublic,
 		})
-	}
-	seen := make(map[string]struct{}, len(owned))
-	for _, ar := range owned {
-		seen[ar.ID] = struct{}{}
-		emit(ar, "owner")
-	}
-	for _, ar := range shared {
-		if _, dup := seen[ar.ID]; dup {
-			continue
-		}
-		emit(ar, "viewer")
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
 }
@@ -138,6 +135,23 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Name == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "name required"})
 		return
+	}
+	// Enforce per-user agent quota. -1 = unlimited (default), 0 = no
+	// self-creation (single-tenant customers — admin provisions for
+	// them via POST /api/users/{id}/agents under admin caller),
+	// N>0 = max N owned at once. Admin path bypasses this check.
+	if u, err := s.dataStore.GetUser(r.Context(), uid); err == nil && u != nil && u.AgentQuota >= 0 {
+		owned, err := s.dataStore.ListAgents(r.Context(), uid)
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if int64(len(owned)) >= u.AgentQuota {
+			jsonResponse(w, http.StatusForbidden, map[string]any{
+				"error": fmt.Sprintf("agent quota reached (%d) — contact your admin to provision more", u.AgentQuota),
+			})
+			return
+		}
 	}
 	id, err := generateID("agt_")
 	if err != nil {
@@ -177,6 +191,33 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requireUserOrAdmin gates the /api/users/{id}/* nested routes:
+//   - any caller may operate on themselves (pathUserID == ident.UserID)
+//   - super_admin / type=admin apikey may operate on any user
+//
+// Returns true on success; on failure writes a 401/403 and returns false.
+// Callers should still validate that the path user actually exists when
+// the operation depends on it.
+func (s *Server) requireUserOrAdmin(w http.ResponseWriter, r *http.Request, pathUserID string) bool {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return false
+	}
+	if pathUserID == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "user id required"})
+		return false
+	}
+	if pathUserID == ident.EffectiveUserID() {
+		return true
+	}
+	if ident.CanAdminPlatform() {
+		return true
+	}
+	jsonResponse(w, http.StatusForbidden, map[string]any{"error": "forbidden"})
+	return false
+}
+
 // requireAgentOwner returns the agent record if the caller owns it (or is
 // super_admin), otherwise writes a 403/404 and returns nil.
 func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agentID string) *store.AgentRecord {
@@ -194,13 +235,16 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 	return rec
 }
 
-// requireAgentReadable allows access when the caller is the owner OR the
-// caller's identity is granted access via the apikey ACL (CanAccessAgent)
-// OR the caller has been issued a share grant for this agent.
-// This is the same gate /api/chat/history uses, so app_user requests
-// proxied through an integration with X-Fastclaw-End-User can read agent
-// artifacts (files, file list, zip) for sessions they own without
-// 403'ing on the strict ownership check.
+// requireAgentReadable allows access when the caller is the owner, a
+// super_admin, holds an apikey-ACL grant (CanAccessAgent), OR the
+// agent is marked public and the caller is at least an authenticated
+// session. Public agents are link-shared: any signed-in user who hits
+// the URL can chat under their own user_id namespace, while the
+// agent's identity (SOUL/IDENTITY/skills) is reused from the owner's
+// row. This is the same gate /api/chat/history uses, so app_user
+// requests proxied through an integration with X-Fastclaw-End-User
+// can read artifacts for sessions they own without 403'ing on the
+// strict ownership check.
 func (s *Server) requireAgentReadable(w http.ResponseWriter, r *http.Request, agentID string) bool {
 	rec, err := s.dataStore.GetAgent(r.Context(), agentID)
 	if err != nil || rec == nil {
@@ -212,13 +256,17 @@ func (s *Server) requireAgentReadable(w http.ResponseWriter, r *http.Request, ag
 	if rec.UserID == uid || ident.Role == users.RoleSuperAdmin {
 		return true
 	}
-	if ident.CanAccessAgent(agentID) {
+	// CanAccessAgent is a hard check for apikeys (ACL) but a deferred
+	// "true" for session callers — the comment on Identity.CanAccessAgent
+	// spells this out. Only honor it for the apikey path; for session
+	// users we must do the explicit owner / public check ourselves,
+	// otherwise any signed-in user could GET another user's private
+	// agent via /api/agents/{id} and friends.
+	if ident.AuthMethod == "apikey" && ident.CanAccessAgent(agentID) {
 		return true
 	}
-	if uid != "" {
-		if granted, err := s.dataStore.IsAgentGrantedTo(r.Context(), agentID, uid); err == nil && granted {
-			return true
-		}
+	if rec.IsPublic && uid != "" {
+		return true
 	}
 	jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
 	return false
@@ -237,6 +285,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		Name        string  `json:"name,omitempty"`
 		Description *string `json:"description,omitempty"` // ptr so empty-string clears it
 		Model       string  `json:"model,omitempty"`
+		IsPublic    *bool   `json:"isPublic,omitempty"` // ptr so caller can leave it unchanged
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -255,6 +304,9 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			rec.Config["description"] = *req.Description
 		}
 	}
+	if req.IsPublic != nil {
+		rec.IsPublic = *req.IsPublic
+	}
 	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -272,11 +324,12 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	s.invalidateUser(rec.UserID)
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"agent": map[string]any{
-			"id":     rec.ID,
-			"userId": rec.UserID,
-			"name":   rec.Name,
-			"model":  s.agentScopeModel(r, rec.ID),
-			"config": rec.Config,
+			"id":       rec.ID,
+			"userId":   rec.UserID,
+			"name":     rec.Name,
+			"model":    s.agentScopeModel(r, rec.ID),
+			"config":   rec.Config,
+			"isPublic": rec.IsPublic,
 		},
 	})
 }
@@ -311,6 +364,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"model":       s.agentScopeModel(r, rec.ID),
 			"avatarUrl":   "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":   rec.CreatedAt,
+			"isPublic":    rec.IsPublic,
 		},
 	})
 }

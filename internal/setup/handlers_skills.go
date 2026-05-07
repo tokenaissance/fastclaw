@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
-	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
@@ -73,9 +72,11 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 // these up at the highest precedence — they're exclusive to the agent.
 func (s *Server) handleListAgentSkills(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	ident, ok := auth.FromContext(r.Context())
-	if !ok || !ident.CanAccessAgent(id) {
-		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
+	// Skill listing exposes per-skill env spec (which env keys the
+	// owner has set). Owner-only — Identity.CanAccessAgent is a
+	// deferred-true for session callers and would let any signed-in
+	// user enumerate any agent's skills.
+	if s.requireAgentOwner(w, r, id) == nil {
 		return
 	}
 	homePath, err := config.AgentHomeDir(id)
@@ -162,11 +163,15 @@ func scanSkillsDir(dir string) []map[string]any {
 // handleDeleteAgentSkill removes a skill from an agent's own home dir
 // only. Global/shared skills are untouched.
 func (s *Server) handleDeleteAgentSkill(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	name := r.PathValue("name")
-	ident, ok := auth.FromContext(r.Context())
-	if !ok || !ident.CanAccessAgent(id) {
-		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
+	// Mutation — owner-only. Identity.CanAccessAgent is a
+	// deferred-true for session callers and would let anyone delete
+	// skills off any agent.
+	if s.requireAgentOwner(w, r, id) == nil {
 		return
 	}
 	homePath, err := config.AgentHomeDir(id)

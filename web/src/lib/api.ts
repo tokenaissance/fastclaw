@@ -41,11 +41,15 @@ export interface AgentDetail {
   description?: string;
   avatarUrl?: string;       // /api/agents/{id}/files/avatar.png — may 404
   userId?: string;          // owner's user id (agents.user_id)
-  // role distinguishes agents the caller owns from agents shared with
-  // them by another user. "viewer" gates UI out of configuration tabs
-  // (Customize / Skills / Channels / Scheduler / Models) and the Share
-  // dialog. Backend always sends one of these on /api/agents.
+  // role distinguishes agents the caller owns from agents accessed via
+  // a public link. "viewer" gates UI out of configuration tabs
+  // (Customize / Skills / Channels / Scheduler / Models). Backend
+  // always sends one of these on /api/agents and /api/agents/{id}.
   role?: "owner" | "viewer";
+  // isPublic: when true, anyone with the chat URL can chat with this
+  // agent under their own user_id (sessions/memory partition per
+  // chatter). Owner-editable from the Edit dialog. Default false.
+  isPublic?: boolean;
   model: string;
   workspace?: string;
   maxTokens?: number;
@@ -225,6 +229,8 @@ export interface MeResponse {
     displayName?: string;
     avatarUrl?: string;
     status: string;
+    // -1 = unlimited, 0 = no self-creation, N>0 = up to N owned agents
+    agentQuota?: number;
   };
   authMethod?: string;
   actAsUserId?: string;
@@ -300,15 +306,18 @@ export async function onboard(req: OnboardRequest): Promise<{ ok: boolean; error
   return res.json();
 }
 
-// Admin
+// User management — admin-only at the top level (CRUD), admin-or-self
+// for the nested resources (apikeys/agents under /api/users/{id}/...).
+// The /api/admin/* prefix was removed in favor of flat resource paths;
+// permission is enforced inside each handler.
 
 export async function adminListUsers() {
-  const res = await apiFetch("/api/admin/users");
+  const res = await apiFetch("/api/users");
   return res.json();
 }
 
 export async function adminListAgents() {
-  const res = await apiFetch("/api/admin/agents");
+  const res = await apiFetch("/api/agents?all=true");
   return res.json();
 }
 
@@ -318,8 +327,9 @@ export async function adminCreateUser(req: {
   password: string;
   displayName?: string;
   role?: string;
+  agentQuota?: number | null;
 }) {
-  const res = await apiFetch("/api/admin/users", {
+  const res = await apiFetch("/api/users", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
@@ -327,8 +337,11 @@ export async function adminCreateUser(req: {
   return res.json();
 }
 
-export async function adminUpdateUser(id: string, req: { displayName?: string; role?: string; status?: string }) {
-  const res = await apiFetch(`/api/admin/users/${id}`, {
+export async function adminUpdateUser(
+  id: string,
+  req: { displayName?: string; role?: string; status?: string; agentQuota?: number | null },
+) {
+  const res = await apiFetch(`/api/users/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
@@ -337,12 +350,12 @@ export async function adminUpdateUser(id: string, req: { displayName?: string; r
 }
 
 export async function adminDeleteUser(id: string) {
-  const res = await apiFetch(`/api/admin/users/${id}`, { method: "DELETE" });
+  const res = await apiFetch(`/api/users/${id}`, { method: "DELETE" });
   return res.json();
 }
 
 export async function adminResetPassword(id: string, password: string) {
-  const res = await apiFetch(`/api/admin/users/${id}/password`, {
+  const res = await apiFetch(`/api/users/${id}/password`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
@@ -781,6 +794,19 @@ export async function getAgent(id: string): Promise<AgentDetail | null> {
   return (data?.agent as AgentDetail) || null;
 }
 
+// getAgentStatus surfaces the raw HTTP status alongside the agent so
+// callers can branch on 403 (forbidden — not the owner, not public)
+// vs 404 (no such agent) vs success. The plain getAgent() collapses
+// every failure to null, which the chat page can't tell apart.
+export async function getAgentStatus(
+  id: string,
+): Promise<{ status: number; agent: AgentDetail | null }> {
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(id)}`);
+  if (!res.ok) return { status: res.status, agent: null };
+  const data = await res.json();
+  return { status: res.status, agent: (data?.agent as AgentDetail) || null };
+}
+
 export async function createAgent(agent: Partial<AgentDetail>) {
   const res = await apiFetch("/api/agents", {
     method: "POST",
@@ -808,6 +834,9 @@ export interface AgentUpdatePayload {
   // Whole-map replace: omit to leave providers untouched, send {} to
   // clear them, or send the full desired map to replace.
   providers?: Record<string, ProviderData>;
+  // Toggle the "anyone with the link can chat" gate. Omit to leave the
+  // current value alone.
+  isPublic?: boolean;
 }
 
 export async function updateAgent(id: string, agent: AgentUpdatePayload) {
@@ -841,52 +870,6 @@ export async function deleteAgent(id: string) {
   const res = await apiFetch(`/api/agents/${id}`, {
     method: "DELETE",
   });
-  return res.json();
-}
-
-// Agent share grants — owner-only views and mutations. Each grant lets
-// one named user chat with the agent; the agent itself stays owned by
-// the caller.
-export interface AgentGrant {
-  userId: string;
-  username?: string;
-  email?: string;
-  displayName?: string;
-  grantedBy?: string;
-  grantedAt?: string;
-}
-
-export async function listAgentGrants(agentId: string): Promise<AgentGrant[]> {
-  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/grants`);
-  if (!res.ok) throw new Error(`listAgentGrants failed: ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data?.grants) ? (data.grants as AgentGrant[]) : [];
-}
-
-// createAgentGrant accepts an email or username for the grantee. The
-// backend resolves it to a real users.id row before inserting; pass
-// userId directly when the caller already has it.
-export async function createAgentGrant(
-  agentId: string,
-  identifier: string,
-): Promise<{ ok: boolean; error?: string; grant?: AgentGrant }> {
-  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/grants`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ identifier }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    return { ok: false, error: data?.error || `request failed: ${res.status}` };
-  }
-  return { ok: true, grant: data?.grant as AgentGrant };
-}
-
-export async function deleteAgentGrant(agentId: string, granteeUserId: string) {
-  const res = await apiFetch(
-    `/api/agents/${encodeURIComponent(agentId)}/grants/${encodeURIComponent(granteeUserId)}`,
-    { method: "DELETE" },
-  );
   return res.json();
 }
 

@@ -93,6 +93,64 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateCronJobsFailureCount(ctx); err != nil {
 		return fmt.Errorf("migrate cron_jobs.failure_count: %w", err)
 	}
+	if err := d.migrateAgentsAddIsPublic(ctx); err != nil {
+		return fmt.Errorf("migrate agents.is_public: %w", err)
+	}
+	if err := d.migrateDropAgentGrants(ctx); err != nil {
+		return fmt.Errorf("migrate drop agent_grants: %w", err)
+	}
+	if err := d.migrateUsersAddAgentQuota(ctx); err != nil {
+		return fmt.Errorf("migrate users.agent_quota: %w", err)
+	}
+	return nil
+}
+
+// migrateUsersAddAgentQuota retrofits the agent_quota column onto
+// pre-feature installs. Default -1 = unlimited, which preserves the
+// existing "anyone can create as many agents as they want" behavior
+// for users that existed before the quota was introduced.
+func (d *DBStore) migrateUsersAddAgentQuota(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "users", "agent_quota")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE users ADD COLUMN agent_quota INTEGER NOT NULL DEFAULT -1`); err != nil {
+		return fmt.Errorf("add agent_quota: %w", err)
+	}
+	return nil
+}
+
+// migrateAgentsAddIsPublic retrofits the is_public column onto
+// pre-feature installs. Default FALSE keeps every existing agent
+// owner-only after the upgrade — opt-in via the Edit dialog.
+func (d *DBStore) migrateAgentsAddIsPublic(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "agents", "is_public")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`ALTER TABLE agents ADD COLUMN is_public BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+		return fmt.Errorf("add is_public: %w", err)
+	}
+	return nil
+}
+
+// migrateDropAgentGrants removes the legacy per-user share table.
+// Sharing now lives on agents.is_public; existing per-user grants are
+// not migrated forward (the prior model wasn't shipped to general
+// users). DROP TABLE IF EXISTS is idempotent and a no-op on fresh
+// installs that never created the table.
+func (d *DBStore) migrateDropAgentGrants(ctx context.Context) error {
+	if _, err := d.db.ExecContext(ctx, `DROP TABLE IF EXISTS agent_grants`); err != nil {
+		return fmt.Errorf("drop agent_grants: %w", err)
+	}
 	return nil
 }
 
@@ -529,6 +587,7 @@ func (d *DBStore) migrationSQL() []string {
 			apikey_id TEXT NOT NULL DEFAULT '',
 			external_id TEXT NOT NULL DEFAULT '',
 			avatar_url TEXT NOT NULL DEFAULT '',
+			agent_quota INTEGER NOT NULL DEFAULT -1,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -567,31 +626,23 @@ func (d *DBStore) migrationSQL() []string {
 			PRIMARY KEY (apikey_id, agent_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_apikey_agents_agent ON apikey_agents (agent_id)`,
+		// is_public flips the "anyone with the link can chat" gate.
+		// Default 0 (private — owner-only). When 1, a non-owner who hits
+		// the agent's chat URL gets the agent lazy-attached into their
+		// own UserSpace; sessions/memory/agent_files stay keyed by the
+		// chatter's user_id, so each chatter gets a private history
+		// while the agent identity (SOUL.md, IDENTITY.md, skills) is
+		// shared from the owner's row.
 		`CREATE TABLE IF NOT EXISTS agents (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
 			config TEXT NOT NULL DEFAULT '{}',
+			is_public BOOLEAN NOT NULL DEFAULT FALSE,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_user ON agents (user_id)`,
-		// agent_grants is the read-only sharing table: rows here let a
-		// non-owner user load and chat with someone else's agent. The
-		// agent owner (agents.user_id) issues grants; granted_by records
-		// who issued the grant for audit. Sessions/memory/agent_files
-		// stay user_id-keyed so each grantee gets their own private
-		// chat history and per-user files (MEMORY.md, USER.md), while
-		// the owner-keyed agent_files row (SOUL.md, IDENTITY.md, etc.)
-		// is read by everyone via GetAgentFile's overlay fallback.
-		`CREATE TABLE IF NOT EXISTS agent_grants (
-				agent_id TEXT NOT NULL,
-				user_id TEXT NOT NULL,
-				granted_by TEXT NOT NULL DEFAULT '',
-				granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-				PRIMARY KEY (agent_id, user_id)
-			)`,
-		`CREATE INDEX IF NOT EXISTS idx_agent_grants_user ON agent_grants (user_id)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			user_id TEXT NOT NULL,
 			agent_id TEXT NOT NULL,
@@ -736,11 +787,11 @@ func scanErr(err error) error {
 
 // userColumns is the canonical select list — keep ordering aligned with
 // the Scan calls below so adding a column means editing both lines.
-const userColumns = `id, username, email, password_hash, display_name, role, status, apikey_id, external_id, avatar_url, created_at, updated_at`
+const userColumns = `id, username, email, password_hash, display_name, role, status, apikey_id, external_id, avatar_url, agent_quota, created_at, updated_at`
 
 func scanUser(scanner interface{ Scan(dest ...any) error }) (*UserRecord, error) {
 	var u UserRecord
-	if err := scanner.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.APIKeyID, &u.ExternalID, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt); err != nil {
+	if err := scanner.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.Role, &u.Status, &u.APIKeyID, &u.ExternalID, &u.AvatarURL, &u.AgentQuota, &u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &u, nil
@@ -753,10 +804,10 @@ func (d *DBStore) CreateUser(ctx context.Context, u *UserRecord) error {
 	}
 	u.UpdatedAt = now
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO users (id, username, email, password_hash, display_name, role, status, apikey_id, external_id, avatar_url, created_at, updated_at)
-			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12)),
-		u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.APIKeyID, u.ExternalID, u.AvatarURL, u.CreatedAt, u.UpdatedAt)
+		fmt.Sprintf(`INSERT INTO users (id, username, email, password_hash, display_name, role, status, apikey_id, external_id, avatar_url, agent_quota, created_at, updated_at)
+			VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10), d.ph(11), d.ph(12), d.ph(13)),
+		u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.APIKeyID, u.ExternalID, u.AvatarURL, u.AgentQuota, u.CreatedAt, u.UpdatedAt)
 	return err
 }
 
@@ -822,9 +873,9 @@ func (d *DBStore) UpdateUser(ctx context.Context, u *UserRecord) error {
 	u.UpdatedAt = time.Now().UTC()
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE users SET username = %s, email = %s, password_hash = %s, display_name = %s,
-			role = %s, status = %s, avatar_url = %s, updated_at = %s WHERE id = %s`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9)),
-		u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.AvatarURL, u.UpdatedAt, u.ID)
+			role = %s, status = %s, avatar_url = %s, agent_quota = %s, updated_at = %s WHERE id = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8), d.ph(9), d.ph(10)),
+		u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Role, u.Status, u.AvatarURL, u.AgentQuota, u.UpdatedAt, u.ID)
 	return err
 }
 
@@ -853,7 +904,7 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 	}
 	rows.Close()
 	for _, aid := range ownedAgents {
-		for _, t := range []string{"agent_files", "sessions", "session_messages", "chat_events", "cron_jobs", "agent_grants"} {
+		for _, t := range []string{"agent_files", "sessions", "session_messages", "chat_events", "cron_jobs"} {
 			if _, err := tx.ExecContext(ctx,
 				fmt.Sprintf("DELETE FROM %s WHERE agent_id = %s", t, d.ph(1)), aid); err != nil {
 				return err
@@ -867,11 +918,6 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 			fmt.Sprintf("DELETE FROM configs WHERE scope = 'agent' AND scope_id = %s", d.ph(1)), aid); err != nil {
 			return err
 		}
-	}
-	// Also revoke any inbound grants this user held on other peoples' agents.
-	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM agent_grants WHERE user_id = %s", d.ph(1)), id); err != nil {
-		return err
 	}
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM agents WHERE user_id = %s", d.ph(1)), id); err != nil {
@@ -1072,7 +1118,7 @@ func (d *DBStore) APIKeyCanAccessAgent(ctx context.Context, apikeyID, agentID st
 
 // --- Agents ---
 
-const agentSelectCols = `id, user_id, name, config, created_at, updated_at`
+const agentSelectCols = `id, user_id, name, config, is_public, created_at, updated_at`
 
 func (d *DBStore) ListAgents(ctx context.Context, ownerUserID string) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
@@ -1090,7 +1136,7 @@ func (d *DBStore) GetAgent(ctx context.Context, agentID string) (*AgentRecord, e
 		fmt.Sprintf(`SELECT `+agentSelectCols+` FROM agents WHERE id = %s`, d.ph(1)), agentID)
 	var ag AgentRecord
 	var cfgStr string
-	if err := row.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
+	if err := row.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	json.Unmarshal([]byte(cfgStr), &ag.Config)
@@ -1112,20 +1158,21 @@ func (d *DBStore) SaveAgent(ctx context.Context, agent *AgentRecord) error {
 	agent.UpdatedAt = now
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO agents (id, user_id, name, config, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6)
+			`INSERT INTO agents (id, user_id, name, config, is_public, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)
 				ON CONFLICT (id) DO UPDATE
-				SET user_id=$2, name=$3, config=$4, updated_at=$6`,
-			agent.ID, agent.UserID, agent.Name, string(cfgData), agent.CreatedAt, agent.UpdatedAt)
+				SET user_id=$2, name=$3, config=$4, is_public=$5, updated_at=$7`,
+			agent.ID, agent.UserID, agent.Name, string(cfgData), agent.IsPublic, agent.CreatedAt, agent.UpdatedAt)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO agents (id, user_id, name, config, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO agents (id, user_id, name, config, is_public, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
 			  user_id=excluded.user_id, name=excluded.name,
-			  config=excluded.config, updated_at=excluded.updated_at`,
-		agent.ID, agent.UserID, agent.Name, string(cfgData), agent.CreatedAt, agent.UpdatedAt)
+			  config=excluded.config, is_public=excluded.is_public,
+			  updated_at=excluded.updated_at`,
+		agent.ID, agent.UserID, agent.Name, string(cfgData), agent.IsPublic, agent.CreatedAt, agent.UpdatedAt)
 	return err
 }
 
@@ -1135,7 +1182,7 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	for _, t := range []string{"agent_files", "sessions", "session_messages", "chat_events", "cron_jobs", "agent_grants"} {
+	for _, t := range []string{"agent_files", "sessions", "session_messages", "chat_events", "cron_jobs"} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s WHERE agent_id = %s`, t, d.ph(1)), agentID); err != nil {
 			return err
@@ -1166,93 +1213,12 @@ func (d *DBStore) ListAllAgents(ctx context.Context) ([]AgentRecord, error) {
 	return scanAgents(rows)
 }
 
-// --- Agent grants ---
-
-func (d *DBStore) GrantAgent(ctx context.Context, agentID, userID, grantedBy string) error {
-	if agentID == "" || userID == "" {
-		return errors.New("store: agentID and userID required")
-	}
-	now := time.Now().UTC()
-	if d.dialect == "postgres" {
-		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO agent_grants (agent_id, user_id, granted_by, granted_at)
-				VALUES ($1, $2, $3, $4)
-				ON CONFLICT (agent_id, user_id) DO UPDATE
-				SET granted_by = EXCLUDED.granted_by`,
-			agentID, userID, grantedBy, now)
-		return err
-	}
-	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO agent_grants (agent_id, user_id, granted_by, granted_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT (agent_id, user_id) DO UPDATE SET
-			  granted_by = excluded.granted_by`,
-		agentID, userID, grantedBy, now)
-	return err
-}
-
-func (d *DBStore) RevokeAgent(ctx context.Context, agentID, userID string) error {
-	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`DELETE FROM agent_grants WHERE agent_id = %s AND user_id = %s`,
-			d.ph(1), d.ph(2)),
-		agentID, userID)
-	return err
-}
-
-func (d *DBStore) ListAgentGrants(ctx context.Context, agentID string) ([]AgentGrantRecord, error) {
-	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT agent_id, user_id, granted_by, granted_at FROM agent_grants
-			WHERE agent_id = %s ORDER BY granted_at`, d.ph(1)),
-		agentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []AgentGrantRecord
-	for rows.Next() {
-		var g AgentGrantRecord
-		if err := rows.Scan(&g.AgentID, &g.UserID, &g.GrantedBy, &g.GrantedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, g)
-	}
-	return out, rows.Err()
-}
-
-// ListAgentsSharedWith returns every agent that has been granted to
-// userID (i.e., the user is a grantee, not the owner). Used by the
-// gateway's per-user space loader and the /api/agents listing handler
-// to surface "Shared with me" alongside owned agents.
-func (d *DBStore) ListAgentsSharedWith(ctx context.Context, userID string) ([]AgentRecord, error) {
-	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT a.id, a.user_id, a.name, a.config, a.created_at, a.updated_at
-			FROM agents a
-			JOIN agent_grants g ON g.agent_id = a.id
-			WHERE g.user_id = %s
-			ORDER BY g.granted_at`, d.ph(1)),
-		userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanAgents(rows)
-}
-
-func (d *DBStore) IsAgentGrantedTo(ctx context.Context, agentID, userID string) (bool, error) {
-	var n int
-	err := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT COUNT(*) FROM agent_grants WHERE agent_id = %s AND user_id = %s`,
-			d.ph(1), d.ph(2)),
-		agentID, userID).Scan(&n)
-	return n > 0, err
-}
-
 func scanAgents(rows *sql.Rows) ([]AgentRecord, error) {
 	var out []AgentRecord
 	for rows.Next() {
 		var ag AgentRecord
 		var cfgStr string
-		if err := rows.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
+		if err := rows.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(cfgStr), &ag.Config)

@@ -54,7 +54,7 @@ func adminCreateUserCmd() *cobra.Command {
 			if role == "" {
 				role = users.RoleUser
 			}
-			acct, err := accts.Create(context.Background(), username, email, password, displayName, role)
+			acct, err := accts.Create(context.Background(), username, email, password, displayName, role, nil)
 			if err != nil {
 				return err
 			}
@@ -119,7 +119,7 @@ func adminGrantRoleCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := accts.Update(context.Background(), rec.ID, "", role, ""); err != nil {
+			if _, err := accts.Update(context.Background(), rec.ID, "", role, "", nil); err != nil {
 				return err
 			}
 			fmt.Printf("role for %s set to %s\n", rec.Username, role)

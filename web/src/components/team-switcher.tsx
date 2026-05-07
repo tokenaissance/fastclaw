@@ -91,10 +91,17 @@ export function AgentSwitcher({
   agents,
   activeAgentId,
   onSelect,
+  locked = false,
 }: {
   agents: AgentSwitcherItem[];
   activeAgentId?: string | null;
   onSelect?: (id: string) => void;
+  // locked hides the dropdown trigger / agent list / "Manage agents"
+  // entirely — the header becomes a static label + avatar. Used when
+  // the caller isn't the owner of the active agent (public-link
+  // visitor / super_admin viewing someone else's agent), so they
+  // don't see a switcher full of agents that aren't actually theirs.
+  locked?: boolean;
 }) {
   const { isMobile } = useSidebar();
   const router = useRouter();
@@ -112,6 +119,21 @@ export function AgentSwitcher({
   );
 
   const headerLabel = active ? active.name || active.id : "FastClaw";
+
+  if (locked) {
+    return (
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton size="lg" className="cursor-default">
+            <AgentAvatar agentId={active?.id} size={32} />
+            <div className="grid flex-1 text-left text-sm leading-tight">
+              <span className="truncate font-medium">{headerLabel}</span>
+            </div>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      </SidebarMenu>
+    );
+  }
 
   return (
     <SidebarMenu>

@@ -223,7 +223,13 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
-        <AgentSwitcher agents={agents} activeAgentId={activeAgentId} />
+        <AgentSwitcher
+          agents={agents}
+          activeAgentId={activeAgentId}
+          locked={
+            !!activeAgentId && agentRoles[activeAgentId] === "viewer"
+          }
+        />
       </SidebarHeader>
       <SidebarContent>
         {activeAgentId ? (
@@ -233,7 +239,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
               activeAgentId,
               pathname,
               hasOpenSession,
-              agentRoles[activeAgentId] === "viewer",
+              // Fail closed: hide owner-only config tabs until role is
+              // confirmed === "owner". Loading state defaults to viewer
+              // so a non-owner public-link visitor never briefly sees
+              // Customize / Models / Skills / Channels / Scheduler.
+              agentRoles[activeAgentId] !== "owner",
             )}
           />
         ) : (

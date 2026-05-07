@@ -60,20 +60,6 @@ type Store interface {
 	DeleteAgent(ctx context.Context, agentID string) error
 	ListAllAgents(ctx context.Context) ([]AgentRecord, error)
 
-	// --- Agent grants (read-only sharing of an owner's agent with other users) ---
-	//
-	// A grant lets `user_id` load and chat with `agent_id` without
-	// owning it. Mutations (renaming, editing SOUL, channel binding,
-	// deletion) stay strictly with the agent owner. Per-(user, agent)
-	// state — sessions, cron_jobs, agent_files at user_id != owner —
-	// is keyed off the chatter's user_id, so each grantee gets their
-	// own private chat history and per-user file overlays.
-	GrantAgent(ctx context.Context, agentID, userID, grantedBy string) error
-	RevokeAgent(ctx context.Context, agentID, userID string) error
-	ListAgentGrants(ctx context.Context, agentID string) ([]AgentGrantRecord, error)
-	ListAgentsSharedWith(ctx context.Context, userID string) ([]AgentRecord, error)
-	IsAgentGrantedTo(ctx context.Context, agentID, userID string) (bool, error)
-
 	// --- Sessions (per user, per agent — chat history is private) ---
 	GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error)
 	SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error
@@ -185,9 +171,18 @@ type UserRecord struct {
 	// stored inline to avoid a separate blob path. Cap is enforced by the
 	// handler at write time (256KB by default). Empty means "no avatar"
 	// — UI falls back to initials.
-	AvatarURL string    `json:"avatarUrl,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	AvatarURL string `json:"avatarUrl,omitempty"`
+	// AgentQuota caps how many agents this user may self-create via
+	// POST /api/agents. Semantics:
+	//   -1 (default) — unlimited
+	//    0          — self-creation forbidden (e.g. single-tenant
+	//                 customers whose agent is provisioned by admin)
+	//    N > 0      — at most N owned agents at once
+	// Admin provisioning paths (POST /api/admin/users/{id}/agents)
+	// bypass this — quota only governs caller-initiated creation.
+	AgentQuota int64     `json:"agentQuota"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 // WebSessionRecord backs cookie-based login state.
@@ -225,23 +220,19 @@ type APIKeyRecord struct {
 // in configs as kind=setting, scope=agent, scope_id=<aid>, name=
 // "agents.defaults", which is the same path system + user defaults take.
 // Resolution happens in loadUserSpace via scope.SettingInto.
+// IsPublic flips the "anyone with the link can chat" gate. Default
+// false (private — owner-only). When true, requireAgentReadable +
+// resolveAgent let any authenticated session lazy-attach the agent
+// into their own UserSpace; sessions/memory/agent_files still
+// partition per chatter, so only the agent identity is shared.
 type AgentRecord struct {
 	ID        string                 `json:"id"`
 	UserID    string                 `json:"userId"`
 	Name      string                 `json:"name"`
 	Config    map[string]interface{} `json:"config,omitempty"`
+	IsPublic  bool                   `json:"isPublic"`
 	CreatedAt time.Time              `json:"createdAt"`
 	UpdatedAt time.Time              `json:"updatedAt"`
-}
-
-// AgentGrantRecord is one row of agent_grants — a single (agent, user)
-// share. GrantedBy is the user_id of whoever issued the grant (usually
-// the agent owner; super_admin can also issue grants on a foreign agent).
-type AgentGrantRecord struct {
-	AgentID   string    `json:"agentId"`
-	UserID    string    `json:"userId"`
-	GrantedBy string    `json:"grantedBy,omitempty"`
-	GrantedAt time.Time `json:"grantedAt"`
 }
 
 // SessionRecord holds a conversation session.

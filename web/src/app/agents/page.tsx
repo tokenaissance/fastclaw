@@ -25,7 +25,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, Plus, Trash2, ImagePlus, Pencil, Share2, X as XIcon } from "lucide-react";
+import { Bot, Plus, Trash2, ImagePlus, Pencil, Copy, Check } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import {
   adminListAgents,
   apiFetch,
@@ -34,11 +35,7 @@ import {
   createAgent,
   updateAgent,
   deleteAgent,
-  listAgentGrants,
-  createAgentGrant,
-  deleteAgentGrant,
   type AgentDetail,
-  type AgentGrant,
 } from "@/lib/api";
 
 interface OtherAgent {
@@ -91,20 +88,12 @@ export default function AgentsPage() {
   const [otherAgents, setOtherAgents] = useState<OtherAgent[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"own" | "shared" | "others">("own");
+  const [activeTab, setActiveTab] = useState<"own" | "others">("own");
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AgentDetail | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Share dialog state — owner-only management of who can chat with one
-  // of their agents. Non-owners never see the Share button.
-  const [shareTarget, setShareTarget] = useState<AgentDetail | null>(null);
-  const [shareGrants, setShareGrants] = useState<AgentGrant[]>([]);
-  const [shareLoading, setShareLoading] = useState(false);
-  const [shareIdentifier, setShareIdentifier] = useState("");
-  const [shareError, setShareError] = useState<string | null>(null);
-  const [shareSaving, setShareSaving] = useState(false);
   // Bumped after avatar upload so <img> re-fetches the new file.
   const [avatarBust, setAvatarBust] = useState<Record<string, number>>({});
 
@@ -119,9 +108,11 @@ export default function AgentsPage() {
   // Edit dialog state
   const [editName, setEditName] = useState("");
   const [editDescription, setEditDescription] = useState("");
+  const [editIsPublic, setEditIsPublic] = useState(false);
   const [editAvatar, setEditAvatar] = useState<File | null>(null);
   const [editAvatarPreview, setEditAvatarPreview] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  const [editLinkCopied, setEditLinkCopied] = useState(false);
   const editAvatarInput = useRef<HTMLInputElement>(null);
 
   const resetCreateForm = () => {
@@ -136,10 +127,12 @@ export default function AgentsPage() {
   const resetEditForm = () => {
     setEditName("");
     setEditDescription("");
+    setEditIsPublic(false);
     setEditAvatar(null);
     if (editAvatarPreview) URL.revokeObjectURL(editAvatarPreview);
     setEditAvatarPreview(null);
     setEditError(null);
+    setEditLinkCopied(false);
   };
 
   const openEdit = (agent: AgentDetail) => {
@@ -147,13 +140,14 @@ export default function AgentsPage() {
     setEditTarget(agent);
     setEditName(agent.name || "");
     setEditDescription(agent.description || "");
+    setEditIsPublic(!!agent.isPublic);
   };
 
   const fetchAgents = async () => {
     setLoading(true);
-    // /api/agents returns owned + shared with role flag. Split here so
-    // the rest of the page renders the two groups separately and only
-    // exposes Edit / Remove / Share on owned cards.
+    // /api/agents returns the caller's owned agents only. Public agents
+    // owned by other users surface as separate links — they don't auto-
+    // populate the dashboard list.
     const list = await getAgents().catch(() => [] as AgentDetail[]);
     setAgents(list);
     // Admins also see other users' agents (read-only) below their own.
@@ -173,59 +167,7 @@ export default function AgentsPage() {
     setLoading(false);
   };
 
-  const ownedAgents = agents.filter((a) => a.role !== "viewer");
-  const sharedAgents = agents.filter((a) => a.role === "viewer");
-
-  const openShareDialog = async (agent: AgentDetail) => {
-    setShareTarget(agent);
-    setShareGrants([]);
-    setShareIdentifier("");
-    setShareError(null);
-    setShareLoading(true);
-    try {
-      const grants = await listAgentGrants(agent.id);
-      setShareGrants(grants);
-    } catch {
-      setShareError("Failed to load existing shares");
-    } finally {
-      setShareLoading(false);
-    }
-  };
-
-  const closeShareDialog = () => {
-    setShareTarget(null);
-    setShareGrants([]);
-    setShareIdentifier("");
-    setShareError(null);
-  };
-
-  const handleAddGrant = async () => {
-    if (!shareTarget) return;
-    const id = shareIdentifier.trim();
-    if (!id) return;
-    setShareSaving(true);
-    setShareError(null);
-    const resp = await createAgentGrant(shareTarget.id, id);
-    if (!resp.ok) {
-      setShareError(resp.error || "Failed to add share");
-      setShareSaving(false);
-      return;
-    }
-    setShareIdentifier("");
-    try {
-      const grants = await listAgentGrants(shareTarget.id);
-      setShareGrants(grants);
-    } catch {
-      // non-fatal — leave existing list as-is
-    }
-    setShareSaving(false);
-  };
-
-  const handleRemoveGrant = async (granteeUserId: string) => {
-    if (!shareTarget) return;
-    await deleteAgentGrant(shareTarget.id, granteeUserId);
-    setShareGrants((rows) => rows.filter((g) => g.userId !== granteeUserId));
-  };
+  const ownedAgents = agents;
 
   useEffect(() => {
     fetchAgents();
@@ -272,6 +214,7 @@ export default function AgentsPage() {
     const resp = await updateAgent(editTarget.id, {
       name: editName.trim(),
       description: editDescription.trim(),
+      isPublic: editIsPublic,
     });
     if (resp && (resp.ok === false || resp.error)) {
       setEditError(resp.error || "Failed to update agent");
@@ -319,7 +262,7 @@ export default function AgentsPage() {
             <Skeleton key={i} className="h-48" />
           ))}
         </div>
-      ) : ownedAgents.length === 0 && sharedAgents.length === 0 && otherAgents.length === 0 ? (
+      ) : ownedAgents.length === 0 && otherAgents.length === 0 ? (
         <div className="rounded-lg border border-border bg-card">
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
@@ -337,7 +280,7 @@ export default function AgentsPage() {
         </div>
       ) : (
         <>
-        {(sharedAgents.length > 0 || (isAdmin && otherAgents.length > 0)) && (
+        {isAdmin && otherAgents.length > 0 && (
           <div className="flex gap-1 border-b border-border overflow-x-auto">
             <button
               onClick={() => setActiveTab("own")}
@@ -352,39 +295,22 @@ export default function AgentsPage() {
                 {ownedAgents.length}
               </span>
             </button>
-            {sharedAgents.length > 0 && (
-              <button
-                onClick={() => setActiveTab("shared")}
-                className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
-                  activeTab === "shared"
-                    ? "border-primary text-primary"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                Shared with me
-                <span className="ml-1.5 text-xs text-muted-foreground/70">
-                  {sharedAgents.length}
-                </span>
-              </button>
-            )}
-            {isAdmin && otherAgents.length > 0 && (
-              <button
-                onClick={() => setActiveTab("others")}
-                className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
-                  activeTab === "others"
-                    ? "border-primary text-primary"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                Others&apos; agents
-                <span className="ml-1.5 text-xs text-muted-foreground/70">
-                  {otherAgents.length}
-                </span>
-              </button>
-            )}
+            <button
+              onClick={() => setActiveTab("others")}
+              className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+                activeTab === "others"
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Others&apos; agents
+              <span className="ml-1.5 text-xs text-muted-foreground/70">
+                {otherAgents.length}
+              </span>
+            </button>
           </div>
         )}
-        {(activeTab === "own" || (sharedAgents.length === 0 && !(isAdmin && otherAgents.length > 0))) && ownedAgents.length > 0 && (
+        {(activeTab === "own" || !(isAdmin && otherAgents.length > 0)) && ownedAgents.length > 0 && (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {ownedAgents.map((agent) => (
             <div
@@ -394,13 +320,22 @@ export default function AgentsPage() {
             >
               <div className="flex items-start justify-between mb-4">
                 <AgentAvatar agent={agent} bust={avatarBust[agent.id]} size={48} />
-                <Badge
-                  variant="outline"
-                  className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                >
-                  <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                  Active
-                </Badge>
+                {agent.isPublic ? (
+                  <Badge
+                    variant="outline"
+                    className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                  >
+                    <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    Public
+                  </Badge>
+                ) : (
+                  <Badge
+                    variant="outline"
+                    className="bg-muted/60 text-muted-foreground"
+                  >
+                    Private
+                  </Badge>
+                )}
               </div>
               <p className="text-base font-medium mb-1 truncate">{agent.name || agent.id}</p>
               <p
@@ -434,18 +369,6 @@ export default function AgentsPage() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-8 text-xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openShareDialog(agent);
-                  }}
-                >
-                  <Share2 className="h-3 w-3 mr-1.5" />
-                  Share
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
                   className="h-8 text-xs text-destructive hover:text-destructive"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -459,48 +382,6 @@ export default function AgentsPage() {
             </div>
           ))}
         </div>
-        )}
-
-        {activeTab === "shared" && sharedAgents.length > 0 && (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {sharedAgents.map((agent) => (
-              <div
-                key={agent.id}
-                className="group flex h-full flex-col rounded-lg border border-border bg-card p-5 transition-colors hover:bg-muted/50 cursor-pointer"
-                onClick={() => (window.location.href = `/agents/${agent.id}/chat/`)}
-              >
-                <div className="flex items-start justify-between mb-4">
-                  <AgentAvatar agent={agent} bust={avatarBust[agent.id]} size={48} />
-                  <Badge
-                    variant="outline"
-                    className="bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20"
-                  >
-                    Shared with you
-                  </Badge>
-                </div>
-                <p className="text-base font-medium mb-1 truncate">
-                  {agent.name || agent.id}
-                </p>
-                <p
-                  className={`font-mono text-xs text-muted-foreground truncate ${
-                    agent.description ? "" : "mb-3"
-                  }`}
-                >
-                  {agent.id}
-                </p>
-                {agent.description && (
-                  <p className="mt-2 mb-3 text-sm text-muted-foreground line-clamp-2">
-                    {agent.description}
-                  </p>
-                )}
-                <div className="mt-auto pt-3 border-t border-border">
-                  <p className="text-xs text-muted-foreground">
-                    Click to chat — only the owner can edit this agent.
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
         )}
 
         {isAdmin && otherAgents.length > 0 && activeTab === "others" && (
@@ -704,6 +585,74 @@ export default function AgentsPage() {
                 rows={3}
               />
             </div>
+
+            {/* Public/Private toggle. Off (default) = owner-only.
+                On = anyone with the chat URL can chat under their own
+                account; sessions/memory partition per chatter. */}
+            <div className="space-y-3 rounded-lg border border-border p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <Label htmlFor="agent-edit-public" className="text-sm font-medium">
+                    Public access
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {editIsPublic
+                      ? "Anyone with the link can chat. Their history stays private to them."
+                      : "Only you can use this agent."}
+                  </p>
+                </div>
+                <Switch
+                  id="agent-edit-public"
+                  checked={editIsPublic}
+                  onCheckedChange={(v) => {
+                    setEditIsPublic(!!v);
+                    setEditLinkCopied(false);
+                  }}
+                />
+              </div>
+              {editIsPublic && editTarget && (
+                <div className="flex gap-2">
+                  <Input
+                    readOnly
+                    value={
+                      typeof window !== "undefined"
+                        ? `${window.location.origin}/agents/${editTarget.id}/chat/`
+                        : `/agents/${editTarget.id}/chat/`
+                    }
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={async () => {
+                      if (!editTarget) return;
+                      const url = `${window.location.origin}/agents/${editTarget.id}/chat/`;
+                      try {
+                        await navigator.clipboard.writeText(url);
+                        setEditLinkCopied(true);
+                        setTimeout(() => setEditLinkCopied(false), 2000);
+                      } catch {
+                        // clipboard blocked — user can still select the input
+                      }
+                    }}
+                  >
+                    {editLinkCopied ? (
+                      <>
+                        <Check className="h-4 w-4 mr-1.5" />
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-4 w-4 mr-1.5" />
+                        Copy
+                      </>
+                    )}
+                  </Button>
+                </div>
+              )}
+            </div>
+
             {editError && <p className="text-sm text-destructive">{editError}</p>}
           </div>
           <DialogFooter>
@@ -739,103 +688,6 @@ export default function AgentsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Share dialog */}
-      <Dialog
-        open={!!shareTarget}
-        onOpenChange={(v) => {
-          if (!v) closeShareDialog();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              Share &ldquo;{shareTarget?.name || shareTarget?.id}&rdquo;
-            </DialogTitle>
-            <DialogDescription>
-              Anyone you share with can chat with this agent under their own
-              account. They can&apos;t edit the agent, its skills, channels, or
-              schedule. Their conversation history stays private to them.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4 py-2">
-            <div className="space-y-2">
-              <Label htmlFor="share-identifier">Add by email or username</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="share-identifier"
-                  placeholder="alice@example.com"
-                  value={shareIdentifier}
-                  onChange={(e) => {
-                    setShareIdentifier(e.target.value);
-                    setShareError(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !shareSaving) {
-                      e.preventDefault();
-                      handleAddGrant();
-                    }
-                  }}
-                />
-                <Button
-                  onClick={handleAddGrant}
-                  disabled={shareSaving || !shareIdentifier.trim()}
-                >
-                  {shareSaving ? "Adding…" : "Add"}
-                </Button>
-              </div>
-              {shareError && (
-                <p className="text-xs text-destructive">{shareError}</p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-xs uppercase tracking-wide text-muted-foreground">
-                People with access
-              </Label>
-              {shareLoading ? (
-                <Skeleton className="h-12" />
-              ) : shareGrants.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  Not shared with anyone yet.
-                </p>
-              ) : (
-                <ul className="divide-y divide-border rounded-md border border-border">
-                  {shareGrants.map((g) => (
-                    <li
-                      key={g.userId}
-                      className="flex items-center justify-between px-3 py-2"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">
-                          {g.displayName || g.username || g.email || g.userId}
-                        </p>
-                        <p className="font-mono text-xs text-muted-foreground truncate">
-                          {g.email || g.username || g.userId}
-                        </p>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-destructive hover:text-destructive"
-                        onClick={() => handleRemoveGrant(g.userId)}
-                      >
-                        <XIcon className="h-4 w-4" />
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={closeShareDialog}>
-              Done
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

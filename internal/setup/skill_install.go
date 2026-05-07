@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
@@ -54,9 +53,10 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Agent != "" {
-		ident, ok := auth.FromContext(r.Context())
-		if !ok || !ident.CanAccessAgent(req.Agent) {
-			jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
+		// Owner-only — Identity.CanAccessAgent is a deferred-true for
+		// session callers, so without an explicit owner check anyone
+		// could push a skill into anyone else's agent home dir.
+		if s.requireAgentOwner(w, r, req.Agent) == nil {
 			return
 		}
 	}
@@ -206,9 +206,8 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 
 	agentID := r.URL.Query().Get("agent")
 	if agentID != "" {
-		ident, ok := auth.FromContext(r.Context())
-		if !ok || !ident.CanAccessAgent(agentID) {
-			jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "forbidden"})
+		// Owner-only — see comment on the JSON-install path above.
+		if s.requireAgentOwner(w, r, agentID) == nil {
 			return
 		}
 	}

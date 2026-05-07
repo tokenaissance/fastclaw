@@ -74,6 +74,13 @@ Click an agent to enter its management panel:
 - **Scheduler** — Inspect and manage cron jobs the agent created via `create_cron_job` ("每天 9 点提醒我", "5 分钟后叫我"); pause / delete from the UI
 - **Sessions** — Conversation history
 
+**Sharing.** Each agent has a `Public access` toggle in the Edit dialog
+(default off). When on, anyone with the chat URL — `/agents/{id}/chat/`
+— can chat with the agent under their own account; sessions / memory /
+USER.md partition per chatter, while SOUL / IDENTITY / skills are
+shared from the owner's row. When off, only the owner (or super_admin)
+can access it.
+
 ## Architecture
 
 ```
@@ -138,11 +145,19 @@ table and is edited through the dashboard or `fastclaw agents config`.
 - Web chat `/api/chat/stream` (SSE)
 - Live agent push via `/api/chat/subscribe` (SSE) — surfaces cron-fired and other async replies into the open chat panel without a refresh
 - Session management `/api/chat/sessions`
-- Agent CRUD `/api/agents`
+- Agent CRUD `/api/agents` (`?all=true` returns the cross-tenant view, admin-only)
 - Per-agent scheduler `/api/agents/{id}/cron` (list / toggle / delete)
 - Provider management `/api/config`
 - Skill install `/api/skills/install` (ClawHub + GitHub)
 - API key management `/api/apikeys` (per-user; tiers: admin / user / agent)
+- User management `/api/users` (admin) — top-level CRUD + nested
+  `/api/users/{id}/apikeys` and `/api/users/{id}/agents` for
+  admin-driven provisioning. The `agents` endpoint accepts
+  `forkFrom` to clone an existing agent's identity (SOUL / IDENTITY /
+  skills / model defaults) into the new user's namespace — primary
+  building block for "user buys a bot" flows. Per-user `agent_quota`
+  caps how many agents a non-admin can self-create
+  (`-1` = unlimited, `0` = admin-provisioned only).
 - App-user provisioning `POST /v1/users` — third-party apps mint a stable fastclaw user_id per end-user, idempotent on `(api_key, external_id)`. Or pass `user` on `/v1/chat/completions` (or `X-Fastclaw-End-User` header) for lazy mint on first call
 
 ## Configuration

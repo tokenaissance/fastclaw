@@ -431,65 +431,16 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
 
-	// Agents that other users have shared with this user. These get
-	// loaded into the same agent.Manager so the chat / sessions paths
-	// find them under space.Agents.AgentByID, but they participate in
-	// fewer of the per-user fan-outs below: their channel bindings stay
-	// owner-scoped (otherwise multiple grantees would clobber each
-	// other on the owner's IM bot), and the per-(user, agent)
-	// agent_files writes the chatter's MEMORY into their own row while
-	// SOUL/IDENTITY fall back to the owner's row.
-	sharedRecords, err := st.ListAgentsSharedWith(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("list shared agents: %w", err)
-	}
-	// De-dup: a user shouldn't appear as both owner and grantee, but
-	// guard against future migrations / manual rows.
-	owned := make(map[string]struct{}, len(agentRecords))
-	for _, ar := range agentRecords {
-		owned[ar.ID] = struct{}{}
-	}
-	dedupedShared := sharedRecords[:0]
-	for _, ar := range sharedRecords {
-		if _, dup := owned[ar.ID]; dup {
-			continue
-		}
-		dedupedShared = append(dedupedShared, ar)
-	}
-	sharedRecords = dedupedShared
+	// Public agents owned by other users are NOT loaded eagerly here —
+	// they get lazy-attached via UserSpace.EnsureAgent the first time
+	// the chatter hits the public-agent chat URL (see resolveAgent).
+	// Sessions / memory / agent_files stay keyed by the chatter's
+	// user_id so each visitor gets a private history while the
+	// agent identity (SOUL/IDENTITY/skills) is shared from the
+	// owner's row.
 
-	// Pull each shared agent's own agent-scope skills.entries so its
-	// owner-installed skill env (e.g. REPLICATE_API_TOKEN for the
-	// image-tool skill) is honored when this grantee triggers it.
-	// Only the agent-scope row is included — the owner's user-scope
-	// skill env stays private.
-	if len(sharedRecords) > 0 {
-		if cfg.Skills.AgentEntries == nil {
-			cfg.Skills.AgentEntries = map[string]map[string]config.SkillEntryCfg{}
-		}
-		for _, ar := range sharedRecords {
-			rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, ar.ID, "skills.entries")
-			if err != nil || rec == nil || len(rec.Data) == 0 {
-				continue
-			}
-			blob, _ := json.Marshal(rec.Data)
-			var entries map[string]config.SkillEntryCfg
-			if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
-				cfg.Skills.AgentEntries[ar.ID] = entries
-			}
-		}
-	}
-
-	entries := make([]config.AgentEntry, 0, len(agentRecords)+len(sharedRecords))
+	entries := make([]config.AgentEntry, 0, len(agentRecords))
 	for _, ar := range agentRecords {
-		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID})
-	}
-	for _, ar := range sharedRecords {
-		// UserID is the OWNER's id — that's what ResolvedAgent.UserID
-		// represents (agent identity, not chatter identity). Sessions
-		// and memory keyed by the chatter's user_id are wired through
-		// the session/memory store adapters at manager scope, not via
-		// ResolvedAgent.UserID.
 		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID})
 	}
 

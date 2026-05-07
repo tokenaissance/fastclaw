@@ -155,7 +155,7 @@ func TestInitRejectsRebindToOtherUser(t *testing.T) {
 
 	// Manually create bob.
 	accts, _ := users.NewAccounts(st)
-	if _, err := accts.Create(context.Background(), "bob", "bob@local", "secret-bob", "Bob", users.RoleUser); err != nil {
+	if _, err := accts.Create(context.Background(), "bob", "bob@local", "secret-bob", "Bob", users.RoleUser, nil); err != nil {
 		t.Fatalf("create bob: %v", err)
 	}
 
@@ -350,11 +350,11 @@ func TestResolveByNameAndID(t *testing.T) {
 
 	r1, err := Resolve(context.Background(), st, "alpha")
 	if err != nil || r1.ID != res.Agent.ID {
-		t.Fatalf("resolve by name: %v / %s", err, r1)
+		t.Fatalf("resolve by name: %v / %+v", err, r1)
 	}
 	r2, err := Resolve(context.Background(), st, res.Agent.ID)
 	if err != nil || r2.ID != res.Agent.ID {
-		t.Fatalf("resolve by id: %v / %s", err, r2)
+		t.Fatalf("resolve by id: %v / %+v", err, r2)
 	}
 	if _, err := Resolve(context.Background(), st, "missing"); err == nil {
 		t.Fatal("expected error resolving missing")

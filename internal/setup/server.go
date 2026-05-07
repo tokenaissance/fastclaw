@@ -231,11 +231,6 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
 
-	// Agent sharing: owner-only grants table.
-	mux.HandleFunc("GET /api/agents/{id}/grants", auth(s.handleListAgentGrants))
-	mux.HandleFunc("POST /api/agents/{id}/grants", auth(s.handleCreateAgentGrant))
-	mux.HandleFunc("DELETE /api/agents/{id}/grants/{userId}", auth(s.handleDeleteAgentGrant))
-
 	mux.HandleFunc("GET /api/agents/{id}/system-files/{name}", auth(s.handleGetAgentSystemFile))
 	mux.HandleFunc("PUT /api/agents/{id}/system-files/{name}", auth(s.handlePutAgentSystemFile))
 	mux.HandleFunc("DELETE /api/agents/{id}/system-files/{name}", auth(s.handleDeleteAgentSystemFile))
@@ -318,14 +313,20 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/apikeys/{id}/rotate", auth(s.handleRotateAPIKey))
 	mux.HandleFunc("PUT /api/apikeys/{id}/agents", auth(s.handleSetAPIKeyAgents))
 
-	// Admin: user management (super_admin only).
-	mux.HandleFunc("GET /api/admin/users", admin(s.handleAdminListUsers))
-	mux.HandleFunc("POST /api/admin/users", admin(s.handleAdminCreateUser))
-	mux.HandleFunc("PUT /api/admin/users/{id}", admin(s.handleAdminUpdateUser))
-	mux.HandleFunc("DELETE /api/admin/users/{id}", admin(s.handleAdminDeleteUser))
-	mux.HandleFunc("POST /api/admin/users/{id}/password", admin(s.handleAdminResetPassword))
-	mux.HandleFunc("GET /api/admin/agents", admin(s.handleAdminListAgents))
-	mux.HandleFunc("GET /api/admin/usage", admin(s.handleGetUsage))
+	// Users — flat resource paths. Top-level CRUD is admin-only;
+	// nested {id}/apikeys + {id}/agents accept admin-or-self
+	// (gated in-handler via requireUserOrAdmin).
+	mux.HandleFunc("GET /api/users", admin(s.handleListUsers))
+	mux.HandleFunc("POST /api/users", admin(s.handleCreateUser))
+	mux.HandleFunc("PUT /api/users/{id}", admin(s.handleUpdateUser))
+	mux.HandleFunc("DELETE /api/users/{id}", admin(s.handleDeleteUser))
+	mux.HandleFunc("POST /api/users/{id}/password", admin(s.handleResetUserPassword))
+	mux.HandleFunc("POST /api/users/{id}/apikeys", auth(s.handleCreateUserAPIKey))
+	mux.HandleFunc("GET /api/users/{id}/agents", auth(s.handleListUserAgents))
+	mux.HandleFunc("POST /api/users/{id}/agents", auth(s.handleCreateUserAgent))
+	// Cross-tenant agent list moved into /api/agents?all=true (admin-only
+	// when the param is set). /api/usage replaces /api/admin/usage.
+	mux.HandleFunc("GET /api/usage", admin(s.handleGetUsage))
 
 	// OpenAI-compatible API and WebSocket gateway.
 	if s.apiServer != nil {

@@ -3,6 +3,7 @@ package setup
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -214,7 +215,7 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "username, email, password required"})
 		return
 	}
-	acct, err := s.accounts.Create(r.Context(), req.Username, req.Email, req.Password, req.DisplayName, users.RoleSuperAdmin)
+	acct, err := s.accounts.Create(r.Context(), req.Username, req.Email, req.Password, req.DisplayName, users.RoleSuperAdmin, nil)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -291,7 +292,7 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 
 // --- Admin: user management ---
 
-func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	list, err := s.accounts.List(r.Context())
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -320,9 +321,12 @@ type createUserReq struct {
 	Password    string `json:"password"`
 	DisplayName string `json:"displayName,omitempty"`
 	Role        string `json:"role,omitempty"`
+	// AgentQuota is a pointer so the admin can distinguish "unset →
+	// use the default unlimited" from "explicitly 0 → no self-creation".
+	AgentQuota *int64 `json:"agentQuota,omitempty"`
 }
 
-func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req createUserReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
@@ -332,7 +336,7 @@ func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = users.RoleUser
 	}
-	acct, err := s.accounts.Create(r.Context(), req.Username, req.Email, req.Password, req.DisplayName, role)
+	acct, err := s.accounts.Create(r.Context(), req.Username, req.Email, req.Password, req.DisplayName, role, req.AgentQuota)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -344,16 +348,17 @@ type updateUserReq struct {
 	DisplayName string `json:"displayName,omitempty"`
 	Role        string `json:"role,omitempty"`
 	Status      string `json:"status,omitempty"`
+	AgentQuota  *int64 `json:"agentQuota,omitempty"`
 }
 
-func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req updateUserReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid request"})
 		return
 	}
-	acct, err := s.accounts.Update(r.Context(), id, req.DisplayName, req.Role, req.Status)
+	acct, err := s.accounts.Update(r.Context(), id, req.DisplayName, req.Role, req.Status, req.AgentQuota)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -361,7 +366,7 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"user": acct})
 }
 
-func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.accounts.Delete(r.Context(), id); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -374,7 +379,7 @@ type resetPasswordReq struct {
 	Password string `json:"password"`
 }
 
-func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req resetPasswordReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -388,11 +393,11 @@ func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleAdminListAgents returns every agent across every user, with
-// the owner's username/email joined in for the admin "Agents" view.
-// Scoped variants (handleListAgents) stay tenant-isolated; this one is
-// gated behind requireSuperAdmin in the router.
-func (s *Server) handleAdminListAgents(w http.ResponseWriter, r *http.Request) {
+// respondAllAgents returns every agent across every user, with the
+// owner's username/email joined in. Backs GET /api/agents?all=true for
+// the platform-wide admin view; the auth gate lives in handleListAgents
+// (which calls this only after CanAdminPlatform passes).
+func (s *Server) respondAllAgents(w http.ResponseWriter, r *http.Request) {
 	if s.dataStore == nil {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})
 		return
@@ -437,6 +442,321 @@ func (s *Server) handleAdminListAgents(w http.ResponseWriter, r *http.Request) {
 		out = append(out, entry)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
+}
+
+// --- Admin provisioning (per-user) ---
+//
+// The handlers below all live under /api/users/{id}/* — admin-or-self
+// per requireUserOrAdmin. The admin path bypasses the target user's
+// agent_quota (call initiated by the platform); the self path enforces
+// it. Quota / fork semantics live inside the relevant handler.
+
+// handleListUserAgents returns the agents owned by the path-resolved
+// user. Admin-or-self via requireUserOrAdmin (admin can list any
+// user's; non-admin can only list their own). Same response shape as
+// the regular agents list so admin tools can reuse rendering.
+func (s *Server) handleListUserAgents(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("id")
+	if !s.requireUserOrAdmin(w, r, uid) {
+		return
+	}
+	if _, err := s.dataStore.GetUser(r.Context(), uid); err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "user not found"})
+		return
+	}
+	records, err := s.dataStore.ListAgents(r.Context(), uid)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(records))
+	for _, ar := range records {
+		desc, _ := ar.Config["description"].(string)
+		out = append(out, map[string]any{
+			"id":          ar.ID,
+			"name":        ar.Name,
+			"description": desc,
+			"userId":      ar.UserID,
+			"isPublic":    ar.IsPublic,
+			"createdAt":   ar.CreatedAt,
+		})
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
+}
+
+type adminCreateUserAgentReq struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Model       string `json:"model,omitempty"`
+	// ForkFrom is an optional source agent id. When set, the new agent
+	// inherits SOUL.md / IDENTITY.md / AGENTS.md / BOOTSTRAP.md /
+	// TOOLS.md / HEARTBEAT.md / agent.json from the source's owner-row,
+	// plus the source's agent-scope `agents.defaults` and
+	// `skills.entries` config rows. Per-user state (MEMORY.md, USER.md,
+	// sessions, cron_jobs) and per-owner routing (channel bindings)
+	// are deliberately NOT copied. Fork sources can be any agent the
+	// caller (super_admin) can read.
+	ForkFrom string `json:"forkFrom,omitempty"`
+}
+
+// handleCreateUserAgent creates an agent owned by the path-resolved
+// user. Behavior depends on caller:
+//   - admin (super_admin / type=admin apikey) → bypass the target's
+//     agent_quota; forkFrom is honored (clones an existing agent's
+//     identity into the new one).
+//   - self (target user calling for themselves) → enforce their own
+//     agent_quota; forkFrom is ignored to avoid letting users clone
+//     other people's private agents into their namespace through this
+//     path.
+//
+// The created agent is always private; flip via the regular
+// PUT /api/agents/{id} flow.
+func (s *Server) handleCreateUserAgent(w http.ResponseWriter, r *http.Request) {
+	targetUserID := r.PathValue("id")
+	if !s.requireUserOrAdmin(w, r, targetUserID) {
+		return
+	}
+	if !s.requireWritable(w, r) {
+		return
+	}
+	target, err := s.dataStore.GetUser(r.Context(), targetUserID)
+	if err != nil || target == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "user not found"})
+		return
+	}
+	ident, _ := auth.FromContext(r.Context())
+	isAdmin := ident.CanAdminPlatform()
+
+	var req adminCreateUserAgentReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// Quota only applies on the self path. Admin provisioning is
+	// initiated by the platform and intentionally bypasses it.
+	if !isAdmin && target.AgentQuota >= 0 {
+		owned, err := s.dataStore.ListAgents(r.Context(), targetUserID)
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if int64(len(owned)) >= target.AgentQuota {
+			jsonResponse(w, http.StatusForbidden, map[string]any{
+				"error": fmt.Sprintf("agent quota reached (%d) — contact your admin to provision more", target.AgentQuota),
+			})
+			return
+		}
+	}
+
+	var source *store.AgentRecord
+	if isAdmin && strings.TrimSpace(req.ForkFrom) != "" {
+		source, err = s.dataStore.GetAgent(r.Context(), req.ForkFrom)
+		if err != nil || source == nil {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "forkFrom: source agent not found"})
+			return
+		}
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" && source != nil {
+		name = source.Name
+	}
+	if name == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "name required"})
+		return
+	}
+	description := req.Description
+	if description == "" && source != nil {
+		if d, ok := source.Config["description"].(string); ok {
+			description = d
+		}
+	}
+
+	id, err := generateID("agt_")
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	rec := &store.AgentRecord{
+		ID:     id,
+		UserID: targetUserID,
+		Name:   name,
+	}
+	if description != "" {
+		rec.Config = map[string]interface{}{"description": description}
+	}
+	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	model := req.Model
+	if model == "" && source != nil {
+		model = s.agentScopeModel(r, source.ID)
+	}
+	if model != "" {
+		if err := s.saveAgentScopeModel(r, id, model); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "save model: " + err.Error()})
+			return
+		}
+	}
+
+	// Fork content: identity files + agent-scope configs.
+	if source != nil {
+		if err := s.forkAgentContent(r, source, rec); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": "fork content: " + err.Error()})
+			return
+		}
+	}
+
+	s.invalidateUser(targetUserID)
+	jsonResponse(w, http.StatusCreated, map[string]any{
+		"agent": map[string]any{
+			"id":          rec.ID,
+			"userId":      rec.UserID,
+			"name":        rec.Name,
+			"description": description,
+			"model":       model,
+			"isPublic":    rec.IsPublic,
+		},
+	})
+}
+
+// forkAgentFiles is the allowlist of files copied during fork. These
+// are the agent's identity (what it IS / does); per-user state
+// (MEMORY.md, USER.md) is intentionally omitted so each chatter starts
+// fresh on the new agent.
+var forkAgentFiles = []string{
+	"SOUL.md", "IDENTITY.md", "AGENTS.md",
+	"BOOTSTRAP.md", "TOOLS.md", "HEARTBEAT.md", "agent.json",
+}
+
+// forkAgentScopeConfigs is the allowlist of agent-scope config rows
+// copied during fork. Bindings are deliberately excluded — they encode
+// the source owner's IM routing (bot tokens, chat ids) and would be
+// nonsensical on the new agent under a different owner.
+var forkAgentScopeConfigs = map[string]bool{
+	"agents.defaults": true,
+	"skills.entries":  true,
+}
+
+// forkAgentContent copies the source agent's owner-row identity files
+// and agent-scope configs into the destination agent. Best-effort per
+// file: a missing source file is skipped silently (the destination
+// just has no override for it, which the runtime handles via the
+// usual fallback paths).
+func (s *Server) forkAgentContent(r *http.Request, src, dst *store.AgentRecord) error {
+	for _, name := range forkAgentFiles {
+		data, err := s.dataStore.GetAgentFileExact(r.Context(), src.ID, src.UserID, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return err
+		}
+		if len(data) == 0 {
+			continue
+		}
+		if err := s.dataStore.SaveAgentFile(r.Context(), dst.ID, dst.UserID, name, data); err != nil {
+			return err
+		}
+	}
+	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindSetting, store.ScopeAgent, src.ID)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if !forkAgentScopeConfigs[row.Name] {
+			continue
+		}
+		if err := scope.SaveSetting(r.Context(), s.dataStore, scope.Agent, dst.ID, row.Name, row.Data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handleCreateUserAPIKey issues an apikey owned by the path-resolved
+// user. Admin-or-self via requireUserOrAdmin:
+//   - admin caller may issue user/agent keys for any user
+//   - non-admin caller may issue keys only for themselves (id == self)
+//
+// type=admin is always rejected through this path — admin keys grant
+// platform-wide rights and shouldn't be auto-provisioned for a target
+// user; admin who needs an admin key issues one for themselves via
+// POST /api/users/{self}/apikeys (which becomes self-create and the
+// route still requires admin caller anyway).
+func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) {
+	targetUserID := r.PathValue("id")
+	if !s.requireUserOrAdmin(w, r, targetUserID) {
+		return
+	}
+	if !s.requireWritable(w, r) {
+		return
+	}
+	target, err := s.dataStore.GetUser(r.Context(), targetUserID)
+	if err != nil || target == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "user not found"})
+		return
+	}
+	if target.Role == users.RoleAppUser {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "app_user cannot hold api keys"})
+		return
+	}
+	ident, _ := auth.FromContext(r.Context())
+	isAdmin := ident.CanAdminPlatform()
+
+	var req createAPIKeyReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid request"})
+		return
+	}
+	if req.Type == "" {
+		req.Type = users.APIKeyTypeUser
+	}
+	if !users.IsAPIKeyType(req.Type) {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid type"})
+		return
+	}
+	if req.Type == users.APIKeyTypeAdmin {
+		// Admin keys are never minted via this path — they could only
+		// originate via super_admin doing POST /api/users/{self}/apikeys
+		// for themselves, which would still bypass intent ("here's a
+		// platform key for that other user"). If a super_admin needs a
+		// fresh admin key for themselves, they self-issue from the
+		// settings UI; we don't expose a programmatic admin-key mint.
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "admin keys cannot be issued through this path"})
+		return
+	}
+	if req.Type == users.APIKeyTypeAgent {
+		if len(req.AgentIDs) == 0 {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "type=agent requires at least one agentId"})
+			return
+		}
+		for _, aid := range req.AgentIDs {
+			rec, err := s.dataStore.GetAgent(r.Context(), aid)
+			if err != nil || rec == nil {
+				jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agent not found: " + aid})
+				return
+			}
+			// Self caller: must own each agent.
+			// Admin caller: target must own each agent (admin can't
+			// bind random user A's agent into user B's apikey).
+			if rec.UserID != targetUserID {
+				jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "cannot bind agent " + aid + " — not owned by target user"})
+				return
+			}
+		}
+	}
+	_ = isAdmin // currently no admin-only branches inside; kept for future toggles
+	ak, token, err := s.apikeys.Create(r.Context(), targetUserID, req.Name, req.Type, req.AgentIDs)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	ak.Key = token
+	jsonResponse(w, http.StatusCreated, map[string]any{"apikey": ak, "token": token})
 }
 
 // --- Apikey CRUD (per-user) ---

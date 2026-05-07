@@ -57,6 +57,7 @@ type Account struct {
 	APIKeyID    string    `json:"apikeyId,omitempty"`
 	ExternalID  string    `json:"externalId,omitempty"`
 	AvatarURL   string    `json:"avatarUrl,omitempty"`
+	AgentQuota  int64     `json:"agentQuota"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
@@ -82,8 +83,13 @@ func (a *Accounts) Count(ctx context.Context) (int, error) {
 }
 
 // Create writes a new account. Password is hashed with bcrypt; plaintext
-// is never persisted. ID is generated when empty.
-func (a *Accounts) Create(ctx context.Context, username, email, password, displayName, role string) (*Account, error) {
+// is never persisted. ID is generated when empty. agentQuota:
+//   *value < 0 — unlimited (the platform default for self-registered users)
+//   *value = 0 — caller cannot self-create agents (admin provisions only)
+//   *value > 0 — caller can hold up to N owned agents
+//
+// Pass nil to use the unlimited default.
+func (a *Accounts) Create(ctx context.Context, username, email, password, displayName, role string, agentQuota *int64) (*Account, error) {
 	username = strings.TrimSpace(username)
 	email = strings.ToLower(strings.TrimSpace(email))
 	if username == "" || email == "" || password == "" {
@@ -103,6 +109,10 @@ func (a *Accounts) Create(ctx context.Context, username, email, password, displa
 	if err != nil {
 		return nil, err
 	}
+	quota := int64(-1)
+	if agentQuota != nil {
+		quota = *agentQuota
+	}
 	rec := &store.UserRecord{
 		ID:           id,
 		Username:     username,
@@ -111,6 +121,7 @@ func (a *Accounts) Create(ctx context.Context, username, email, password, displa
 		DisplayName:  displayName,
 		Role:         role,
 		Status:       StatusActive,
+		AgentQuota:   quota,
 	}
 	if err := a.store.CreateUser(ctx, rec); err != nil {
 		return nil, err
@@ -177,7 +188,7 @@ func (a *Accounts) List(ctx context.Context) ([]*Account, error) {
 
 // Update applies non-credential changes (display name, role, status). Use
 // SetPassword for password rotation.
-func (a *Accounts) Update(ctx context.Context, id, displayName, role, status string) (*Account, error) {
+func (a *Accounts) Update(ctx context.Context, id, displayName, role, status string, agentQuota *int64) (*Account, error) {
 	rec, err := a.store.GetUser(ctx, id)
 	if err != nil {
 		return nil, err
@@ -196,6 +207,9 @@ func (a *Accounts) Update(ctx context.Context, id, displayName, role, status str
 			return nil, errors.New("users.Update: invalid status")
 		}
 		rec.Status = status
+	}
+	if agentQuota != nil {
+		rec.AgentQuota = *agentQuota
 	}
 	if err := a.store.UpdateUser(ctx, rec); err != nil {
 		return nil, err
@@ -294,6 +308,7 @@ func (a *Accounts) EnsureAppUser(ctx context.Context, apikeyID, externalID, disp
 		Status:       StatusActive,
 		APIKeyID:     apikeyID,
 		ExternalID:   externalID,
+		AgentQuota:   -1,
 	}
 	if err := a.store.CreateUser(ctx, rec); err != nil {
 		// Race: another concurrent request minted the same pair
@@ -348,6 +363,7 @@ func toAccount(r *store.UserRecord) *Account {
 		APIKeyID:    r.APIKeyID,
 		ExternalID:  r.ExternalID,
 		AvatarURL:   r.AvatarURL,
+		AgentQuota:  r.AgentQuota,
 		CreatedAt:   r.CreatedAt,
 		UpdatedAt:   r.UpdatedAt,
 	}

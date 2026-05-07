@@ -46,7 +46,7 @@ export function ScopePicker({ scope, scopeId, onChange }: ScopePickerProps) {
 
       // Super_admin can also enumerate users (for picking a user scope).
       if (me.user.role === "super_admin") {
-        const u = await apiFetch("/api/admin/users");
+        const u = await apiFetch("/api/users");
         const uj = await u.json();
         if (!aborted && uj.users) setUsers(uj.users);
       }

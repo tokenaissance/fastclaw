@@ -267,25 +267,33 @@ func (s *Server) resolveAgent(r *http.Request, agentID string) AgentHandle {
 	}
 	ag := space.Agents.AgentByID(agentID)
 	// Lazy-attach when the agent isn't in the caller's UserSpace but
-	// the caller is otherwise authorized to use it. Three concrete
-	// scenarios this covers:
+	// the caller is otherwise authorized to use it. Concrete scenarios:
 	//
-	//   1. super_admin browsing another user's agent (legacy case).
+	//   1. super_admin browsing another user's agent.
 	//   2. api_key whose ACL grants this agent — typically the key
 	//      owner == agent owner, but this path also handles the
 	//      app_user case where SwitchToAppUser flipped the identity
 	//      to a fresh app_user whose UserSpace has no agents at all.
 	//      Sessions/files written under that UserSpace then partition
 	//      per end-user, which is the desired isolation.
-	//   3. (future) cross-user grants when we add agent sharing.
+	//   3. session user accessing a public agent owned by someone else
+	//      (link-based sharing — gated on agents.is_public).
 	//
-	// CanAccessAgent above is the only authorization gate; this just
-	// hydrates the in-memory Manager. EnsureAgent is idempotent.
+	// For the public-agent path we DO need a DB hit to confirm
+	// is_public; everything else (super_admin, apikey ACL) is already
+	// answered by Identity. EnsureAgent is idempotent so the lookup
+	// only fires before the agent lands in the user's Manager — once
+	// attached, AgentByID succeeds on subsequent requests.
 	if ag == nil {
 		injector, hasInjector := s.userResolver.(api.AgentInjector)
 		canAttach := hasInjector &&
 			(ident.AuthMethod == "apikey" ||
 				(ident.Role == users.RoleSuperAdmin && !ident.IsActingAs()))
+		if !canAttach && hasInjector && uid != "" && s.dataStore != nil {
+			if rec, err := s.dataStore.GetAgent(r.Context(), agentID); err == nil && rec != nil && rec.IsPublic {
+				canAttach = true
+			}
+		}
 		if canAttach {
 			if err := injector.EnsureAgent(r.Context(), uid, agentID); err == nil {
 				ag = space.Agents.AgentByID(agentID)
