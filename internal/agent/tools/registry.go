@@ -44,7 +44,7 @@ const (
 // Registry holds all registered tools.
 type Registry struct {
 	tools       map[string]registeredTool
-	sandboxRoot string // if non-empty, file tools reject paths outside this dir
+	sandboxRoot string           // if non-empty, file tools reject paths outside this dir
 	executor    sandbox.Executor // if non-nil, all file+exec tools route through this
 	// File tool roots. systemRoot is the agent metadata dir (SOUL.md etc.);
 	// userRoot is where user-facing artifacts go. A relative path whose base
@@ -335,12 +335,14 @@ func (r *Registry) SetExecutor(ex sandbox.Executor) {
 	r.executor = ex
 	// Re-register built-in tools to use the executor.
 	registerSandboxedFile(r, ex)
+	registerSandboxedApplyPatch(r, ex)
 	registerSandboxedExec(r, ex)
 }
 
 func (r *Registry) registerBuiltins() {
 	registerExec(r)
 	registerFile(r)
+	registerApplyPatch(r)
 	registerMessage(r)
 }
 
