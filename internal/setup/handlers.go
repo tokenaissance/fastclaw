@@ -44,7 +44,7 @@ func (s *Server) loadUserConfig(r *http.Request) (*config.Config, error) {
 		Channels:  map[string]config.ChannelConfig{},
 	}
 	for _, ns := range settingNamespaces {
-		if err := scope.SettingInto(r.Context(), s.dataStore, ns.namespace, uid, "", "", ns.dst(cfg)); err != nil {
+		if err := scope.SettingInto(r.Context(), s.dataStore, ns.namespace, uid, "", ns.dst(cfg)); err != nil {
 			return nil, err
 		}
 	}
@@ -80,7 +80,7 @@ func loadAgentSkillEntriesForUser(ctx context.Context, st store.Store, userID st
 	}
 	out := map[string]map[string]config.SkillEntryCfg{}
 	for _, ar := range agents {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, ar.ID, "skills.entries")
+		rec, err := st.GetConfigByName(ctx, store.KindSetting, "", ar.ID, "skills.entries")
 		if err != nil || rec == nil || len(rec.Data) == 0 {
 			continue
 		}
@@ -99,12 +99,12 @@ func loadAgentSkillEntriesForUser(ctx context.Context, st store.Store, userID st
 // we just persist what was requested.
 func saveAgentSkillEntries(ctx context.Context, st store.Store, agentID string, entries map[string]config.SkillEntryCfg) error {
 	if len(entries) == 0 {
-		return scope.SaveSetting(ctx, st, scope.Agent, agentID, "skills.entries", nil)
+		return scope.SaveSetting(ctx, st, "", agentID, "skills.entries", nil)
 	}
 	blob, _ := json.Marshal(entries)
 	var asMap map[string]interface{}
 	_ = json.Unmarshal(blob, &asMap)
-	return scope.SaveSetting(ctx, st, scope.Agent, agentID, "skills.entries", asMap)
+	return scope.SaveSetting(ctx, st, "", agentID, "skills.entries", asMap)
 }
 
 // saveUserConfig persists the namespaced setting rows for the calling
@@ -116,23 +116,21 @@ func (s *Server) saveUserConfig(r *http.Request, cfg *config.Config) error {
 		return errors.New("store not configured")
 	}
 	ident, ok := authIdentity(r)
-	scopeName := scope.User
-	scopeID := ""
+	// Decide who owns the rows we're about to save:
+	//   - super_admin without ?actAs=  → system rows (user_id='')
+	//   - super_admin with ?actAs=X    → write into user X's scope
+	//   - regular user                 → write into their own scope
+	uid := ""
 	if ok && ident.Role == "super_admin" {
-		// Super-admin save without ?actAs= writes to system; with
-		// ?actAs=<id> writes into that user's scope (handled implicitly
-		// because EffectiveUserID() returns the impersonated id).
-		if !ident.IsActingAs() {
-			scopeName = scope.System
-		} else {
-			scopeID = ident.EffectiveUserID()
+		if ident.IsActingAs() {
+			uid = ident.EffectiveUserID()
 		}
 	} else if ok {
-		scopeID = ident.UserID
+		uid = ident.UserID
 	}
 	for _, ns := range settingNamespaces {
 		data := ns.collect(cfg)
-		if err := scope.SaveSetting(r.Context(), s.dataStore, scopeName, scopeID, ns.namespace, data); err != nil {
+		if err := scope.SaveSetting(r.Context(), s.dataStore, uid, "", ns.namespace, data); err != nil {
 			return err
 		}
 	}
@@ -468,7 +466,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// can't render an Inheriting/Override badge.
 	sysDefaults := config.AgentsConfig{}.Defaults
 	if s.dataStore != nil {
-		_ = scope.SettingInto(r.Context(), s.dataStore, "agents.defaults", "", "", "", &sysDefaults)
+		_ = scope.SettingInto(r.Context(), s.dataStore, "agents.defaults", "", "", &sysDefaults)
 	}
 	// Marshal-then-extend keeps the response shape compatible (existing
 	// callers ignore the extra `meta` key) without forcing a refactor of
@@ -600,7 +598,7 @@ func (s *Server) handleTestStoredProvider(w http.ResponseWriter, r *http.Request
 	// Test = read-equivalent: any user that can read the row can verify
 	// it works. They'll be using it via their agent runtime anyway, so a
 	// dashboard-side dry run shouldn't be more restrictive.
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeRead) {
+	if !s.authorizeScope(w, r, rec.LegacyScope(), rec.LegacyScopeID(), scopeRead) {
 		return
 	}
 	// The browser never receives the unmasked API key, so it stays
@@ -920,7 +918,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// Detach the agent's ctx from the request: when the browser tab
 	// disconnects (refresh, close, network blip) we want the agent to
 	// keep running so its already-paid-for LLM call finishes and the
-	// reply lands in chat_events. The 15-minute cap is the only thing
+	// reply lands in session_events. The 15-minute cap is the only thing
 	// that can kill it.
 	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
 	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
@@ -988,7 +986,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 // handleChatSubscribe holds an SSE connection open for one (agent,
 // session) pair and forwards three kinds of traffic:
 //
-//   1. Replay: chat_events rows with seq > since (or > Last-Event-ID)
+//   1. Replay: session_events rows with seq > since (or > Last-Event-ID)
 //      that the client missed before connecting. Lets a freshly
 //      reloaded page pick up an in-flight turn without the rest of the
 //      reply disappearing.
@@ -1060,9 +1058,9 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 
 	// Replay missed events from the persistent log.
 	if s.dataStore != nil {
-		rows, err := s.dataStore.ListChatEventsSince(r.Context(), uid, agentID, sessionID, sinceSeq)
+		rows, err := s.dataStore.ListSessionEventsSince(r.Context(), uid, agentID, sessionID, sinceSeq)
 		if err != nil {
-			slog.Warn("chat_events replay failed", "agent", agentID, "session", sessionID, "since", sinceSeq, "error", err)
+			slog.Warn("session_events replay failed", "agent", agentID, "session", sessionID, "since", sinceSeq, "error", err)
 		}
 		for _, rec := range rows {
 			fmt.Fprintf(w, "id: %d\n", rec.Seq)
@@ -1164,11 +1162,11 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	// fresh page load picks up only deltas it hasn't already rendered.
 	// Best-effort: a missing/zero value just means "stream live only,
 	// no replay", which is the right fallback when the session has no
-	// in-flight turn or when chat_events isn't backfilled.
+	// in-flight turn or when session_events isn't backfilled.
 	if s.dataStore != nil {
 		uid := s.effectiveUserID(r)
 		if uid != "" {
-			if seq, err := s.dataStore.LatestChatEventSeq(r.Context(), uid, ag.Name(), sessionID); err == nil {
+			if seq, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, ag.Name(), sessionID); err == nil {
 				resp["latestEventSeq"] = seq
 			}
 		}

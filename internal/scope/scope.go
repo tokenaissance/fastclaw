@@ -1,11 +1,14 @@
-// Package scope reads scope-tagged rows out of store.configs and
+// Package scope reads (user, agent)-keyed rows out of store.configs and
 // merges them into the flat shapes the runtime expects.
 //
-// Every row in configs carries a (scope, scope_id, kind, name).
-// Resolution walks scopes outer→inner, with inner rows shadowing outer
-// rows by the row's `name`:
+// Every row in configs carries a (kind, user_id, agent_id, name) tuple.
+// Resolution walks ownership outer→inner, with inner rows shadowing outer
+// rows by `name`:
 //
-//	system → user → agent (→ skill, only for setting kinds)
+//	system (user='', agent='') →
+//	  user (user=X, agent='')   →
+//	    agent (user='', agent=Y) →
+//	      per-(user, agent) (user=X, agent=Y)
 //
 // kind="provider": name is the provider key ("openai"). Inner rows
 //   replace outer entries entirely (no field-level merge).
@@ -24,16 +27,52 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
+// HTTP-layer scope identifiers. The storage layer keys configs by
+// (user_id, agent_id) directly; these constants exist for the HTTP API
+// contract (URL ?scope= params, dashboard scope picker). Translate to
+// storage form via OwnershipFromScope.
 const (
-	System = store.ScopeSystem
-	User   = store.ScopeUser
-	Agent  = store.ScopeAgent
-	Skill  = store.ScopeSkill
+	System = "system"
+	User   = "user"
+	Agent  = "agent"
 )
 
+// OwnershipFromScope converts the HTTP-side (scope, scopeID) pair into
+// the storage (user_id, agent_id) pair. Empty/unknown scope returns
+// ("", "") which the store reads as "system / global".
+func OwnershipFromScope(sc, scopeID string) (userID, agentID string) {
+	switch sc {
+	case User:
+		return scopeID, ""
+	case Agent:
+		return "", scopeID
+	default:
+		return "", ""
+	}
+}
+
+// ScopeFromOwnership is the inverse, used when emitting (scope, scopeID)
+// back to the dashboard JSON. (X, Y) — both filled — is rendered as
+// scope="user-agent" so the UI can tell apart per-(user, agent)
+// overrides from plain user or agent rows. Today the dashboard only
+// reads scope="system"/"user"/"agent"; the new compound keeps the door
+// open for the multi-tenant view.
+func ScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
+	switch {
+	case userID != "" && agentID != "":
+		return "user-agent", userID + "/" + agentID
+	case userID != "":
+		return User, userID
+	case agentID != "":
+		return Agent, agentID
+	default:
+		return System, ""
+	}
+}
+
 // Providers returns the merged map of LLM provider configs for a given
-// (user, agent). Pass agentID="" to get the user-level view. Pass both
-// empty to get system-only.
+// (user, agent). Pass agentID="" to get only the user-level view. Pass
+// both empty to get system-only.
 func Providers(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.Providers: store is required")
@@ -44,20 +83,31 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 			out[r.Name] = providerToConfig(r)
 		}
 	}
-	if rows, err := st.ListConfigs(ctx, store.KindProvider, System, ""); err != nil {
+	// system layer
+	if rows, err := st.ListConfigs(ctx, store.KindProvider, "", ""); err != nil {
 		return nil, err
 	} else {
 		apply(rows)
 	}
+	// user layer
 	if userID != "" {
-		if rows, err := st.ListConfigs(ctx, store.KindProvider, User, userID); err != nil {
+		if rows, err := st.ListConfigs(ctx, store.KindProvider, userID, ""); err != nil {
 			return nil, err
 		} else {
 			apply(rows)
 		}
 	}
+	// agent layer
 	if agentID != "" {
-		if rows, err := st.ListConfigs(ctx, store.KindProvider, Agent, agentID); err != nil {
+		if rows, err := st.ListConfigs(ctx, store.KindProvider, "", agentID); err != nil {
+			return nil, err
+		} else {
+			apply(rows)
+		}
+	}
+	// per-(user, agent) layer
+	if userID != "" && agentID != "" {
+		if rows, err := st.ListConfigs(ctx, store.KindProvider, userID, agentID); err != nil {
 			return nil, err
 		} else {
 			apply(rows)
@@ -66,11 +116,12 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 	return out, nil
 }
 
-// AgentScopeProviders returns providers stored at scope=agent only,
-// without merging system or user layers. Use this to overlay an agent's
-// own rows on top of an already system+user-merged view: re-running the
-// full Providers walk would re-apply outer layers and silently clobber
-// any user-scope override the caller already merged in.
+// AgentScopeProviders returns providers stored at (user='', agent=Y)
+// only — the agent's "official" rows, without system or user layers
+// merged in. Use this to overlay an agent's own rows on top of an
+// already system+user-merged view: re-running the full Providers walk
+// would re-apply outer layers and silently clobber any user-scope
+// override the caller already merged in.
 func AgentScopeProviders(ctx context.Context, st store.Store, agentID string) (map[string]config.ProviderConfig, error) {
 	if st == nil {
 		return nil, errors.New("scope.AgentScopeProviders: store is required")
@@ -78,7 +129,7 @@ func AgentScopeProviders(ctx context.Context, st store.Store, agentID string) (m
 	if agentID == "" {
 		return map[string]config.ProviderConfig{}, nil
 	}
-	rows, err := st.ListConfigs(ctx, store.KindProvider, Agent, agentID)
+	rows, err := st.ListConfigs(ctx, store.KindProvider, "", agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -105,20 +156,27 @@ func Channels(ctx context.Context, st store.Store, userID, agentID string) (map[
 			out[r.Name] = channelToConfig(r)
 		}
 	}
-	if rows, err := st.ListConfigs(ctx, store.KindChannel, System, ""); err != nil {
+	if rows, err := st.ListConfigs(ctx, store.KindChannel, "", ""); err != nil {
 		return nil, err
 	} else {
 		apply(rows)
 	}
 	if userID != "" {
-		if rows, err := st.ListConfigs(ctx, store.KindChannel, User, userID); err != nil {
+		if rows, err := st.ListConfigs(ctx, store.KindChannel, userID, ""); err != nil {
 			return nil, err
 		} else {
 			apply(rows)
 		}
 	}
 	if agentID != "" {
-		if rows, err := st.ListConfigs(ctx, store.KindChannel, Agent, agentID); err != nil {
+		if rows, err := st.ListConfigs(ctx, store.KindChannel, "", agentID); err != nil {
+			return nil, err
+		} else {
+			apply(rows)
+		}
+	}
+	if userID != "" && agentID != "" {
+		if rows, err := st.ListConfigs(ctx, store.KindChannel, userID, agentID); err != nil {
 			return nil, err
 		} else {
 			apply(rows)
@@ -127,12 +185,12 @@ func Channels(ctx context.Context, st store.Store, userID, agentID string) (map[
 	return out, nil
 }
 
-// Setting returns the merged JSON for one namespace across system → user →
-// agent → skill. Field-level merge on the top-level map; inner-scope
-// fields override outer-scope ones. Unset namespaces yield an empty map
-// without erroring — callers Unmarshal into typed structs and rely on
-// zero-valued fields.
-func Setting(ctx context.Context, st store.Store, namespace, userID, agentID, skillName string) (map[string]interface{}, error) {
+// Setting returns the merged JSON for one namespace across the
+// system → user → agent → per-(user, agent) chain. Field-level merge on
+// the top-level map; inner-ownership fields override outer ones. Unset
+// namespaces yield an empty map without erroring — callers Unmarshal
+// into typed structs and rely on zero-valued fields.
+func Setting(ctx context.Context, st store.Store, namespace, userID, agentID string) (map[string]interface{}, error) {
 	if st == nil {
 		return nil, errors.New("scope.Setting: store is required")
 	}
@@ -142,29 +200,34 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID, sk
 			out[k] = v
 		}
 	}
-	if rec, err := st.GetConfigByName(ctx, store.KindSetting, System, "", namespace); err == nil && rec != nil {
-		merge(rec.Data)
-	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	tryGet := func(uid, aid string) error {
+		rec, err := st.GetConfigByName(ctx, store.KindSetting, uid, aid, namespace)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		if rec != nil {
+			merge(rec.Data)
+		}
+		return nil
+	}
+	if err := tryGet("", ""); err != nil {
 		return nil, err
 	}
 	if userID != "" {
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, User, userID, namespace); err == nil && rec != nil {
-			merge(rec.Data)
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := tryGet(userID, ""); err != nil {
 			return nil, err
 		}
 	}
 	if agentID != "" {
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, Agent, agentID, namespace); err == nil && rec != nil {
-			merge(rec.Data)
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := tryGet("", agentID); err != nil {
 			return nil, err
 		}
 	}
-	if skillName != "" {
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, Skill, skillName, namespace); err == nil && rec != nil {
-			merge(rec.Data)
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+	if userID != "" && agentID != "" {
+		if err := tryGet(userID, agentID); err != nil {
 			return nil, err
 		}
 	}
@@ -173,8 +236,8 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID, sk
 
 // SettingInto resolves Setting and unmarshals the merged JSON into dst.
 // Convenience for callers that want a typed config block.
-func SettingInto(ctx context.Context, st store.Store, namespace, userID, agentID, skillName string, dst interface{}) error {
-	merged, err := Setting(ctx, st, namespace, userID, agentID, skillName)
+func SettingInto(ctx context.Context, st store.Store, namespace, userID, agentID string, dst interface{}) error {
+	merged, err := Setting(ctx, st, namespace, userID, agentID)
 	if err != nil {
 		return err
 	}
@@ -188,23 +251,43 @@ func SettingInto(ctx context.Context, st store.Store, namespace, userID, agentID
 	return json.Unmarshal(blob, dst)
 }
 
-// SaveSetting upserts a single namespace at the given scope. Pass nil/
-// empty data to delete the row instead of writing {}.
-func SaveSetting(ctx context.Context, st store.Store, scope, scopeID, namespace string, data map[string]interface{}) error {
+// SaveSettingByScope is the legacy (scope, scopeID) form kept for the
+// HTTP layer, which still emits scope strings in URL params and JSON.
+// New callers should use SaveSetting with explicit (userID, agentID).
+func SaveSettingByScope(ctx context.Context, st store.Store, sc, scopeID, namespace string, data map[string]interface{}) error {
+	uid, aid := OwnershipFromScope(sc, scopeID)
+	return SaveSetting(ctx, st, uid, aid, namespace, data)
+}
+
+// SaveProviderByScope / SaveChannelByScope mirror the same legacy bridge.
+func SaveProviderByScope(ctx context.Context, st store.Store, sc, scopeID, name string, p config.ProviderConfig) error {
+	uid, aid := OwnershipFromScope(sc, scopeID)
+	return SaveProvider(ctx, st, uid, aid, name, p)
+}
+
+func SaveChannelByScope(ctx context.Context, st store.Store, sc, scopeID, channelType, credentialKey string, enabled bool, c config.ChannelConfig) error {
+	uid, aid := OwnershipFromScope(sc, scopeID)
+	return SaveChannel(ctx, st, uid, aid, channelType, credentialKey, enabled, c)
+}
+
+// SaveSetting upserts a single namespace at the given (user, agent)
+// ownership. Pass nil/empty data to delete the row instead of writing
+// {}. Pass empty userID/agentID for system-level.
+func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace string, data map[string]interface{}) error {
 	if st == nil {
 		return errors.New("scope.SaveSetting: store is required")
 	}
 	if len(data) == 0 {
 		// Find and drop the row if it exists. Idempotent: missing-row is a no-op.
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, scope, scopeID, namespace); err == nil && rec != nil {
+		if rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace); err == nil && rec != nil {
 			return st.DeleteConfig(ctx, rec.ID)
 		}
 		return nil
 	}
 	rec := &store.ConfigRecord{
 		Kind:    store.KindSetting,
-		Scope:   scope,
-		ScopeID: scopeID,
+		UserID:  userID,
+		AgentID: agentID,
 		Name:    namespace,
 		Enabled: true,
 		Data:    data,
@@ -212,12 +295,13 @@ func SaveSetting(ctx context.Context, st store.Store, scope, scopeID, namespace 
 	return st.SaveConfig(ctx, rec)
 }
 
-// SaveProvider upserts a kind="provider" row at the given scope.
-func SaveProvider(ctx context.Context, st store.Store, scope, scopeID, name string, p config.ProviderConfig) error {
+// SaveProvider upserts a kind="provider" row at the given (user, agent)
+// ownership.
+func SaveProvider(ctx context.Context, st store.Store, userID, agentID, name string, p config.ProviderConfig) error {
 	rec := &store.ConfigRecord{
 		Kind:    store.KindProvider,
-		Scope:   scope,
-		ScopeID: scopeID,
+		UserID:  userID,
+		AgentID: agentID,
 		Name:    name,
 		Enabled: true,
 		Data:    providerToData(p),
@@ -225,13 +309,14 @@ func SaveProvider(ctx context.Context, st store.Store, scope, scopeID, name stri
 	return st.SaveConfig(ctx, rec)
 }
 
-// SaveChannel upserts a kind="channel" row at the given scope. credentialKey
-// is the stable lookup handle for inbound dispatch (bot token tail, app id).
-func SaveChannel(ctx context.Context, st store.Store, scope, scopeID, channelType, credentialKey string, enabled bool, c config.ChannelConfig) error {
+// SaveChannel upserts a kind="channel" row at the given (user, agent)
+// ownership. credentialKey is the stable lookup handle for inbound
+// dispatch (bot token tail, app id).
+func SaveChannel(ctx context.Context, st store.Store, userID, agentID, channelType, credentialKey string, enabled bool, c config.ChannelConfig) error {
 	rec := &store.ConfigRecord{
 		Kind:          store.KindChannel,
-		Scope:         scope,
-		ScopeID:       scopeID,
+		UserID:        userID,
+		AgentID:       agentID,
 		Name:          channelType,
 		Enabled:       enabled,
 		CredentialKey: credentialKey,

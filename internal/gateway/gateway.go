@@ -527,7 +527,7 @@ func defaultStr(v, fallback string) string {
 func readObjectStoreCfg(st store.Store) config.ObjectStoreCfg {
 	cfg := &config.Config{}
 	if st != nil {
-		_ = scope.SettingInto(context.Background(), st, NSObjectStore, "", "", "", &cfg.ObjectStore)
+		_ = scope.SettingInto(context.Background(), st, NSObjectStore, "", "", &cfg.ObjectStore)
 	}
 	config.LoadEnv().ApplyToConfig(cfg)
 	return cfg.ObjectStore
@@ -536,7 +536,7 @@ func readObjectStoreCfg(st store.Store) config.ObjectStoreCfg {
 func readSystemHooks(st store.Store) config.HooksCfg {
 	var out config.HooksCfg
 	if st != nil {
-		_ = scope.SettingInto(context.Background(), st, NSHooks, "", "", "", &out)
+		_ = scope.SettingInto(context.Background(), st, NSHooks, "", "", &out)
 	}
 	return out
 }
@@ -544,7 +544,7 @@ func readSystemHooks(st store.Store) config.HooksCfg {
 func readSystemPlugins(st store.Store) config.PluginsCfg {
 	var out config.PluginsCfg
 	if st != nil {
-		_ = scope.SettingInto(context.Background(), st, NSPlugins, "", "", "", &out)
+		_ = scope.SettingInto(context.Background(), st, NSPlugins, "", "", &out)
 	}
 	return out
 }
@@ -552,7 +552,7 @@ func readSystemPlugins(st store.Store) config.PluginsCfg {
 func readSystemTaskQueue(st store.Store) config.TaskQueueCfg {
 	var out config.TaskQueueCfg
 	if st != nil {
-		_ = scope.SettingInto(context.Background(), st, NSTaskQueue, "", "", "", &out)
+		_ = scope.SettingInto(context.Background(), st, NSTaskQueue, "", "", &out)
 	}
 	return out
 }
@@ -563,7 +563,7 @@ func readSystemTaskQueue(st store.Store) config.TaskQueueCfg {
 func readSystemSandboxCfg(st store.Store) config.SandboxCfg {
 	cfg := &config.Config{}
 	if st != nil {
-		_ = scope.SettingInto(context.Background(), st, NSSandbox, "", "", "", &cfg.Sandbox)
+		_ = scope.SettingInto(context.Background(), st, NSSandbox, "", "", &cfg.Sandbox)
 	}
 	config.LoadEnv().ApplyToConfig(cfg)
 	return cfg.Sandbox
@@ -609,22 +609,23 @@ func registerChannelsFromStore(st store.Store, mb *bus.MessageBus, chanMgr *chan
 		}
 		if err := registerChannelInstance(r, mb, chanMgr, st, false); err != nil {
 			slog.Warn("register channel failed",
-				"type", r.Name, "scope", r.Scope, "scope_id", r.ScopeID, "error", err)
+				"type", r.Name, "user_id", r.UserID, "agent_id", r.AgentID, "error", err)
 		}
 	}
 	return nil
 }
 
+// allChannelRows returns every channel row regardless of ownership —
+// system rows ('','') plus per-user, per-agent, and per-(user, agent)
+// rows. The boot path needs the union so each owner's adapter is
+// hot-started; per-row routing is decided later at message-receipt
+// time via LookupChannelByCredential.
 func allChannelRows(st store.Store) ([]store.ConfigRecord, error) {
-	var out []store.ConfigRecord
-	for _, sc := range []string{store.ScopeSystem, store.ScopeUser, store.ScopeAgent} {
-		rows, err := st.ListConfigs(context.Background(), store.KindChannel, sc, "")
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, rows...)
+	rows, err := st.QueryAllConfigs(context.Background(), store.KindChannel)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	return rows, nil
 }
 
 // imgRefRegex matches markdown image references `![alt](path)`. We

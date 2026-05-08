@@ -43,9 +43,13 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 			// For web channel, don't delete the session file — frontend handles new session creation
 			return slashResult{handled: true, reply: "__NEW_SESSION__"}
 		}
-		sess := a.sessions.Get(msg.Channel, msg.ChatID)
-		sess.Clear()
-		return slashResult{handled: true, reply: "🔄 Session cleared. Starting fresh."}
+		// Mint a fresh session under the same (channel, account, chat)
+		// triple so this conversation thread starts blank but the prior
+		// thread is preserved as history. Subsequent inbound messages
+		// resolve to the new (max updated_at) row via Manager.Get's
+		// active-session lookup.
+		a.sessions.OpenNewSession(msg.Channel, msg.AccountID, msg.ChatID)
+		return slashResult{handled: true, reply: "🔄 New session started. Previous conversation kept as history."}
 
 	case "/retry":
 		return a.slashRetry(msg)
@@ -94,7 +98,7 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 
 // slashRetry re-runs the last user message, discarding the last assistant response.
 func (a *Agent) slashRetry(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 	msgs := sess.GetMessages()
 
 	// Find the last user message
@@ -130,7 +134,7 @@ func (a *Agent) slashRetry(msg bus.InboundMessage) slashResult {
 
 // slashUndo reverts the last assistant response.
 func (a *Agent) slashUndo(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 
 	if !sess.HasSnapshot() {
 		// No snapshot — try to remove last user+assistant turn manually
@@ -157,7 +161,7 @@ func (a *Agent) slashUndo(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 	sessionMsgs := sess.GetMessages()
 
 	if len(sessionMsgs) == 0 {
@@ -176,7 +180,7 @@ func (a *Agent) slashCompact(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashStatus(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 	sessionMsgs := sess.GetMessages()
 
 	memContent := a.memory.LoadMemory()
@@ -206,7 +210,7 @@ func (a *Agent) slashStatus(msg bus.InboundMessage) slashResult {
 }
 
 func (a *Agent) slashUsage(msg bus.InboundMessage) slashResult {
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 	msgs := sess.GetMessages()
 
 	userTurns, asstTurns, toolTurns := 0, 0, 0

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -65,8 +66,11 @@ func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey strin
 	return msgs, nil
 }
 
-func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey string, messages []provider.Message) error {
+func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID string, messages []provider.Message) error {
 	rec := &store.SessionRecord{
+		Channel:   channel,
+		AccountID: accountID,
+		ChatID:    chatID,
 		Messages:  make([]store.SessionMessage, len(messages)),
 		UpdatedAt: time.Now(),
 	}
@@ -74,6 +78,37 @@ func (a *StoreAdapter) SaveSession(ctx context.Context, agentID, sessionKey stri
 		rec.Messages[i] = sessionMessageFromProvider(m)
 	}
 	return a.st.SaveSession(ctx, a.userID, agentID, sessionKey, rec)
+}
+
+// ResolveActiveSessionKey forwards to the store. The session.Manager
+// uses this to pick the active session_key for an inbound (channel,
+// account, chat) triple before any messages get loaded.
+func (a *StoreAdapter) ResolveActiveSessionKey(ctx context.Context, agentID, channel, accountID, chatID string) (string, error) {
+	k, err := a.st.ResolveActiveSessionKey(ctx, a.userID, agentID, channel, accountID, chatID)
+	if err != nil {
+		// Translate ErrNotFound to ("", nil) so the manager treats the
+		// "no session yet" case as a normal mint trigger instead of
+		// surfacing an error.
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return k, nil
+}
+
+// LookupSessionTriple inverts ResolveActiveSessionKey: session_key →
+// (channel, accountID, chatID). Used when a URL hand-off carries only
+// the session_key and the handler needs the conversation triple back.
+func (a *StoreAdapter) LookupSessionTriple(ctx context.Context, agentID, sessionKey string) (string, string, string, error) {
+	ch, acc, ci, err := a.st.LookupSessionTriple(ctx, a.userID, agentID, sessionKey)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", "", "", nil
+		}
+		return "", "", "", err
+	}
+	return ch, acc, ci, nil
 }
 
 // AppendMessage persists one turn into session_messages — the append-only
@@ -155,6 +190,14 @@ func providerMessageFromStored(m store.SessionMessage) provider.Message {
 	return out
 }
 
+// ListWebSessions returns every chat session for this agent regardless
+// of channel — the historical name is kept to avoid a sweep of every
+// caller, but the result spans web + IM channels. Each row's Channel
+// is set so the dashboard can render the source-channel icon prefix.
+//
+// ID is the session_key (the canonical, channel-independent row id).
+// The agent-side history/delete/rename handlers accept either a
+// session_key or a legacy `<chat_id>` URL token via ResolveSessionKey.
 func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error) {
 	metas, err := a.st.ListSessions(ctx, a.userID, agentID)
 	if err != nil {
@@ -162,10 +205,14 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 	}
 	var sessions []WebSession
 	for _, m := range metas {
-		if !strings.HasPrefix(m.Key, "web_") {
-			continue
+		channel := m.Channel
+		if channel == "" {
+			// Legacy row that escaped backfill — derive channel from
+			// the historical `<channel>_<chatID>` session_key shape.
+			if i := strings.Index(m.Key, "_"); i > 0 {
+				channel = m.Key[:i]
+			}
 		}
-		sessionId := strings.TrimPrefix(m.Key, "web_")
 		preview := ""
 		thumb := ""
 		// Prefer the append-only archive — its first row is always the
@@ -216,7 +263,10 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 			title = preview
 		}
 		sessions = append(sessions, WebSession{
-			ID:           sessionId,
+			ID:           m.Key,
+			Channel:      channel,
+			AccountID:    m.AccountID,
+			ChatID:       m.ChatID,
 			Title:        title,
 			Preview:      preview,
 			ThumbnailURL: thumb,

@@ -7,7 +7,7 @@ import (
 
 // EventEnvelope is a ChatEvent stamped with the persistent seq the
 // store assigned at append time. Subscribers use Seq to dedup against
-// events they've already replayed via ListChatEventsSince.
+// events they've already replayed via ListSessionEventsSince.
 type EventEnvelope struct {
 	Seq   int64
 	Event ChatEvent
@@ -80,10 +80,10 @@ func hubKey(userID, agentID, sessionKey string) string {
 }
 
 // EventSink is the persistence side of the chat-events pipeline. The
-// store.Store interface's AppendChatEvent satisfies this exactly, so
+// store.Store interface's AppendSessionEvent satisfies this exactly, so
 // the gateway can pass its store as-is.
 type EventSink interface {
-	AppendChatEvent(ctx context.Context, userID, agentID, sessionKey, eventType string, data []byte) (int64, error)
+	AppendSessionEvent(ctx context.Context, userID, agentID, sessionKey, eventType string, data []byte) (int64, error)
 }
 
 // streamCtx carries the per-turn handles emitEvent reaches for:

@@ -36,7 +36,7 @@ func loadAgentSkillEntries(ctx context.Context, st store.Store, userID string) (
 	}
 	out := map[string]map[string]config.SkillEntryCfg{}
 	for _, ar := range agents {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, ar.ID, "skills.entries")
+		rec, err := st.GetConfigByName(ctx, store.KindSetting, "", ar.ID, "skills.entries")
 		if err != nil || rec == nil || len(rec.Data) == 0 {
 			continue
 		}
@@ -181,34 +181,34 @@ func assembleConfig(ctx context.Context, st store.Store, userID, agentID string)
 	if st == nil {
 		return cfg, nil
 	}
-	if err := scope.SettingInto(ctx, st, NSAgentDefaults, userID, agentID, "", &cfg.Agents.Defaults); err != nil {
+	if err := scope.SettingInto(ctx, st, NSAgentDefaults, userID, agentID, &cfg.Agents.Defaults); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSSandbox, userID, agentID, "", &cfg.Sandbox); err != nil {
+	if err := scope.SettingInto(ctx, st, NSSandbox, userID, agentID, &cfg.Sandbox); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSObjectStore, userID, agentID, "", &cfg.ObjectStore); err != nil {
+	if err := scope.SettingInto(ctx, st, NSObjectStore, userID, agentID, &cfg.ObjectStore); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSHooks, userID, agentID, "", &cfg.Hooks); err != nil {
+	if err := scope.SettingInto(ctx, st, NSHooks, userID, agentID, &cfg.Hooks); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSPlugins, userID, agentID, "", &cfg.Plugins); err != nil {
+	if err := scope.SettingInto(ctx, st, NSPlugins, userID, agentID, &cfg.Plugins); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSTaskQueue, userID, agentID, "", &cfg.TaskQueue); err != nil {
+	if err := scope.SettingInto(ctx, st, NSTaskQueue, userID, agentID, &cfg.TaskQueue); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSToolProviders, userID, agentID, "", &cfg.ToolProviders); err != nil {
+	if err := scope.SettingInto(ctx, st, NSToolProviders, userID, agentID, &cfg.ToolProviders); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSToolCategories, userID, agentID, "", &cfg.Tools); err != nil {
+	if err := scope.SettingInto(ctx, st, NSToolCategories, userID, agentID, &cfg.Tools); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSSkillsInstall, userID, agentID, "", &cfg.Skills.Install); err != nil {
+	if err := scope.SettingInto(ctx, st, NSSkillsInstall, userID, agentID, &cfg.Skills.Install); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSSkillsEntries, userID, agentID, "", &cfg.Skills.Entries); err != nil {
+	if err := scope.SettingInto(ctx, st, NSSkillsEntries, userID, agentID, &cfg.Skills.Entries); err != nil {
 		return nil, err
 	}
 	// Per-agent skill env overrides used to live in a single user-scope
@@ -225,22 +225,22 @@ func assembleConfig(ctx context.Context, st store.Store, userID, agentID string)
 			cfg.Skills.AgentEntries = entries
 		}
 	}
-	if err := scope.SettingInto(ctx, st, NSMemory, userID, agentID, "", &cfg.Memory); err != nil {
+	if err := scope.SettingInto(ctx, st, NSMemory, userID, agentID, &cfg.Memory); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSPrivacy, userID, agentID, "", &cfg.Privacy); err != nil {
+	if err := scope.SettingInto(ctx, st, NSPrivacy, userID, agentID, &cfg.Privacy); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSSkillsLearner, userID, agentID, "", &cfg.SkillsLearner); err != nil {
+	if err := scope.SettingInto(ctx, st, NSSkillsLearner, userID, agentID, &cfg.SkillsLearner); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSHeartbeat, userID, agentID, "", &cfg.Heartbeat); err != nil {
+	if err := scope.SettingInto(ctx, st, NSHeartbeat, userID, agentID, &cfg.Heartbeat); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSTeams, userID, agentID, "", &cfg.Teams); err != nil {
+	if err := scope.SettingInto(ctx, st, NSTeams, userID, agentID, &cfg.Teams); err != nil {
 		return nil, err
 	}
-	if err := scope.SettingInto(ctx, st, NSBindings, userID, agentID, "", &cfg.Bindings); err != nil {
+	if err := scope.SettingInto(ctx, st, NSBindings, userID, agentID, &cfg.Bindings); err != nil {
 		return nil, err
 	}
 	provs, err := scope.Providers(ctx, st, userID, agentID)
@@ -308,7 +308,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 		return fmt.Errorf("EnsureAgent: ResolveAgents returned %d entries", len(resolved))
 	}
 	rc := resolved[0]
-	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, rc.ID, "agents.defaults"); err == nil && cfgRec != nil {
+	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && cfgRec != nil {
 		var ovr config.AgentDefaults
 		blob, _ := json.Marshal(cfgRec.Data)
 		_ = json.Unmarshal(blob, &ovr)
@@ -372,7 +372,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 	// that would leak the owner's API keys into another user's session
 	// for skills they may not even be invoking.
 	skillsCfg := sp.Config.Skills
-	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, rc.ID, "skills.entries"); err == nil && cfgRec != nil && len(cfgRec.Data) > 0 {
+	if cfgRec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "skills.entries"); err == nil && cfgRec != nil && len(cfgRec.Data) > 0 {
 		blob, _ := json.Marshal(cfgRec.Data)
 		var entries map[string]config.SkillEntryCfg
 		if json.Unmarshal(blob, &entries) == nil && len(entries) > 0 {
@@ -457,29 +457,12 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		entries = append(entries, config.AgentEntry{ID: ar.ID, UserID: ar.UserID})
 	}
 
-	// Bindings live as one agent-scope `bindings` row per agent (each
-	// row's data is `{"list":[…]}`). assembleConfig with agentID="" only
-	// merges system+user scopes, so without this fan-out the IM
-	// Channels page's freshly-saved binding never reaches
-	// space.Config.Bindings and inbound messages get dropped with
-	// "no agent matched for DM". Concat across the user's OWNED agents
-	// only — granted agents' bindings belong to the owner's space, not
-	// every grantee's.
-	for _, ar := range agentRecords {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, ar.ID, "bindings")
-		if err != nil || rec == nil || len(rec.Data) == 0 {
-			continue
-		}
-		blob, _ := json.Marshal(rec.Data)
-		var wrap struct {
-			List []config.Binding `json:"list"`
-		}
-		if err := json.Unmarshal(blob, &wrap); err != nil {
-			slog.Warn("decode bindings row", "agent", ar.ID, "error", err)
-			continue
-		}
-		cfg.Bindings = append(cfg.Bindings, wrap.List...)
-	}
+	// Bindings used to live in their own kind=setting/name=bindings
+	// row. After the configs schema refactor, channel rows carry
+	// agent_id directly, so we synthesize Bindings from the channel
+	// table itself — every row whose agent_id == one of this user's
+	// owned agents contributes one Binding per Account in its data.
+	cfg.Bindings = append(cfg.Bindings, bindingsFromChannelRows(ctx, st, userID, agentRecords)...)
 	resolved := config.ResolveAgents(cfg, entries)
 	for i := range resolved {
 		// Layer the agent-scope agents.defaults on top of the
@@ -494,7 +477,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		// and chat silently uses the system/user default.
 		rc := &resolved[i]
 		var agentOverride config.AgentDefaults
-		if rec, err := st.GetConfigByName(ctx, store.KindSetting, store.ScopeAgent, rc.ID, "agents.defaults"); err == nil && rec != nil {
+		if rec, err := st.GetConfigByName(ctx, store.KindSetting, "", rc.ID, "agents.defaults"); err == nil && rec != nil {
 			blob, _ := json.Marshal(rec.Data)
 			_ = json.Unmarshal(blob, &agentOverride)
 			if agentOverride.Model != "" {
@@ -742,4 +725,69 @@ func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// bindingsFromChannelRows synthesizes the (channel, accountID) →
+// agentID routing table from channel rows themselves. It replaces the
+// old kind=setting/name=bindings indirection: every channel row whose
+// agent_id points at one of this user's agents contributes a Binding
+// per Account.
+//
+// Pulls rows from two ownership corners that this user can route:
+//   - (user_id='', agent_id=Y): the agent's "official" rows for any
+//     agent Y the user owns
+//   - (user_id=userID, agent_id=Y): per-(user, agent) overrides this
+//     user authored on someone else's (or their own) agent
+//
+// Per-agent overrides live one row at a time, so we list channels for
+// each agent the user can address. Granted-agent bindings stay outside
+// — they live in the agent owner's space, not every grantee's.
+func bindingsFromChannelRows(ctx context.Context, st store.Store, userID string, agents []store.AgentRecord) []config.Binding {
+	if st == nil || len(agents) == 0 {
+		return nil
+	}
+	var out []config.Binding
+	for _, ar := range agents {
+		rows, err := st.ListConfigs(ctx, store.KindChannel, "", ar.ID)
+		if err == nil {
+			out = append(out, expandChannelBindings(rows, ar.ID)...)
+		}
+		if userID != "" {
+			rows, err := st.ListConfigs(ctx, store.KindChannel, userID, ar.ID)
+			if err == nil {
+				out = append(out, expandChannelBindings(rows, ar.ID)...)
+			}
+		}
+	}
+	return out
+}
+
+func expandChannelBindings(rows []store.ConfigRecord, agentID string) []config.Binding {
+	var out []config.Binding
+	for _, r := range rows {
+		if !r.Enabled {
+			continue
+		}
+		cc := config.ChannelConfig{}
+		if blob, err := json.Marshal(r.Data); err == nil {
+			_ = json.Unmarshal(blob, &cc)
+		}
+		// One Binding per account on the row; an empty Accounts map
+		// means a single bot whose accountID is implicit (older
+		// adapters that didn't index by username yet).
+		if len(cc.Accounts) == 0 {
+			out = append(out, config.Binding{
+				AgentID: agentID,
+				Match:   config.Match{Channel: r.Name},
+			})
+			continue
+		}
+		for accountID := range cc.Accounts {
+			out = append(out, config.Binding{
+				AgentID: agentID,
+				Match:   config.Match{Channel: r.Name, AccountID: accountID},
+			})
+		}
+	}
+	return out
 }

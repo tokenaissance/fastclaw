@@ -41,22 +41,28 @@ type channelOut struct {
 	Source      string `json:"source,omitempty"`
 }
 
-// resolveChannelBindingScope decides where a connect / disconnect call
-// should write its channel + binding rows. Two paths:
+// resolveChannelBindingScope authorizes a connect/disconnect call and
+// returns the (userID, agentID) tuple the channel row should be written
+// under. Every channel row now carries the binder's user_id directly —
+// there's no "agent-official" overload anymore, because two users
+// sharing a public agent can't share one bot anyway (inbound messages
+// would route to the wrong space).
 //
-//   - Owner of agent (or platform admin): writes at scope=agent, so the
-//     row is the agent's "official" channel that any user without their
-//     own overlay sees. Same shape as before — single bot per (agent,
-//     channelType).
-//   - Non-owner with read access (public agent / apikey ACL grant):
-//     writes at scope=user, scoped to the caller's user_id. The binding
-//     entry still records AgentID=<this agent>, so inbound routing knows
-//     which (foreign) agent to load into the caller's space. Each user
-//     can bind their own bot to the same public agent without colliding
-//     with anyone else's overlay.
+//   - Owner of the agent (or platform admin): (callerUID, agentID).
+//     The owner's bindings are just their personal bindings on their
+//     own agent.
+//   - Non-owner with read access (public agent or apikey ACL grant):
+//     (callerUID, agentID). Each user can bind their own bot to the
+//     same public agent without colliding with anyone else's row, and
+//     inbound messages route to the binder's UserSpace.
 //
 // Writes 4xx and returns ok=false on permission/lookup failures.
-func (s *Server) resolveChannelBindingScope(w http.ResponseWriter, r *http.Request, agentID string) (string, string, bool) {
+//
+// The legacy return shape was (scope, scopeID, ok). The new shape is
+// (userID, agentID, ok). Old callers passed (sc, scopeID) into
+// invalidateScope; the migration adapter at the bottom of this file
+// keeps that working.
+func (s *Server) resolveChannelBindingScope(w http.ResponseWriter, r *http.Request, agentID string) (userID, aid string, ok bool) {
 	if agentID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "agent id required"})
 		return "", "", false
@@ -73,11 +79,11 @@ func (s *Server) resolveChannelBindingScope(w http.ResponseWriter, r *http.Reque
 	}
 	ident, _ := auth.FromContext(r.Context())
 	if rec.UserID == uid || (ident.AuthMethod != "" && ident.CanAdminPlatform()) {
-		return scope.Agent, agentID, true
+		return uid, agentID, true
 	}
 	// Non-owner: must be able to at least read the agent.
 	if (ident.AuthMethod == "apikey" && ident.CanAccessAgent(agentID)) || rec.IsPublic {
-		return scope.User, uid, true
+		return uid, agentID, true
 	}
 	jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
 	return "", "", false
@@ -122,34 +128,22 @@ func (s *Server) handleListAgentChannels(w http.ResponseWriter, r *http.Request)
 	}
 	caller := s.effectiveUserID(r)
 
-	// Always include the agent's "official" channels (scope=agent).
-	// Then overlay the caller's own per-user binding rows (scope=user)
-	// — but only the entries that point at THIS agent (a user-scope
-	// bindings list can span multiple foreign agents). User rows are
-	// suppressed when caller IS the owner because owner writes already
-	// land at agent scope; they'd otherwise get a confusing "two cards
-	// for the same bot" view if they had previously self-bound.
+	// Channel rows now carry agent_id directly, so listing this agent's
+	// channels is a simple two-prong query:
+	//   1. (user_id='', agent_id=id): agent's "official" rows (anyone
+	//      using the agent inherits)
+	//   2. (user_id=caller, agent_id=id): caller's per-(user, agent)
+	//      overrides — non-owner self-bindings, or owner's
+	//      personalized binding on top of the official one
+	// The legacy bindings indirection (kind=setting, name=bindings)
+	// that used to map (channelType, accountID) → agentID is gone.
 	out := make([]channelOut, 0)
-	if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, scope.Agent, id); err == nil {
+	if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, "", id); err == nil {
 		out = append(out, flattenChannelRows(rows, "agent", "", "")...)
 	}
 	if caller != "" && caller != rec.UserID {
-		userRows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, scope.User, caller)
-		if err == nil {
-			// For user-scope, we have to filter to only show channels
-			// the caller has bound TO this agent. The channel row
-			// itself doesn't carry an agent_id — that link lives in the
-			// caller's bindings list. Build the (channel, accountID)
-			// allowlist from bindings whose AgentID == this agent.
-			allow := map[[2]string]bool{}
-			if bindings, _ := s.loadBindings(r, scope.User, caller); bindings != nil {
-				for _, b := range bindings {
-					if b.AgentID == id {
-						allow[[2]string{b.Match.Channel, b.Match.AccountID}] = true
-					}
-				}
-			}
-			out = append(out, flattenChannelRows(userRows, "user", "", "", filterAccounts(allow))...)
+		if userRows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, caller, id); err == nil {
+			out = append(out, flattenChannelRows(userRows, "user", "", "")...)
 		}
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"channels": out})
@@ -221,7 +215,7 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	id := r.PathValue("id")
-	sc, scopeID, ok := s.resolveChannelBindingScope(w, r, id)
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
 	if !ok {
 		return
 	}
@@ -260,11 +254,11 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 	// fallback (credentialKeyFor) silently dropped every inbound
 	// message because no row matched.
 	credKey := username
-	if err := s.assertChannelCredentialUnique(r, "telegram", credKey, ""); err != nil {
+	if err := s.assertChannelCredentialUnique(r, "telegram", credKey, "", uid, aid); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, sc, scopeID, "telegram", credKey, true, cc); err != nil {
+	if err := scope.SaveChannel(r.Context(), s.dataStore, uid, aid, "telegram", credKey, true, cc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -274,7 +268,7 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 	// inside the entry is always the path-resolved agent (= scopeID
 	// when sc=Agent; the foreign agent the caller is binding to when
 	// sc=User).
-	if err := s.appendBinding(r, sc, scopeID, config.Binding{
+	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "telegram", AccountID: username},
 	}); err != nil {
@@ -282,7 +276,7 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	s.invalidateScope(sc, scopeID)
+	s.invalidateOwner(uid, aid)
 	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "telegram", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
@@ -299,7 +293,7 @@ func (s *Server) handleDisconnectAgentChannel(w http.ResponseWriter, r *http.Req
 	id := r.PathValue("id")
 	channelType := r.PathValue("type")
 	accountID := r.PathValue("accountId")
-	sc, scopeID, ok := s.resolveChannelBindingScope(w, r, id)
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
 	if !ok {
 		return
 	}
@@ -307,7 +301,7 @@ func (s *Server) handleDisconnectAgentChannel(w http.ResponseWriter, r *http.Req
 	// Locate the channel row at the resolved scope (agent for owner /
 	// admin, user for non-owner overlay). Match by accountID inside the
 	// row's Accounts map.
-	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, sc, scopeID)
+	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, uid, aid)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -333,17 +327,17 @@ func (s *Server) handleDisconnectAgentChannel(w http.ResponseWriter, r *http.Req
 				return
 			}
 		} else {
-			if err := scope.SaveChannel(r.Context(), s.dataStore, rec.Scope, rec.ScopeID, rec.Name, rec.CredentialKey, rec.Enabled, cc); err != nil {
+			if err := scope.SaveChannelByScope(r.Context(), s.dataStore, rec.LegacyScope(), rec.LegacyScopeID(), rec.Name, rec.CredentialKey, rec.Enabled, cc); err != nil {
 				jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
 		}
 		// Drop the matching binding too.
-		if err := s.removeBinding(r, sc, scopeID, id, channelType, accountID); err != nil {
+		if err := s.removeBinding(r, "", "", id, channelType, accountID); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		s.invalidateScope(sc, scopeID)
+		s.invalidateOwner(uid, aid)
 		s.hotUnregisterChannel(channelType, accountID)
 		jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 		return
@@ -351,80 +345,31 @@ func (s *Server) handleDisconnectAgentChannel(w http.ResponseWriter, r *http.Req
 	jsonResponse(w, http.StatusNotFound, map[string]any{"error": "binding not found"})
 }
 
-// appendBinding loads the (scope, scopeID) `bindings` setting, appends
-// the new binding (deduped on (agentID, channel, accountID) — agent
-// scope rows always carry one agent so AgentID is redundant there, but
-// user-scope rows can hold bindings to multiple agents), and saves it
-// back.
+// appendBinding / removeBinding used to maintain a kind=setting,
+// name=bindings row that carried (channel, accountID → agentID)
+// mappings. Channel rows now carry agent_id directly, so the
+// indirection is gone — these stubs are kept so the many connect/
+// disconnect handlers don't all have to change shape at once.
+//
+// The migration drops every existing kind=setting/name=bindings row,
+// and the runtime side (gateway/userspace.go::bindingsFromChannelRows)
+// rebuilds the routing table by walking channel rows directly.
 func (s *Server) appendBinding(r *http.Request, sc, scopeID string, b config.Binding) error {
-	cur, err := s.loadBindings(r, sc, scopeID)
-	if err != nil {
-		return err
-	}
-	for _, existing := range cur {
-		if existing.AgentID == b.AgentID &&
-			existing.Match.Channel == b.Match.Channel &&
-			existing.Match.AccountID == b.Match.AccountID {
-			return nil // already present
-		}
-	}
-	next := append(cur, b)
-	return s.saveBindings(r, sc, scopeID, next)
+	_ = r
+	_ = sc
+	_ = scopeID
+	_ = b
+	return nil
 }
 
-// removeBinding strips the (agentID, channelType, accountID) entry from
-// the (scope, scopeID) bindings list. agentID matters at scope=user
-// where one row holds bindings spanning multiple foreign agents — at
-// scope=agent it's the same value as scopeID, but the equality check
-// is harmless either way.
 func (s *Server) removeBinding(r *http.Request, sc, scopeID, agentID, channelType, accountID string) error {
-	cur, err := s.loadBindings(r, sc, scopeID)
-	if err != nil {
-		return err
-	}
-	out := make([]config.Binding, 0, len(cur))
-	for _, b := range cur {
-		if b.AgentID == agentID && b.Match.Channel == channelType && b.Match.AccountID == accountID {
-			continue
-		}
-		out = append(out, b)
-	}
-	return s.saveBindings(r, sc, scopeID, out)
-}
-
-func (s *Server) loadBindings(r *http.Request, sc, scopeID string) ([]config.Binding, error) {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, sc, scopeID, "bindings")
-	if err != nil || rec == nil {
-		return nil, nil
-	}
-	// stored shape is {"list": [...]}; tolerate raw arrays for
-	// hand-edited rows.
-	if blob, err := json.Marshal(rec.Data); err == nil && len(blob) > 0 {
-		var wrap struct {
-			List []config.Binding `json:"list"`
-		}
-		if uerr := json.Unmarshal(blob, &wrap); uerr == nil && wrap.List != nil {
-			return wrap.List, nil
-		}
-		var raw []config.Binding
-		if uerr := json.Unmarshal(blob, &raw); uerr == nil {
-			return raw, nil
-		}
-	}
-	return nil, nil
-}
-
-func (s *Server) saveBindings(r *http.Request, sc, scopeID string, list []config.Binding) error {
-	if len(list) == 0 {
-		// Empty list — delete the row to keep the namespace clean.
-		// Best-effort; not-found is fine.
-		if rec, _ := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, sc, scopeID, "bindings"); rec != nil {
-			_ = s.dataStore.DeleteConfig(r.Context(), rec.ID)
-		}
-		return nil
-	}
-	wrap := map[string]interface{}{"list": list}
-	return scope.SaveSetting(r.Context(), s.dataStore, sc, scopeID, "bindings", wrap)
+	_ = r
+	_ = sc
+	_ = scopeID
+	_ = agentID
+	_ = channelType
+	_ = accountID
+	return nil
 }
 
 // telegramGetMe validates the bot token by hitting the Bot API. Returns
@@ -478,7 +423,7 @@ func (s *Server) handleConnectAgentDiscord(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := r.PathValue("id")
-	sc, scopeID, ok := s.resolveChannelBindingScope(w, r, id)
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
 	if !ok {
 		return
 	}
@@ -508,22 +453,22 @@ func (s *Server) handleConnectAgentDiscord(w http.ResponseWriter, r *http.Reques
 		Accounts: map[string]config.AccountConfig{userID: {BotToken: token}},
 	}
 	credKey := userID
-	if err := s.assertChannelCredentialUnique(r, "discord", credKey, ""); err != nil {
+	if err := s.assertChannelCredentialUnique(r, "discord", credKey, "", uid, aid); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, sc, scopeID, "discord", credKey, true, cc); err != nil {
+	if err := scope.SaveChannel(r.Context(), s.dataStore, uid, aid, "discord", credKey, true, cc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.appendBinding(r, sc, scopeID, config.Binding{
+	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "discord", AccountID: userID},
 	}); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(sc, scopeID)
+	s.invalidateOwner(uid, aid)
 	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "discord", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
@@ -602,7 +547,7 @@ func (s *Server) handleConnectAgentSlack(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id := r.PathValue("id")
-	sc, scopeID, ok := s.resolveChannelBindingScope(w, r, id)
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
 	if !ok {
 		return
 	}
@@ -644,22 +589,22 @@ func (s *Server) handleConnectAgentSlack(w http.ResponseWriter, r *http.Request)
 		Accounts: map[string]config.AccountConfig{teamID: {BotToken: botToken}},
 	}
 	credKey := teamID
-	if err := s.assertChannelCredentialUnique(r, "slack", credKey, ""); err != nil {
+	if err := s.assertChannelCredentialUnique(r, "slack", credKey, "", uid, aid); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, sc, scopeID, "slack", credKey, true, cc); err != nil {
+	if err := scope.SaveChannel(r.Context(), s.dataStore, uid, aid, "slack", credKey, true, cc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.appendBinding(r, sc, scopeID, config.Binding{
+	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "slack", AccountID: teamID},
 	}); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(sc, scopeID)
+	s.invalidateOwner(uid, aid)
 	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "slack", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
@@ -801,11 +746,10 @@ func (s *Server) handleStartAgentWeChatLogin(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	id := r.PathValue("id")
-	sc, scopeID, ok := s.resolveChannelBindingScope(w, r, id)
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
 	if !ok {
 		return
 	}
-	uid := s.effectiveUserID(r)
 
 	qr, err := wechatFetchQRCode(r.Context())
 	if err != nil {
@@ -818,8 +762,11 @@ func (s *Server) handleStartAgentWeChatLogin(w http.ResponseWriter, r *http.Requ
 		qrCodeImg: qr.QRCodeImgContent,
 		agentID:   id,
 		userID:    uid,
-		scope:     sc,
-		scopeID:   scopeID,
+		// `scope`/`scopeID` are kept on the struct for backwards compat
+		// with the polling handler — repurposed as (userID, agentID) so
+		// persist time uses the same ownership the caller saw at start.
+		scope:     uid,
+		scopeID:   aid,
 		createdAt: time.Now(),
 	})
 	jsonResponse(w, http.StatusOK, map[string]any{
@@ -908,10 +855,11 @@ func (s *Server) handleAgentWeChatLoginStatus(w http.ResponseWriter, r *http.Req
 }
 
 // persistWeChatAccount writes a kind=channel row + binding for a
-// freshly-confirmed iLink account, identical in shape to what
-// handleConnectAgentTelegram does for a token paste — just sourcing
-// the credentials from QR confirmation instead of user input.
-func (s *Server) persistWeChatAccount(r *http.Request, sc, scopeID, agentID string, creds wechatCredentials) error {
+// freshly-confirmed iLink account. The legacy 3rd/4th args (sc,
+// scopeID) are now reused to carry (userID, agentID) — the wechat QR
+// flow stashes them on wechatLoginSession at start so persist time
+// uses the same ownership.
+func (s *Server) persistWeChatAccount(r *http.Request, userID, agentIDArg, agentID string, creds wechatCredentials) error {
 	cc := config.ChannelConfig{
 		Enabled: true,
 		Accounts: map[string]config.AccountConfig{
@@ -923,19 +871,19 @@ func (s *Server) persistWeChatAccount(r *http.Request, sc, scopeID, agentID stri
 		},
 	}
 	credKey := creds.ILinkBotID
-	if err := s.assertChannelCredentialUnique(r, "wechat", credKey, ""); err != nil {
+	if err := s.assertChannelCredentialUnique(r, "wechat", credKey, "", userID, agentIDArg); err != nil {
 		return err
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, sc, scopeID, "wechat", credKey, true, cc); err != nil {
+	if err := scope.SaveChannel(r.Context(), s.dataStore, userID, agentIDArg, "wechat", credKey, true, cc); err != nil {
 		return err
 	}
-	if err := s.appendBinding(r, sc, scopeID, config.Binding{
+	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: agentID,
 		Match:   config.Match{Channel: "wechat", AccountID: creds.ILinkBotID},
 	}); err != nil {
 		return err
 	}
-	s.invalidateScope(sc, scopeID)
+	s.invalidateOwner(userID, agentIDArg)
 	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "wechat", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
@@ -1044,7 +992,7 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		return
 	}
 	id := r.PathValue("id")
-	sc, scopeID, ok := s.resolveChannelBindingScope(w, r, id)
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
 	if !ok {
 		return
 	}
@@ -1086,22 +1034,22 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		},
 	}
 	credKey := appID
-	if err := s.assertChannelCredentialUnique(r, "feishu", credKey, ""); err != nil {
+	if err := s.assertChannelCredentialUnique(r, "feishu", credKey, "", uid, aid); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, sc, scopeID, "feishu", credKey, true, cc); err != nil {
+	if err := scope.SaveChannel(r.Context(), s.dataStore, uid, aid, "feishu", credKey, true, cc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.appendBinding(r, sc, scopeID, config.Binding{
+	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "feishu", AccountID: appID},
 	}); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(sc, scopeID)
+	s.invalidateOwner(uid, aid)
 	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "feishu", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
@@ -1165,7 +1113,7 @@ func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
-	sc, scopeID, ok := s.resolveChannelBindingScope(w, r, id)
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
 	if !ok {
 		return
 	}
@@ -1198,22 +1146,22 @@ func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 	credKey := userID
-	if err := s.assertChannelCredentialUnique(r, "line", credKey, ""); err != nil {
+	if err := s.assertChannelCredentialUnique(r, "line", credKey, "", uid, aid); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, sc, scopeID, "line", credKey, true, cc); err != nil {
+	if err := scope.SaveChannel(r.Context(), s.dataStore, uid, aid, "line", credKey, true, cc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.appendBinding(r, sc, scopeID, config.Binding{
+	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "line", AccountID: userID},
 	}); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(sc, scopeID)
+	s.invalidateOwner(uid, aid)
 	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "line", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}

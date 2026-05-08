@@ -66,6 +66,17 @@ type Store interface {
 	ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error)
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
+	// ResolveActiveSessionKey returns the most recently updated session_key
+	// for the (channel, accountID, chatID) triple, or ErrNotFound. Used by
+	// IM routing to pick the conversation thread an inbound message
+	// belongs to without forcing the channel adapter to track session IDs.
+	ResolveActiveSessionKey(ctx context.Context, userID, agentID, channel, accountID, chatID string) (string, error)
+	// LookupSessionTriple returns the (channel, accountID, chatID) for a
+	// known session_key — the inverse of ResolveActiveSessionKey. Web
+	// chat handlers use it to recover the chat_id when the URL only
+	// carries the session_key, so workspace artifacts stay namespaced
+	// under the original conversation rather than re-keyed by session.
+	LookupSessionTriple(ctx context.Context, userID, agentID, sessionKey string) (channel, accountID, chatID string, err error)
 
 	// --- Session messages (append-only per-turn archive) ---
 	//
@@ -87,9 +98,9 @@ type Store interface {
 	// last-seen seq and receive the missed delta — without this the
 	// agent's reply becomes invisible until the parent session row is
 	// next loaded. Cleared by DeleteSession alongside session_messages.
-	AppendChatEvent(ctx context.Context, userID, agentID, sessionKey, eventType string, data []byte) (int64, error)
-	ListChatEventsSince(ctx context.Context, userID, agentID, sessionKey string, sinceSeq int64) ([]ChatEventRecord, error)
-	LatestChatEventSeq(ctx context.Context, userID, agentID, sessionKey string) (int64, error)
+	AppendSessionEvent(ctx context.Context, userID, agentID, sessionKey, eventType string, data []byte) (int64, error)
+	ListSessionEventsSince(ctx context.Context, userID, agentID, sessionKey string, sinceSeq int64) ([]SessionEventRecord, error)
+	LatestSessionEventSeq(ctx context.Context, userID, agentID, sessionKey string) (int64, error)
 
 	// --- Agent files ---
 	//
@@ -107,10 +118,10 @@ type Store interface {
 	DeleteAgentFile(ctx context.Context, agentID, userID, filename string) error
 	ListAgentFiles(ctx context.Context, agentID, userID string) ([]string, error)
 
-	// --- Scoped configs (providers / channels / settings live here) ---
+	// --- Configs (providers / channels / settings live here) ---
 	//
 	// One table backs all three concept families. Each row is keyed by
-	// (scope, scope_id, kind, name) and carries a JSON `data` payload.
+	// (kind, user_id, agent_id, name) and carries a JSON `data` payload.
 	//
 	//   kind="provider": LLM provider (name = provider key, e.g. "openai")
 	//   kind="channel":  channel adapter (name = channel type, e.g. "telegram")
@@ -121,9 +132,18 @@ type Store interface {
 	// message arrives. `enabled` lets a row hide an outer-scope row in the
 	// merge (used by channels: an inner-scope disabled row erases the
 	// outer entry).
-	ListConfigs(ctx context.Context, kind, scope, scopeID string) ([]ConfigRecord, error)
+	//
+	// ListConfigs(kind, userID, agentID) returns rows that match BOTH ids
+	// exactly. Pass empty for either to filter the corresponding ownership
+	// dimension. Pass both empty to get only system/global rows.
+	ListConfigs(ctx context.Context, kind, userID, agentID string) ([]ConfigRecord, error)
+	// QueryAllConfigs returns every row of a given kind regardless of
+	// ownership. Used by the gateway boot path to register every
+	// channel adapter on disk and by admin tooling that lists all
+	// rows of a kind across users/agents.
+	QueryAllConfigs(ctx context.Context, kind string) ([]ConfigRecord, error)
 	GetConfig(ctx context.Context, id string) (*ConfigRecord, error)
-	GetConfigByName(ctx context.Context, kind, scope, scopeID, name string) (*ConfigRecord, error)
+	GetConfigByName(ctx context.Context, kind, userID, agentID, name string) (*ConfigRecord, error)
 	SaveConfig(ctx context.Context, c *ConfigRecord) error
 	DeleteConfig(ctx context.Context, id string) error
 	LookupChannelByCredential(ctx context.Context, channelType, credKey string) (*ConfigRecord, error)
@@ -240,7 +260,17 @@ type AgentRecord struct {
 }
 
 // SessionRecord holds a conversation session.
+//
+// Channel / AccountID / ChatID identify the upstream conversation this
+// session belongs to (e.g. ("wechat", "<bot account id>", "<openid>") or
+// ("web", "", "<frontend session id>")). These are persisted once on
+// INSERT and never overwritten by an UPDATE — a session's home doesn't
+// move once it's created. Multiple session rows can share the same
+// triple; the active one for IM routing is resolved by max(updated_at).
 type SessionRecord struct {
+	Channel   string           `json:"channel,omitempty"`
+	AccountID string           `json:"accountId,omitempty"`
+	ChatID    string           `json:"chatId,omitempty"`
 	Messages  []SessionMessage `json:"messages"`
 	UpdatedAt time.Time        `json:"updatedAt"`
 }
@@ -259,10 +289,10 @@ type SessionMessage struct {
 	RawAssistant json.RawMessage        `json:"rawAssistant,omitempty"`
 }
 
-// ChatEventRecord is one row of chat_events — a single delta the
+// SessionEventRecord is one row of session_events — a single delta the
 // agent emitted during a turn. Data is opaque JSON whose shape depends
 // on Type ("content", "tool_call", "error", "done", ...).
-type ChatEventRecord struct {
+type SessionEventRecord struct {
 	UserID     string    `json:"userId,omitempty"`
 	AgentID    string    `json:"agentId,omitempty"`
 	SessionKey string    `json:"sessionKey,omitempty"`
@@ -275,6 +305,9 @@ type ChatEventRecord struct {
 // SessionMeta is summary info for a session (for listing).
 type SessionMeta struct {
 	Key          string    `json:"key"`
+	Channel      string    `json:"channel,omitempty"`
+	AccountID    string    `json:"accountId,omitempty"`
+	ChatID       string    `json:"chatId,omitempty"`
 	Title        string    `json:"title,omitempty"`
 	MessageCount int       `json:"messageCount"`
 	UpdatedAt    time.Time `json:"updatedAt"`
@@ -287,19 +320,16 @@ const (
 	KindSetting  = "setting"
 )
 
-// Scopes for ConfigRecord.
-const (
-	ScopeSystem = "system"
-	ScopeUser   = "user"
-	ScopeAgent  = "agent"
-	ScopeSkill  = "skill"
-)
-
 // ConfigRecord is one row of the configs table — the unified
 // home for providers, channels, and namespaced settings.
 //
 //   - kind says which family this row belongs to
-//   - (scope, scope_id) says who owns it
+//   - (user_id, agent_id) says who owns it; the empty-string defaults
+//     give us four natural ownership levels:
+//       ('', '')   = system / global
+//       (X, '')    = user X's private config
+//       ('', Y)    = agent Y's "official" config (anyone using Y inherits)
+//       (X, Y)     = user X's per-agent override on agent Y (multi-tenant)
 //   - name is the lookup handle inside that family (provider key,
 //     channel type, or setting namespace)
 //   - data is the family-specific JSON payload
@@ -307,10 +337,18 @@ const (
 // CredentialKey is only meaningful for kind="channel" — see
 // LookupChannelByCredential.
 type ConfigRecord struct {
-	ID            string                 `json:"id"`
-	Kind          string                 `json:"kind"`
-	Scope         string                 `json:"scope"`
-	ScopeID       string                 `json:"scopeId"`
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	// Scope is a denormalized label derived from (UserID, AgentID).
+	// "system" / "user" / "agent" / "user-agent". The storage layer is
+	// the single writer — SaveConfig always recomputes and overwrites
+	// whatever the caller passed, so the column can't drift out of
+	// sync with the (user_id, agent_id) source of truth. Kept so DB
+	// dumps and ad-hoc queries (`WHERE scope='system'`) stay readable
+	// without parsing the empty/non-empty pattern of the id columns.
+	Scope         string                 `json:"scope,omitempty"`
+	UserID        string                 `json:"userId,omitempty"`
+	AgentID       string                 `json:"agentId,omitempty"`
 	Name          string                 `json:"name"`
 	Enabled       bool                   `json:"enabled"`
 	CredentialKey string                 `json:"credentialKey,omitempty"`
@@ -319,12 +357,58 @@ type ConfigRecord struct {
 	UpdatedAt     time.Time              `json:"updatedAt"`
 }
 
+// computeConfigScope derives the scope label from the (userID, agentID)
+// ownership pair. Single source of truth for the Scope column —
+// SaveConfig calls this before every write, so any divergence between
+// the columns and the label means a code path that bypassed SaveConfig
+// (which shouldn't exist outside of test-only ad-hoc INSERTs).
+func computeConfigScope(userID, agentID string) string {
+	switch {
+	case userID != "" && agentID != "":
+		return "user-agent"
+	case userID != "":
+		return "user"
+	case agentID != "":
+		return "agent"
+	default:
+		return "system"
+	}
+}
 
-// CronJobRecord holds a scheduled job. agent_id is mandatory — the
-// executing identity is whoever currently owns the agent (looked up via
-// agents.user_id at fire time).
+// LegacyScope returns the scope label suitable for the HTTP-layer
+// (scope, scopeId) JSON shape. Reads the persisted column when set;
+// falls back to recomputing for rows that pre-date the column-add
+// migration / are constructed in tests via raw INSERT.
+func (r ConfigRecord) LegacyScope() string {
+	if r.Scope != "" {
+		return r.Scope
+	}
+	return computeConfigScope(r.UserID, r.AgentID)
+}
+
+// LegacyScopeID is the scopeID half of LegacyScope. For per-(user,
+// agent) rows it returns "user_id/agent_id" so the JSON consumer has
+// enough to round-trip.
+func (r ConfigRecord) LegacyScopeID() string {
+	switch {
+	case r.UserID != "" && r.AgentID != "":
+		return r.UserID + "/" + r.AgentID
+	case r.UserID != "":
+		return r.UserID
+	case r.AgentID != "":
+		return r.AgentID
+	default:
+		return ""
+	}
+}
+
+
+// CronJobRecord holds a scheduled job. agent_id is mandatory; user_id is
+// also stored so "list a user's crons" doesn't need a join against
+// agents and ownership checks can short-circuit.
 type CronJobRecord struct {
 	ID        string     `json:"id"`
+	UserID    string     `json:"userId,omitempty"`
 	AgentID   string     `json:"agentId"`
 	Name      string     `json:"name"`
 	Type      string     `json:"type"`

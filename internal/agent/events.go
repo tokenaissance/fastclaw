@@ -33,7 +33,7 @@ func ContextWithChatEvents(ctx context.Context, ch chan<- ChatEvent) context.Con
 }
 
 // emitEvent fans one event out to every consumer registered on ctx:
-//   - the persistent sink (chat_events table) — assigns a seq used by
+//   - the persistent sink (session_events table) — assigns a seq used by
 //     reconnecting clients to dedup replayed events
 //   - the in-process hub (live subscribers across tabs / handlers)
 //   - the legacy channel (the synchronous SSE handler that's still
@@ -50,7 +50,7 @@ func emitEvent(ctx context.Context, evt ChatEvent) {
 	var seq int64 = -1
 	if stream != nil && stream.sink != nil && stream.userID != "" && stream.sessionKey != "" {
 		blob, _ := json.Marshal(evt.Data)
-		s, err := stream.sink.AppendChatEvent(ctx, stream.userID, stream.agentID, stream.sessionKey, evt.Type, blob)
+		s, err := stream.sink.AppendSessionEvent(ctx, stream.userID, stream.agentID, stream.sessionKey, evt.Type, blob)
 		if err != nil {
 			slog.Warn("persist chat event failed",
 				"agent", stream.agentID, "session", stream.sessionKey,

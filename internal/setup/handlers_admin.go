@@ -241,7 +241,7 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 		if req.Model != "" {
 			pcfg.Models = []config.ModelEntry{{ID: req.Model, Name: req.Model}}
 		}
-		if err := scope.SaveProvider(r.Context(), s.dataStore, scope.System, "", req.Provider, pcfg); err != nil {
+		if err := scope.SaveProviderByScope(r.Context(), s.dataStore, scope.System, "", req.Provider, pcfg); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -249,7 +249,7 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 			defaults := map[string]interface{}{
 				"model": req.Provider + "/" + req.Model,
 			}
-			if err := scope.SaveSetting(r.Context(), s.dataStore, scope.System, "", "agents.defaults", defaults); err != nil {
+			if err := scope.SaveSettingByScope(r.Context(), s.dataStore, scope.System, "", "agents.defaults", defaults); err != nil {
 				jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 				return
 			}
@@ -284,7 +284,7 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 		if req.SandboxE2BKey != "" {
 			sandbox["e2bKey"] = req.SandboxE2BKey
 		}
-		if err := scope.SaveSetting(r.Context(), s.dataStore, scope.System, "", "sandbox", sandbox); err != nil {
+		if err := scope.SaveSettingByScope(r.Context(), s.dataStore, scope.System, "", "sandbox", sandbox); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -707,7 +707,7 @@ func (s *Server) forkAgentContent(r *http.Request, src, dst *store.AgentRecord) 
 			return err
 		}
 	}
-	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindSetting, store.ScopeAgent, src.ID)
+	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindSetting, "", src.ID)
 	if err != nil {
 		return err
 	}
@@ -715,7 +715,7 @@ func (s *Server) forkAgentContent(r *http.Request, src, dst *store.AgentRecord) 
 		if !forkAgentScopeConfigs[row.Name] {
 			continue
 		}
-		if err := scope.SaveSetting(r.Context(), s.dataStore, scope.Agent, dst.ID, row.Name, row.Data); err != nil {
+		if err := scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, dst.ID, row.Name, row.Data); err != nil {
 			return err
 		}
 	}

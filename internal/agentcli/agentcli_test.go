@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
@@ -57,7 +56,7 @@ func TestInitCreatesAgentAndOwner(t *testing.T) {
 	}
 
 	// Provider config went to system scope.
-	rec, err := st.GetConfigByName(context.Background(), store.KindProvider, scope.System, "", "openai")
+	rec, err := st.GetConfigByName(context.Background(), store.KindProvider, "", "", "openai")
 	if err != nil {
 		t.Fatalf("get provider: %v", err)
 	}
@@ -96,7 +95,7 @@ func TestInitProviderPreflightRunsBeforeWrites(t *testing.T) {
 	if len(agents) != 0 {
 		t.Fatalf("preflight failure must not create agents: %#v", agents)
 	}
-	if rec, err := st.GetConfigByName(context.Background(), store.KindProvider, scope.System, "", "openai"); err == nil || rec != nil {
+	if rec, err := st.GetConfigByName(context.Background(), store.KindProvider, "", "", "openai"); err == nil || rec != nil {
 		t.Fatalf("preflight failure must not save provider config: rec=%#v err=%v", rec, err)
 	}
 }
@@ -275,7 +274,7 @@ func TestSetProviderModelRejectsEmptyValue(t *testing.T) {
 	if err := SetConfig(context.Background(), st, "ignored", "provider.openai.model", ""); err == nil {
 		t.Fatal("empty model id must be rejected")
 	}
-	rec, err := st.GetConfigByName(context.Background(), store.KindProvider, scope.System, "", "openai")
+	rec, err := st.GetConfigByName(context.Background(), store.KindProvider, "", "", "openai")
 	if err != nil {
 		t.Fatalf("get provider: %v", err)
 	}
@@ -286,7 +285,7 @@ func TestSetProviderModelRejectsEmptyValue(t *testing.T) {
 	if err := SetConfig(context.Background(), st, "ignored", "provider.openai.models", "[]"); err != nil {
 		t.Fatalf("explicit clear: %v", err)
 	}
-	rec, _ = st.GetConfigByName(context.Background(), store.KindProvider, scope.System, "", "openai")
+	rec, _ = st.GetConfigByName(context.Background(), store.KindProvider, "", "", "openai")
 	if models, _ := rec.Data["models"].([]interface{}); len(models) != 0 {
 		t.Fatalf("models not cleared: %#v", models)
 	}
@@ -453,26 +452,26 @@ func TestParseValueTypes(t *testing.T) {
 
 func TestSettingKeyRouting(t *testing.T) {
 	cases := []struct {
-		key       string
-		ns        string
-		path      []string
-		wantScope string
+		key           string
+		ns            string
+		path          []string
+		wantAgentScope bool
 	}{
-		{"model", "agents.defaults", []string{"model"}, scope.Agent},
-		{"temperature", "agents.defaults", []string{"temperature"}, scope.Agent},
-		{"sandbox", "sandbox", nil, scope.Agent},
-		{"sandbox.enabled", "sandbox", []string{"enabled"}, scope.Agent},
-		{"plugins", "plugins", nil, scope.System},
-		{"plugins.foo", "plugins", []string{"foo"}, scope.System},
+		{"model", "agents.defaults", []string{"model"}, true},
+		{"temperature", "agents.defaults", []string{"temperature"}, true},
+		{"sandbox", "sandbox", nil, true},
+		{"sandbox.enabled", "sandbox", []string{"enabled"}, true},
+		{"plugins", "plugins", nil, false},
+		{"plugins.foo", "plugins", []string{"foo"}, false},
 	}
 	for _, tc := range cases {
-		ns, path, sc, err := settingKey(tc.key)
+		ns, path, isAgent, err := settingKey(tc.key)
 		if err != nil {
 			t.Errorf("settingKey(%q) error: %v", tc.key, err)
 			continue
 		}
-		if ns != tc.ns || sc != tc.wantScope {
-			t.Errorf("settingKey(%q): ns=%q scope=%q (want ns=%q scope=%q)", tc.key, ns, sc, tc.ns, tc.wantScope)
+		if ns != tc.ns || isAgent != tc.wantAgentScope {
+			t.Errorf("settingKey(%q): ns=%q isAgentScope=%v (want ns=%q isAgentScope=%v)", tc.key, ns, isAgent, tc.ns, tc.wantAgentScope)
 		}
 		if len(path) != len(tc.path) {
 			t.Errorf("settingKey(%q): path %v want %v", tc.key, path, tc.path)

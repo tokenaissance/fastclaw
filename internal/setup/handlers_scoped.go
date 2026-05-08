@@ -3,7 +3,7 @@ package setup
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -94,6 +94,22 @@ func (s *Server) authorizeScope(w http.ResponseWriter, r *http.Request, sc, scop
 	}
 }
 
+// listConfigsByScope is the HTTP-side bridge to store.ListConfigs:
+// translates the (scope, scopeID) URL idiom into (userID, agentID).
+// New code should call store.ListConfigs directly with explicit
+// ownership; this helper exists so the dashboard's scope-keyed routes
+// don't have to inline the conversion at every call site.
+func (s *Server) listConfigsByScope(ctx context.Context, kind, sc, scopeID string) ([]store.ConfigRecord, error) {
+	uid, aid := scope.OwnershipFromScope(sc, scopeID)
+	return s.dataStore.ListConfigs(ctx, kind, uid, aid)
+}
+
+// getConfigByNameScope is the GetConfigByName variant of the same bridge.
+func (s *Server) getConfigByNameScope(ctx context.Context, kind, sc, scopeID, name string) (*store.ConfigRecord, error) {
+	uid, aid := scope.OwnershipFromScope(sc, scopeID)
+	return s.dataStore.GetConfigByName(ctx, kind, uid, aid, name)
+}
+
 // scopeFromQuery reads the scope/scopeId query parameters with sensible
 // defaults: missing scope falls through to the caller's user scope so a
 // regular user's `GET /api/providers` returns "their" providers.
@@ -119,7 +135,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeScope(w, r, sc, scopeID, scopeRead) {
 		return
 	}
-	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindProvider, sc, scopeID)
+	rows, err := s.listConfigsByScope(r.Context(), store.KindProvider, sc, scopeID)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -132,8 +148,8 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, map[string]any{
 			"id":        r.ID,
-			"scope":     r.Scope,
-			"scopeId":   r.ScopeID,
+			"scope":     r.LegacyScope(),
+			"scopeId":   r.LegacyScopeID(),
 			"name":      r.Name,
 			"apiBase":   pc.APIBase,
 			"apiKey":    maskAPIKey(pc.APIKey),
@@ -184,7 +200,7 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		AuthType: req.AuthType,
 		Models:   req.Models,
 	}
-	if err := scope.SaveProvider(r.Context(), s.dataStore, sc, scopeID, req.Name, pcfg); err != nil {
+	if err := scope.SaveProviderByScope(r.Context(), s.dataStore, sc, scopeID, req.Name, pcfg); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -202,7 +218,7 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
+	if !s.authorizeScope(w, r, rec.LegacyScope(), rec.LegacyScopeID(), scopeWrite) {
 		return
 	}
 	var req writeProviderRequest
@@ -233,11 +249,11 @@ func (s *Server) handleUpdateProvider(w http.ResponseWriter, r *http.Request) {
 	if req.Models != nil {
 		pc.Models = req.Models
 	}
-	if err := scope.SaveProvider(r.Context(), s.dataStore, rec.Scope, rec.ScopeID, rec.Name, pc); err != nil {
+	if err := scope.SaveProviderByScope(r.Context(), s.dataStore, rec.LegacyScope(), rec.LegacyScopeID(), rec.Name, pc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(rec.Scope, rec.ScopeID)
+	s.invalidateScope(rec.LegacyScope(), rec.LegacyScopeID())
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -251,14 +267,14 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
+	if !s.authorizeScope(w, r, rec.LegacyScope(), rec.LegacyScopeID(), scopeWrite) {
 		return
 	}
 	if err := s.dataStore.DeleteConfig(r.Context(), id); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(rec.Scope, rec.ScopeID)
+	s.invalidateScope(rec.LegacyScope(), rec.LegacyScopeID())
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -269,7 +285,7 @@ func (s *Server) handleListScopedChannels(w http.ResponseWriter, r *http.Request
 	if !s.authorizeScope(w, r, sc, scopeID, scopeRead) {
 		return
 	}
-	rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, sc, scopeID)
+	rows, err := s.listConfigsByScope(r.Context(), store.KindChannel, sc, scopeID)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -282,8 +298,8 @@ func (s *Server) handleListScopedChannels(w http.ResponseWriter, r *http.Request
 		}
 		out = append(out, map[string]any{
 			"id":            r.ID,
-			"scope":         r.Scope,
-			"scopeId":       r.ScopeID,
+			"scope":         r.LegacyScope(),
+			"scopeId":       r.LegacyScopeID(),
 			"type":          r.Name,
 			"enabled":       r.Enabled,
 			"botToken":      maskAPIKey(cc.BotToken),
@@ -343,7 +359,8 @@ func (s *Server) handleCreateScopedChannel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	credKey := credentialKeyFor(req.Type, req.BotToken, req.CredentialKey)
-	if err := s.assertChannelCredentialUnique(r, req.Type, credKey, ""); err != nil {
+	uid, aid := scope.OwnershipFromScope(sc, scopeID)
+	if err := s.assertChannelCredentialUnique(r, req.Type, credKey, "", uid, aid); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
@@ -352,7 +369,7 @@ func (s *Server) handleCreateScopedChannel(w http.ResponseWriter, r *http.Reques
 		BotToken: req.BotToken,
 		AppToken: req.AppToken,
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, sc, scopeID, req.Type, credKey, req.Enabled, cc); err != nil {
+	if err := scope.SaveChannelByScope(r.Context(), s.dataStore, sc, scopeID, req.Type, credKey, req.Enabled, cc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -375,7 +392,7 @@ func (s *Server) handleUpdateScopedChannel(w http.ResponseWriter, r *http.Reques
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
+	if !s.authorizeScope(w, r, rec.LegacyScope(), rec.LegacyScopeID(), scopeWrite) {
 		return
 	}
 	var req writeChannelRequest
@@ -396,16 +413,16 @@ func (s *Server) handleUpdateScopedChannel(w http.ResponseWriter, r *http.Reques
 	enabled := req.Enabled
 	credKey := credentialKeyFor(rec.Name, cc.BotToken, req.CredentialKey)
 	if credKey != rec.CredentialKey {
-		if err := s.assertChannelCredentialUnique(r, rec.Name, credKey, rec.ID); err != nil {
+		if err := s.assertChannelCredentialUnique(r, rec.Name, credKey, rec.ID, rec.UserID, rec.AgentID); err != nil {
 			jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 			return
 		}
 	}
-	if err := scope.SaveChannel(r.Context(), s.dataStore, rec.Scope, rec.ScopeID, rec.Name, credKey, enabled, cc); err != nil {
+	if err := scope.SaveChannelByScope(r.Context(), s.dataStore, rec.LegacyScope(), rec.LegacyScopeID(), rec.Name, credKey, enabled, cc); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(rec.Scope, rec.ScopeID)
+	s.invalidateScope(rec.LegacyScope(), rec.LegacyScopeID())
 	if enabled {
 		if updated, _ := s.dataStore.LookupChannelByCredential(r.Context(), rec.Name, credKey); updated != nil {
 			s.hotRegisterChannel(*updated)
@@ -424,14 +441,14 @@ func (s *Server) handleDeleteScopedChannel(w http.ResponseWriter, r *http.Reques
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
 		return
 	}
-	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeWrite) {
+	if !s.authorizeScope(w, r, rec.LegacyScope(), rec.LegacyScopeID(), scopeWrite) {
 		return
 	}
 	if err := s.dataStore.DeleteConfig(r.Context(), id); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.invalidateScope(rec.Scope, rec.ScopeID)
+	s.invalidateScope(rec.LegacyScope(), rec.LegacyScopeID())
 	// Best-effort: stop the bot adapter from receiving outbound routes.
 	// We don't know its accountID without decoding rec, so derive from
 	// the row we just looked up (rec is still valid here).
@@ -458,9 +475,21 @@ func decodeChannelConfigFromRecord(rec *store.ConfigRecord) config.ChannelConfig
 
 // assertChannelCredentialUnique enforces the soft uniqueness invariant the
 // schema doesn't have a DB constraint for: two rows with the same
-// (kind="channel", credential_key) would race in the inbound dispatcher.
-// excludeID lets the update path skip the row being mutated.
-func (s *Server) assertChannelCredentialUnique(r *http.Request, channelType, credKey, excludeID string) error {
+// (kind="channel", credential_key) would race in the inbound dispatcher
+// — only one row is returned and which one is undefined.
+//
+// "Same logical row" exemptions:
+//   - excludeID matches: the update path; we're rewriting the row in place
+//   - same (kind, user_id, agent_id, name): the upsert path; the
+//     connect handler is reconnecting the SAME bot to the SAME (user,
+//     agent) it was bound to before. SaveChannel's ON CONFLICT will
+//     just refresh the row, no race.
+//
+// callerUserID / callerAgentID are the (user_id, agent_id) of the row
+// the caller is about to write — passing empty strings preserves the
+// stricter "global uniqueness" semantics for callers that don't have
+// that context handy.
+func (s *Server) assertChannelCredentialUnique(r *http.Request, channelType, credKey, excludeID string, callerUserID, callerAgentID string) error {
 	if credKey == "" {
 		return nil
 	}
@@ -471,7 +500,37 @@ func (s *Server) assertChannelCredentialUnique(r *http.Request, channelType, cre
 	if existing == nil || existing.ID == excludeID {
 		return nil
 	}
-	return errors.New("another channel row already uses this credential")
+	// Same caller reconnecting the same bot to the same agent — the
+	// upsert path will refresh the existing row, not create a new one.
+	if existing.UserID == callerUserID &&
+		existing.AgentID == callerAgentID &&
+		existing.Name == channelType {
+		return nil
+	}
+	// Surface where the conflict actually lives so the operator knows
+	// where to disconnect first instead of staring at a generic message.
+	scopeHint := existing.LegacyScope()
+	if existing.AgentID != "" {
+		scopeHint = "agent " + existing.AgentID
+	} else if existing.UserID != "" {
+		scopeHint = "user " + existing.UserID
+	}
+	return fmt.Errorf("this bot is already connected at %s — disconnect it there first", scopeHint)
+}
+
+// invalidateOwner is the (userID, agentID) form of invalidateScope —
+// preferred for code that's already speaking the new ownership idiom.
+// Falls through to invalidateScope so the cache topology stays
+// consistent regardless of which entry point the caller used.
+func (s *Server) invalidateOwner(userID, agentID string) {
+	sc, scopeID := scope.ScopeFromOwnership(userID, agentID)
+	// "user-agent" doesn't exist in invalidateScope's switch — for
+	// per-(user, agent) writes, dropping the user's cached UserSpace
+	// is the right behavior, so map it to scope=user.
+	if sc == "user-agent" {
+		sc, scopeID = scope.User, userID
+	}
+	s.invalidateScope(sc, scopeID)
 }
 
 // invalidateScope drops cached UserSpaces affected by a scope-level

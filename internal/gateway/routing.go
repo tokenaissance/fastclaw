@@ -13,8 +13,14 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
-func chatKey(channel, chatID string) string {
-	return channel + ":" + chatID
+// chatKey is the per-conversation serialization key used by the task
+// queue so messages for one chat run sequentially. Includes accountID
+// because two bots of the same channel type can have a colliding
+// chat_id (e.g. Telegram chat 12345 on bot A is unrelated to chat 12345
+// on bot B) — without it those would serialize against each other and
+// one bot's slow turn would block the other.
+func chatKey(channel, accountID, chatID string) string {
+	return channel + ":" + accountID + ":" + chatID
 }
 
 // processInbound consumes the message bus and routes each message to the
@@ -72,22 +78,24 @@ func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessag
 		}
 		return ""
 	}
-	switch rec.Scope {
-	case "user":
-		return rec.ScopeID
-	case "agent":
-		// agent-scoped channel — find the agent's owner
-		if rec.ScopeID == "" {
-			return ""
-		}
-		// We don't know the user yet; ListAllAgents + filter is
-		// fine since channel-scope lookups are infrequent.
+	// channel rows now carry user_id directly — the binder, not the
+	// agent owner indirection. The previous "scope=agent → look up
+	// agent.user_id" branch is gone because every channel row written
+	// by handleConnect* persists the resolved user_id (owner or
+	// non-owner) at insert time.
+	if rec.UserID != "" {
+		return rec.UserID
+	}
+	// System-level rows (user_id='') still happen in dev installs that
+	// pre-seed a global bot. Fall back to the agent owner via agent_id
+	// when present so those rows route somewhere sensible.
+	if rec.AgentID != "" {
 		all, err := g.store.ListAllAgents(ctx)
 		if err != nil {
 			return ""
 		}
 		for _, ar := range all {
-			if ar.ID == rec.ScopeID {
+			if ar.ID == rec.AgentID {
 				return ar.UserID
 			}
 		}
@@ -111,7 +119,7 @@ func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
 	slog.Info("routing DM",
 		"user", msg.OwnerUserID, "channel", msg.Channel,
 		"chat_id", msg.ChatID, "agent", ag.Name())
-	g.taskQueue.Submit(ag.Name(), chatKey(msg.Channel, msg.ChatID), msg, msg.AccountID)
+	g.taskQueue.Submit(ag.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, msg.AccountID)
 }
 
 func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
@@ -135,7 +143,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				triggerMsg := msg
 				triggerMsg.Text = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
 				triggerMsg.IsBotMessage = false
-				g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
+				g.taskQueue.Submit(target.Name(), chatKey(triggerMsg.Channel, triggerMsg.AccountID, triggerMsg.ChatID), triggerMsg, g.accountIDForAgent(space, target.Name(), triggerMsg.Channel))
 			}
 		}
 		return
@@ -147,7 +155,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 					ag.InjectGroupMessage(ctx, msg)
 				}
 			}
-			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+			g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
 			return
 		}
 	}
@@ -163,7 +171,7 @@ func (g *Gateway) routeGroup(ctx context.Context, msg bus.InboundMessage) {
 				ag.InjectGroupMessage(ctx, msg)
 			}
 		}
-		g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
+		g.taskQueue.Submit(target.Name(), chatKey(msg.Channel, msg.AccountID, msg.ChatID), msg, g.accountIDForAgent(space, target.Name(), msg.Channel))
 	default:
 		for _, ag := range boundAgents {
 			ag.InjectGroupMessage(ctx, msg)

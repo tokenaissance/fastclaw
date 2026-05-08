@@ -2,6 +2,7 @@ package setup
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,7 @@ import (
 // table — the kind=setting, scope=agent row that supersedes the
 // system/user defaults when set.
 func (s *Server) agentScopeModel(r *http.Request, agentID string) string {
-	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, store.ScopeAgent, agentID, "agents.defaults")
+	rec, err := s.dataStore.GetConfigByName(r.Context(), store.KindSetting, "", agentID, "agents.defaults")
 	if err != nil || rec == nil {
 		return ""
 	}
@@ -39,9 +40,9 @@ func (s *Server) agentScopeModel(r *http.Request, agentID string) string {
 func (s *Server) saveAgentScopeModel(r *http.Request, agentID, model string) error {
 	model = strings.TrimSpace(model)
 	if model == "" {
-		return scope.SaveSetting(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", nil)
+		return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", nil)
 	}
-	return scope.SaveSetting(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", map[string]interface{}{"model": model})
+	return scope.SaveSettingByScope(r.Context(), s.dataStore, scope.Agent, agentID, "agents.defaults", map[string]interface{}{"model": model})
 }
 
 // effectiveUserID returns the resolved user_id for the request: the
@@ -591,6 +592,33 @@ func (s *Server) resolveSystemFileTarget(w http.ResponseWriter, r *http.Request,
 // passes its own sessionID for in-chat tool calls; those land under the
 // session sub-prefix automatically.
 
+// workspaceSessionScope translates the URL `?sessionId=` token into
+// the directory name used under workspaces/<agent>/sessions/. The URL
+// token is the session_key (so the dashboard can address any session
+// uniformly), but workspace artifacts are namespaced by chat_id
+// instead — that's what the agent runtime passed at write time. Pre-
+// migration legacy keys looked like "web_<chat_id>" and the runtime
+// wrote files under "sessions/<chat_id>/", not "sessions/web_<chat_id>/".
+//
+// Returns the chat_id when the session_key resolves; falls back to the
+// raw token when the lookup fails (brand-new sessions whose row hasn't
+// been created yet, or sessions saved before this migration).
+func (s *Server) workspaceSessionScope(ctx context.Context, agentID, urlToken string) string {
+	tok := strings.TrimSpace(urlToken)
+	if tok == "" || s.dataStore == nil {
+		return tok
+	}
+	uid := config.UserIDFromContext(ctx)
+	if uid == "" {
+		return tok
+	}
+	_, _, chatID, err := s.dataStore.LookupSessionTriple(ctx, uid, agentID, tok)
+	if err != nil || chatID == "" {
+		return tok
+	}
+	return chatID
+}
+
 func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if s.workspaceStore == nil {
@@ -608,7 +636,7 @@ func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+	sessionID := s.workspaceSessionScope(r.Context(), id, r.URL.Query().Get("sessionId"))
 	var prefix string
 	if sessionID != "" {
 		prefix = "sessions/" + sessionID + "/"
@@ -645,7 +673,7 @@ func (s *Server) handleAgentFilesZip(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+	sessionID := s.workspaceSessionScope(r.Context(), id, r.URL.Query().Get("sessionId"))
 	var prefix, archiveName string
 	if sessionID != "" {
 		prefix = "sessions/" + sessionID + "/"

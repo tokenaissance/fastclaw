@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,7 +16,9 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 )
 
-// Session holds the message history for a channel_chat_id pair.
+// Session holds the message history for one conversation thread within
+// a (channel, accountID, chatID) triple. session_key is the per-session
+// opaque id; the triple identifies "where" the conversation lives.
 type Session struct {
 	mu                sync.Mutex
 	Messages          []provider.Message
@@ -26,6 +29,9 @@ type Session struct {
 	userID            string
 	agentID           string
 	sessionKey        string
+	channel           string
+	accountID         string
+	chatID            string
 }
 
 // ctx returns a context tagged with this Session's user so the store layer
@@ -38,8 +44,14 @@ func (s *Session) ctx() context.Context {
 	return config.WithUserID(context.Background(), s.userID)
 }
 
-// Manager manages sessions, keyed by "channel_chat_id".
-// SessionStore is an optional interface for database-backed session persistence.
+// Manager manages sessions for one (user, agent). Sessions are keyed
+// internally by an opaque session_key; the (channel, accountID, chatID)
+// triple is what callers use to address "the conversation thread the
+// user is in right now". The active session for that triple is the
+// most recently updated row — `/new` mints a fresh one to start over.
+//
+// SessionStore is the optional persistence interface (DB-backed in
+// production; nil in file-only mode for single-binary dev installs).
 //
 // Two parallel persistence shapes:
 //   - GetSession / SaveSession operate on the LLM-facing working set
@@ -51,12 +63,19 @@ func (s *Session) ctx() context.Context {
 //     of how many times the working set has been pruned/summarized.
 type SessionStore interface {
 	GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
-	SaveSession(ctx context.Context, agentID, sessionKey string, messages []provider.Message) error
+	SaveSession(ctx context.Context, agentID, sessionKey, channel, accountID, chatID string, messages []provider.Message) error
 	AppendMessage(ctx context.Context, agentID, sessionKey string, msg provider.Message) error
 	ListMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error)
 	ListWebSessions(ctx context.Context, agentID string) ([]WebSession, error)
 	DeleteSession(ctx context.Context, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, agentID, sessionKey, title string) error
+	// ResolveActiveSessionKey returns the most recent session_key for the
+	// (channel, accountID, chatID) triple, or empty string if none.
+	ResolveActiveSessionKey(ctx context.Context, agentID, channel, accountID, chatID string) (string, error)
+	// LookupSessionTriple is the inverse — given a session_key, return
+	// the conversation it belongs to. Returns ("","","",nil) when the
+	// session doesn't exist (manager treats that as "not yet stored").
+	LookupSessionTriple(ctx context.Context, agentID, sessionKey string) (channel, accountID, chatID string, err error)
 }
 
 type Manager struct {
@@ -98,17 +117,61 @@ func (m *Manager) ctx() context.Context {
 	return config.WithUserID(context.Background(), m.userID)
 }
 
-// sessionKey returns the canonical, storage-agnostic key for a session.
-// Uses "_" rather than ":" so filesystem backends don't need to re-encode
-// the key into a filename-safe form on every call and DB-backed backends
-// end up with the same literal string in their session_key column.
-// Everything downstream (DB rows, JSONL filenames, ListWebSessions' prefix
-// filter) can now share one encoding instead of each picking its own.
-func sessionKey(channel, chatID string) string {
-	return channel + "_" + chatID
+// generateSessionKey mints an opaque session_key for a fresh
+// conversation thread. The same generator is used regardless of channel
+// — `s-<unix_ms>-<rand>`. The (channel, accountID, chatID) triple is
+// stored alongside in dedicated columns; the literal session_key string
+// no longer encodes channel info, so a `/new` command in IM can mint a
+// second key under the same triple without colliding.
+func generateSessionKey() string {
+	const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+	var rand6 [6]byte
+	if _, err := cryptorand.Read(rand6[:]); err != nil {
+		// fall back to time-derived bytes — collision is extremely
+		// unlikely once the timestamp prefix is in play
+		now := time.Now().UnixNano()
+		for i := range rand6 {
+			rand6[i] = byte(now >> (i * 8))
+		}
+	}
+	suffix := make([]byte, len(rand6))
+	for i, b := range rand6 {
+		suffix[i] = alphabet[int(b)%len(alphabet)]
+	}
+	return fmt.Sprintf("s-%d-%s", time.Now().UnixMilli(), suffix)
 }
 
-// Get returns or creates a session for the given channel and chat ID.
+// resolveOrMintKey picks the active session_key for (channel,
+// accountID, chatID) from the store, or mints a fresh one when nothing
+// exists yet (the very first message in a conversation). Pre-existing
+// rows from before the channel-triple migration may carry a key like
+// `web_<sid>` or `wechat_<openid>` — they're matched by the backfilled
+// triple, not by parsing the key, so the legacy format keeps working.
+//
+// New-row mint policy:
+//   - web: session_key == chatID. Web's chatID *is* the per-conversation
+//     identifier (the frontend generates one per "+New chat") so making
+//     it equal the session_key keeps the URL `?session=` token stable
+//     across reloads — no "URL changed after first message" surprises.
+//   - everywhere else: mint an opaque `s-<unix_ms>-<rand>`. IM channels
+//     reuse one chatID (the user's openid / chat_id) across many
+//     sessions, so the session_key has to be independent for `/new` to
+//     produce a sibling row.
+func (m *Manager) resolveOrMintKey(channel, accountID, chatID string) string {
+	if m.store != nil {
+		if k, err := m.store.ResolveActiveSessionKey(m.ctx(), m.agentID, channel, accountID, chatID); err == nil && k != "" {
+			return k
+		}
+	}
+	if channel == "web" && chatID != "" {
+		return chatID
+	}
+	return generateSessionKey()
+}
+
+// Get returns or creates the active session for the (channel, accountID,
+// chatID) triple. The session_key is resolved server-side rather than
+// derived from the inputs — see resolveOrMintKey.
 //
 // In multi-replica deployments (store-backed mode), every Get() reloads
 // Messages from the store so a request served by pod B sees writes made
@@ -119,9 +182,100 @@ func sessionKey(channel, chatID string) string {
 // transient fields (snapshot, LastConsolidated) survive.
 //
 // File-backed mode stays cache-first since there's only one process.
-func (m *Manager) Get(channel, chatID string) *Session {
-	key := sessionKey(channel, chatID)
+func (m *Manager) Get(channel, accountID, chatID string) *Session {
+	key := m.resolveOrMintKey(channel, accountID, chatID)
+	return m.getByKey(key, channel, accountID, chatID)
+}
 
+// GetByKey loads a specific session by its session_key. Used when the
+// caller already has a key in hand (e.g. web history fetch from a URL
+// `?session=…`) and wants to bypass the active-session lookup.
+func (m *Manager) GetByKey(sessionKey string) *Session {
+	return m.getByKey(sessionKey, "", "", "")
+}
+
+// LookupSessionTriple forwards to the store's session_key → triple
+// lookup. Returns ("","","",nil) when the row doesn't exist, mirroring
+// the SessionStore implementation. Callers should use SessionExists
+// first if they need to distinguish "no row" from "row with empty
+// triple" (e.g. file-backed dev mode where the store is nil).
+func (m *Manager) LookupSessionTriple(sessionKey string) (channel, accountID, chatID string, err error) {
+	if m.store == nil {
+		return "", "", "", nil
+	}
+	return m.store.LookupSessionTriple(m.ctx(), m.agentID, sessionKey)
+}
+
+// SessionExists reports whether a session row already exists under the
+// given session_key. Used by agent-side URL resolvers: a `?session=…`
+// token can be either a canonical session_key or a legacy web chat_id,
+// and the lookup needs a cheap way to tell which.
+func (m *Manager) SessionExists(sessionKey string) bool {
+	if m.store == nil {
+		// File-backed mode has no negative-lookup primitive — assume
+		// yes so the legacy chat_id fallback isn't preferred over the
+		// caller's intent. The follow-up GetByKey will load whatever's
+		// on disk (empty file → empty Session, harmless).
+		return true
+	}
+	msgs, err := m.store.GetSession(m.ctx(), m.agentID, sessionKey)
+	return err == nil && msgs != nil
+}
+
+// ResolveSessionKey turns a URL token (`?session=…`) into the
+// canonical session_key. Accepts either:
+//   - a session_key directly (the ID surfaced by ListWebSessions)
+//   - a legacy web chat_id (older URLs and the frontend's freshly-
+//     generated id on the *first* turn of a "+New chat")
+//
+// Returns the input unchanged when nothing matches — callers' downstream
+// load/save will then create the row, which is correct for brand-new
+// web chats where the URL token is the about-to-exist session_key.
+func (m *Manager) ResolveSessionKey(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	if m.SessionExists(sessionID) {
+		return sessionID
+	}
+	if m.store != nil {
+		if k, err := m.store.ResolveActiveSessionKey(m.ctx(), m.agentID, "web", "", sessionID); err == nil && k != "" {
+			return k
+		}
+	}
+	return sessionID
+}
+
+// OpenNewSession mints a brand new session under the same (channel,
+// accountID, chatID) triple and returns its session_key. The next Get
+// for that triple will pick it up (it has the freshest updated_at).
+// Used by IM `/new` / `/reset` commands and any future "start new
+// conversation" UI affordance.
+func (m *Manager) OpenNewSession(channel, accountID, chatID string) string {
+	key := generateSessionKey()
+	if m.store != nil {
+		// Persist an empty row immediately so the active-session lookup
+		// for the next inbound message resolves to this key, not the
+		// previous (still-newer-than-not-existing) row.
+		_ = m.store.SaveSession(m.ctx(), m.agentID, key, channel, accountID, chatID, nil)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := &Session{
+		filePath:   filepath.Join(m.dataDir, key+".jsonl"),
+		store:      m.store,
+		userID:     m.userID,
+		agentID:    m.agentID,
+		sessionKey: key,
+		channel:    channel,
+		accountID:  accountID,
+		chatID:     chatID,
+	}
+	m.sessions[key] = s
+	return key
+}
+
+func (m *Manager) getByKey(key, channel, accountID, chatID string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -132,6 +286,15 @@ func (m *Manager) Get(channel, chatID string) *Session {
 				s.Messages = msgs
 				s.mu.Unlock()
 			}
+		}
+		// Late-bind the triple if the cached entry was created via
+		// GetByKey (no triple known then) and the caller now has it.
+		if channel != "" {
+			s.mu.Lock()
+			if s.channel == "" {
+				s.channel, s.accountID, s.chatID = channel, accountID, chatID
+			}
+			s.mu.Unlock()
 		}
 		return s
 	}
@@ -144,6 +307,9 @@ func (m *Manager) Get(channel, chatID string) *Session {
 		userID:     m.userID,
 		agentID:    m.agentID,
 		sessionKey: key,
+		channel:    channel,
+		accountID:  accountID,
+		chatID:     chatID,
 	}
 
 	// Load from store (DB) if available, otherwise from file
@@ -184,7 +350,7 @@ func (s *Session) Append(msg provider.Message) {
 	s.Messages = append(s.Messages, msg)
 
 	if s.store != nil {
-		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.Messages)
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.Messages)
 		if err := s.store.AppendMessage(s.ctx(), s.agentID, s.sessionKey, msg); err != nil {
 			fmt.Fprintf(os.Stderr, "session archive append error: %v\n", err)
 		}
@@ -248,7 +414,7 @@ func (s *Session) ReplaceMessages(msgs []provider.Message) {
 	s.LastConsolidated = 0
 
 	if s.store != nil {
-		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.Messages)
+		s.store.SaveSession(s.ctx(), s.agentID, s.sessionKey, s.channel, s.accountID, s.chatID, s.Messages)
 	} else {
 		s.rewriteFile()
 	}
@@ -325,16 +491,25 @@ func (s *Session) appendToFile(msg provider.Message) {
 	f.Write([]byte("\n"))
 }
 
-// WebSession holds metadata for a web chat session.
+// WebSession holds metadata for one chat session surfaced to the
+// dashboard. Despite the historical name it now spans every channel —
+// the Channel field tells callers which one to render the icon for.
+//
+// ID is the session_key (the row's PK), not the chat_id. Older URLs
+// pointing at a chat_id still resolve via the agent-side fallback
+// (ResolveSessionKey) so existing bookmarks don't break.
 type WebSession struct {
 	ID        string `json:"id"`
+	Channel   string `json:"channel,omitempty"`
+	AccountID string `json:"accountId,omitempty"`
+	ChatID    string `json:"chatId,omitempty"`
 	Title     string `json:"title"`
 	Preview   string `json:"preview"`
 	CreatedAt int64  `json:"createdAt"` // unix ms
 	UpdatedAt int64  `json:"updatedAt"` // unix ms
 	// ThumbnailURL is the first image_url attached to the FIRST user
 	// turn of the session, surfaced so the sidebar can show "image +
-	// text" instead of just the text title for multimodal chats.
+	// text" instead of just the text label for multimodal chats.
 	// Empty for sessions whose opening message had no image.
 	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
 }
@@ -457,9 +632,51 @@ func (m *Manager) ListWebSessions() []WebSession {
 	return sessions
 }
 
+// resolveWebSessionKey maps a web sessionId (the URL `?session=` token,
+// which is the conversation's chat_id) to its current session_key. New
+// rows have an opaque session_key (different from chat_id); legacy rows
+// still carry the `web_<sid>` form. Falls back to the legacy literal
+// when no row exists yet so file-backed mode and brand-new sessions
+// don't error on rename/delete.
+func (m *Manager) resolveWebSessionKey(sessionId string) string {
+	if m.store != nil {
+		if k, err := m.store.ResolveActiveSessionKey(m.ctx(), m.agentID, "web", "", sessionId); err == nil && k != "" {
+			return k
+		}
+	}
+	return "web_" + sessionId
+}
+
+// DeleteSessionByID resolves a URL token (session_key or legacy web
+// chat_id) and deletes the matching session. Channel-agnostic — used
+// by the dashboard to delete any-channel chats.
+func (m *Manager) DeleteSessionByID(sessionId string) error {
+	key := m.ResolveSessionKey(sessionId)
+	m.mu.Lock()
+	delete(m.sessions, key)
+	m.mu.Unlock()
+	if m.store != nil {
+		return m.store.DeleteSession(m.ctx(), m.agentID, key)
+	}
+	// File-backed mode only had a "web_<sid>" filename convention; non-
+	// web sessions don't reach this path in dev mode, so the legacy
+	// fallback in DeleteWebSession is sufficient.
+	return m.DeleteWebSession(sessionId)
+}
+
+// RenameSessionByID resolves a URL token and renames the matching
+// session.
+func (m *Manager) RenameSessionByID(sessionId, title string) error {
+	key := m.ResolveSessionKey(sessionId)
+	if m.store != nil {
+		return m.store.RenameSession(m.ctx(), m.agentID, key, title)
+	}
+	return m.RenameWebSession(sessionId, title)
+}
+
 // DeleteWebSession removes a web chat session file and its metadata.
 func (m *Manager) DeleteWebSession(sessionId string) error {
-	key := sessionKey("web", sessionId)
+	key := m.resolveWebSessionKey(sessionId)
 
 	// Remove from in-memory cache
 	m.mu.Lock()
@@ -481,7 +698,7 @@ func (m *Manager) DeleteWebSession(sessionId string) error {
 // RenameWebSession sets a custom title for a web chat session.
 func (m *Manager) RenameWebSession(sessionId, title string) error {
 	if m.store != nil {
-		return m.store.RenameSession(m.ctx(), m.agentID, sessionKey("web", sessionId), title)
+		return m.store.RenameSession(m.ctx(), m.agentID, m.resolveWebSessionKey(sessionId), title)
 	}
 
 	safeId := strings.ReplaceAll(sessionId, "/", "_")

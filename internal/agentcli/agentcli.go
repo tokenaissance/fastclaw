@@ -132,19 +132,19 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 	}
 
 	if saveProvider {
-		if err := scope.SaveProvider(ctx, st, scope.System, "", providerName, pcfg); err != nil {
+		if err := scope.SaveProvider(ctx, st, "", "", providerName, pcfg); err != nil {
 			return nil, err
 		}
 		res.ProviderSaved = true
 		if fullModel != "" {
 			data := map[string]interface{}{}
-			if cur, err := st.GetConfigByName(ctx, store.KindSetting, scope.Agent, rec.ID, "agents.defaults"); err == nil && cur != nil && cur.Data != nil {
+			if cur, err := st.GetConfigByName(ctx, store.KindSetting, "", rec.ID, "agents.defaults"); err == nil && cur != nil && cur.Data != nil {
 				data = cur.Data
 			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return nil, err
 			}
 			data["model"] = fullModel
-			if err := scope.SaveSetting(ctx, st, scope.Agent, rec.ID, "agents.defaults", data); err != nil {
+			if err := scope.SaveSetting(ctx, st, "", rec.ID, "agents.defaults", data); err != nil {
 				return nil, err
 			}
 			res.ModelSaved = true
@@ -372,23 +372,23 @@ func SetConfig(ctx context.Context, st store.Store, agentID, key, rawValue strin
 	if strings.HasPrefix(key, "provider.") {
 		return setProviderField(ctx, st, key, rawValue)
 	}
-	namespace, path, sc, err := settingKey(key)
+	namespace, path, isAgentScope, err := settingKey(key)
 	if err != nil {
 		return err
 	}
-	scopeID := ""
-	if sc == scope.Agent {
-		scopeID = agentID
+	uid, aid := "", ""
+	if isAgentScope {
+		aid = agentID
 	}
 	if len(path) == 0 {
 		obj, ok := parseValue(rawValue).(map[string]interface{})
 		if !ok {
 			return fmt.Errorf("config key %q expects a JSON object value", key)
 		}
-		return scope.SaveSetting(ctx, st, sc, scopeID, namespace, obj)
+		return scope.SaveSetting(ctx, st, uid, aid, namespace, obj)
 	}
 	data := map[string]interface{}{}
-	if rec, err := st.GetConfigByName(ctx, store.KindSetting, sc, scopeID, namespace); err == nil && rec != nil && rec.Data != nil {
+	if rec, err := st.GetConfigByName(ctx, store.KindSetting, uid, aid, namespace); err == nil && rec != nil && rec.Data != nil {
 		data = rec.Data
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
@@ -401,7 +401,7 @@ func SetConfig(ctx context.Context, st store.Store, agentID, key, rawValue strin
 			}
 		}
 	}
-	return scope.SaveSetting(ctx, st, sc, scopeID, namespace, data)
+	return scope.SaveSetting(ctx, st, uid, aid, namespace, data)
 }
 
 // GetConfig returns a single config value or, when key is empty, the
@@ -413,15 +413,15 @@ func GetConfig(ctx context.Context, st store.Store, agentID, key string) (interf
 	if strings.HasPrefix(key, "provider.") {
 		return getProviderField(ctx, st, key)
 	}
-	namespace, path, sc, err := settingKey(key)
+	namespace, path, isAgentScope, err := settingKey(key)
 	if err != nil {
 		return nil, err
 	}
-	scopeID := ""
-	if sc == scope.Agent {
-		scopeID = agentID
+	uid, aid := "", ""
+	if isAgentScope {
+		aid = agentID
 	}
-	rec, err := st.GetConfigByName(ctx, store.KindSetting, sc, scopeID, namespace)
+	rec, err := st.GetConfigByName(ctx, store.KindSetting, uid, aid, namespace)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil
 	}
@@ -495,7 +495,7 @@ func normalizeProviderModel(providerName, model string) (string, string, string,
 func providerConfigFromOptions(ctx context.Context, st store.Store, providerName, modelID string, opts InitOptions) (config.ProviderConfig, error) {
 	preset := providerPreset(providerName)
 	existing := config.ProviderConfig{}
-	if rec, err := st.GetConfigByName(ctx, store.KindProvider, scope.System, "", providerName); err == nil && rec != nil {
+	if rec, err := st.GetConfigByName(ctx, store.KindProvider, "", "", providerName); err == nil && rec != nil {
 		blob, _ := json.Marshal(rec.Data)
 		_ = json.Unmarshal(blob, &existing)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -575,7 +575,7 @@ func setProviderField(ctx context.Context, st store.Store, key, rawValue string)
 	}
 	name, field := parts[0], parts[1]
 	pc := config.ProviderConfig{}
-	if rec, err := st.GetConfigByName(ctx, store.KindProvider, scope.System, "", name); err == nil && rec != nil {
+	if rec, err := st.GetConfigByName(ctx, store.KindProvider, "", "", name); err == nil && rec != nil {
 		blob, _ := json.Marshal(rec.Data)
 		_ = json.Unmarshal(blob, &pc)
 	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -611,7 +611,7 @@ func setProviderField(ctx context.Context, st store.Store, key, rawValue string)
 	default:
 		return fmt.Errorf("unsupported provider field %q", field)
 	}
-	return scope.SaveProvider(ctx, st, scope.System, "", name, pc)
+	return scope.SaveProvider(ctx, st, "", "", name, pc)
 }
 
 func getProviderField(ctx context.Context, st store.Store, key string) (interface{}, error) {
@@ -619,7 +619,7 @@ func getProviderField(ctx context.Context, st store.Store, key string) (interfac
 	if len(parts) != 2 {
 		return nil, errors.New("provider config key must look like provider.<name>.<field>")
 	}
-	rec, err := st.GetConfigByName(ctx, store.KindProvider, scope.System, "", parts[0])
+	rec, err := st.GetConfigByName(ctx, store.KindProvider, "", "", parts[0])
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, nil
 	}
@@ -668,31 +668,33 @@ var systemSettingNamespaces = []string{
 
 // settingKey resolves a CLI key to (namespace, path-into-data, scope).
 // Agent-scope keys cover model/temperature/sandbox; everything else is
-// a system-wide namespace.
-func settingKey(key string) (string, []string, string, error) {
+// a system-wide namespace. The bool return is "isAgentScope" — true
+// means the row's agent_id should be set to the active agentID; false
+// means a system row (user_id='', agent_id='').
+func settingKey(key string) (string, []string, bool, error) {
 	if ns, ok := agentScopeKeys[key]; ok {
 		path := []string{key}
 		if key == ns { // sandbox -> sandbox: whole namespace, no inner path
 			path = nil
 		}
-		return ns, path, scope.Agent, nil
+		return ns, path, true, nil
 	}
 	if strings.HasPrefix(key, "sandbox.") {
-		return "sandbox", strings.Split(strings.TrimPrefix(key, "sandbox."), "."), scope.Agent, nil
+		return "sandbox", strings.Split(strings.TrimPrefix(key, "sandbox."), "."), true, nil
 	}
 	for _, ns := range systemSettingNamespaces {
 		if key == ns {
-			return ns, nil, scope.System, nil
+			return ns, nil, false, nil
 		}
 		prefix := ns + "."
 		if strings.HasPrefix(key, prefix) {
 			path := strings.Split(strings.TrimPrefix(key, prefix), ".")
 			if len(path) > 0 && path[0] != "" {
-				return ns, path, scope.System, nil
+				return ns, path, false, nil
 			}
 		}
 	}
-	return "", nil, "", fmt.Errorf("unsupported config key %q", key)
+	return "", nil, false, fmt.Errorf("unsupported config key %q", key)
 }
 
 func configDump(ctx context.Context, st store.Store, agentID string) (map[string]interface{}, error) {
@@ -712,7 +714,7 @@ func configDump(ctx context.Context, st store.Store, agentID string) (map[string
 
 	agentSettings := map[string]interface{}{}
 	for _, ns := range []string{"agents.defaults", "sandbox"} {
-		rec, err := st.GetConfigByName(ctx, store.KindSetting, scope.Agent, agentID, ns)
+		rec, err := st.GetConfigByName(ctx, store.KindSetting, "", agentID, ns)
 		if errors.Is(err, store.ErrNotFound) || rec == nil {
 			continue
 		}
@@ -726,7 +728,7 @@ func configDump(ctx context.Context, st store.Store, agentID string) (map[string
 	}
 
 	sysSettings := map[string]interface{}{}
-	settings, err := st.ListConfigs(ctx, store.KindSetting, scope.System, "")
+	settings, err := st.ListConfigs(ctx, store.KindSetting, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -736,7 +738,7 @@ func configDump(ctx context.Context, st store.Store, agentID string) (map[string
 	if len(sysSettings) > 0 {
 		out["system"] = sysSettings
 	}
-	providers, err := st.ListConfigs(ctx, store.KindProvider, scope.System, "")
+	providers, err := st.ListConfigs(ctx, store.KindProvider, "", "")
 	if err != nil {
 		return nil, err
 	}

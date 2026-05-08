@@ -314,9 +314,10 @@ func (a *Agent) HandleWebChat(ctx context.Context, sessionId, text string, image
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
+	channel, chatID := a.recoverWebTriple(sessionId)
 	msg := bus.InboundMessage{
-		Channel:   "web",
-		ChatID:    sessionId,
+		Channel:   channel,
+		ChatID:    chatID,
 		UserID:    "web-user",
 		Text:      text,
 		PeerKind:  "dm",
@@ -335,9 +336,10 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 		sessionId = "web-ui"
 	}
 	ctx = ContextWithChatEvents(ctx, events)
+	channel, chatID := a.recoverWebTriple(sessionId)
 	msg := bus.InboundMessage{
-		Channel:   "web",
-		ChatID:    sessionId,
+		Channel:   channel,
+		ChatID:    chatID,
 		UserID:    "web-user",
 		Text:      text,
 		PeerKind:  "dm",
@@ -345,6 +347,36 @@ func (a *Agent) HandleWebChatStream(ctx context.Context, sessionId, text string,
 		Params:    params,
 	}
 	return a.HandleMessage(ctx, msg)
+}
+
+// recoverWebTriple maps a URL `?session=` token (which can be a
+// session_key for any channel, OR a legacy web chat_id) to the
+// (channel, chatID) the downstream session lookup expects.
+//
+// The session.Manager keys its triple lookup on chat_id, so if we
+// blindly forward the URL token as the chat_id, a legacy session_key
+// like `web_<chatID>` would miss the existing row (its chat_id is
+// `<chatID>`, not `web_<chatID>`) and the agent would mint a duplicate.
+//
+// Two-step recovery:
+//  1. If the token matches a session_key → look up the triple.
+//  2. Otherwise treat it as a web chat_id (preserves the brand-new
+//     "+New chat" path where the row doesn't exist yet).
+func (a *Agent) recoverWebTriple(sessionId string) (channel, chatID string) {
+	channel, chatID = "web", sessionId
+	if !a.sessions.SessionExists(sessionId) {
+		return
+	}
+	if c, _, ci, err := a.sessions.LookupSessionTriple(sessionId); err == nil && (c != "" || ci != "") {
+		channel = c
+		if channel == "" {
+			channel = "web"
+		}
+		if ci != "" {
+			chatID = ci
+		}
+	}
+	return
 }
 
 // home returns the agent's home (metadata) directory path.
@@ -361,7 +393,7 @@ func (a *Agent) SetGroupContext(gc *GroupContext) {
 // without triggering an LLM call. This gives the agent awareness of what other
 // bots said in the group chat.
 func (a *Agent) InjectGroupMessage(ctx context.Context, msg bus.InboundMessage) {
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 	label := msg.SenderName
 	if label == "" {
 		label = "Bot"
@@ -415,18 +447,25 @@ func (a *Agent) Sessions() *session.Manager {
 	return a.sessions
 }
 
-// WebChatHistory returns chat history for a specific web session.
+// WebChatHistory returns chat history for a specific session — the
+// name is historical; it now serves any channel because the dashboard
+// surfaces all-channel chats in the sidebar.
 //
 // Reads from the append-only session_messages archive (via
 // Session.ArchivedMessages) instead of the in-memory working set, so
 // post-compaction sessions show the original conversation rather than a
 // summary + last 20 turns. Falls back to the working set when no
 // archive is available (file-backed mode or pre-archive sessions).
+//
+// sessionId may be either a canonical session_key (what
+// ListWebSessions returns) or a legacy web chat_id from older URLs;
+// ResolveSessionKey untangles them.
 func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
-	sess := a.sessions.Get("web", sessionId)
+	resolved := a.sessions.ResolveSessionKey(sessionId)
+	sess := a.sessions.GetByKey(resolved)
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
 	for _, m := range msgs {
@@ -496,14 +535,16 @@ func (a *Agent) WebChatSessions() []session.WebSession {
 	return a.sessions.ListWebSessions()
 }
 
-// DeleteWebChatSession removes a web chat session.
+// DeleteWebChatSession removes a chat session (any channel) by the URL
+// token — accepts either session_key or legacy web chat_id.
 func (a *Agent) DeleteWebChatSession(sessionId string) error {
-	return a.sessions.DeleteWebSession(sessionId)
+	return a.sessions.DeleteSessionByID(sessionId)
 }
 
-// RenameWebChatSession sets a custom title for a web chat session.
+// RenameWebChatSession sets a custom title for a chat session (any
+// channel) by the URL token.
 func (a *Agent) RenameWebChatSession(sessionId, title string) error {
-	return a.sessions.RenameWebSession(sessionId, title)
+	return a.sessions.RenameSessionByID(sessionId, title)
 }
 
 // Model returns the agent's model name.
@@ -660,7 +701,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	}
 
 	a.refreshSkillsFromStore()
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 	// Bind the registry to this chat's session so workspace.Store reads
 	// + writes get session-scoped paths and (when a sandbox pool is
 	// wired) the executor used by exec/read_file/list_dir is tied to a
@@ -1053,7 +1094,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 
 	a.refreshSkillsFromStore()
-	sess := a.sessions.Get(msg.Channel, msg.ChatID)
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID)
 	a.bindSession(ctx, msg.Channel, msg.ChatID)
 
 	// Same orphan-tool_use safety net as HandleMessage. The streaming path
