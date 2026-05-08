@@ -63,30 +63,136 @@ type chatRequest struct {
 
 // toAPIMessages converts provider Messages to wire-format apiMessages,
 // handling ContentParts for multimodal messages.
+//
+// Defensive sanitization: OpenAI/DeepSeek reject any request where an
+// assistant message with `tool_calls` is not immediately followed by a
+// `tool` message answering each tool_call_id. Dirty sessions can land
+// us in that state — e.g. the agent's tool-loop detector at
+// loop.go:1218 appends the assistant's tool_calls then breaks out
+// without executing the tools, leaving orphans behind. Old sessions
+// from before the streamed-RawAssistant fix can also carry orphan
+// tool_calls inside the persisted RawAssistant. Either case used to
+// surface as `An assistant message with 'tool_calls' must be followed
+// by tool messages`. We strip the offending tool_calls (and any
+// orphan tool replies) at wire-build time so the request goes through
+// — the session keeps its historical record untouched.
 func toAPIMessages(msgs []Message) []json.RawMessage {
-	out := make([]json.RawMessage, len(msgs))
+	orphanAssistant, orphanTool := findOrphanToolCalls(msgs)
+	out := make([]json.RawMessage, 0, len(msgs))
 	for i, m := range msgs {
+		if orphanTool[i] {
+			continue
+		}
+
 		// For assistant messages with cached raw JSON, use it directly
-		// to guarantee prompt cache hits (byte-identical prefix).
-		if m.Role == "assistant" && len(m.RawAssistant) > 0 {
-			out[i] = m.RawAssistant
+		// to guarantee prompt cache hits (byte-identical prefix) —
+		// unless the cached message has orphan tool_calls, in which
+		// case rebuild it without them.
+		if m.Role == "assistant" && len(m.RawAssistant) > 0 && !orphanAssistant[i] {
+			out = append(out, m.RawAssistant)
 			continue
 		}
 
 		am := apiMessage{
 			Role:       m.Role,
-			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
+		}
+		if !orphanAssistant[i] {
+			am.ToolCalls = m.ToolCalls
 		}
 		if len(m.ContentParts) > 0 {
 			am.Content, _ = json.Marshal(m.ContentParts)
 		} else {
 			am.Content, _ = json.Marshal(m.Content)
 		}
-		out[i], _ = json.Marshal(am)
+		raw, _ := json.Marshal(am)
+		out = append(out, raw)
 	}
 	return out
+}
+
+// findOrphanToolCalls walks msgs and flags assistant messages whose
+// declared tool_calls are not fully answered by immediately-following
+// tool messages, plus the tool messages that would dangle after the
+// strip. Both `m.ToolCalls` and tool_calls embedded in
+// `m.RawAssistant` are considered, since old sessions only stored
+// them in the raw JSON.
+func findOrphanToolCalls(msgs []Message) (orphanAssistant, orphanTool map[int]bool) {
+	orphanAssistant = map[int]bool{}
+	orphanTool = map[int]bool{}
+	for i, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		want := assistantToolCallIDs(m)
+		if len(want) == 0 {
+			continue
+		}
+		// Collect IDs from the run of tool messages immediately following.
+		got := map[string]bool{}
+		j := i + 1
+		for j < len(msgs) && msgs[j].Role == "tool" {
+			if id := msgs[j].ToolCallID; id != "" {
+				got[id] = true
+			}
+			j++
+		}
+		missing := false
+		for _, id := range want {
+			if !got[id] {
+				missing = true
+				break
+			}
+		}
+		if !missing {
+			continue
+		}
+		orphanAssistant[i] = true
+		// Drop any tool messages that referenced this assistant's
+		// (now-removed) tool_calls so the API doesn't reject them as
+		// dangling tool replies.
+		wantSet := map[string]bool{}
+		for _, id := range want {
+			wantSet[id] = true
+		}
+		for k := i + 1; k < j; k++ {
+			if wantSet[msgs[k].ToolCallID] {
+				orphanTool[k] = true
+			}
+		}
+	}
+	return
+}
+
+// assistantToolCallIDs extracts tool_call IDs from a stored assistant
+// Message, checking both the parsed ToolCalls field and tool_calls
+// embedded in the raw JSON (older sessions that streamed the message
+// only carry the IDs inside RawAssistant).
+func assistantToolCallIDs(m Message) []string {
+	if len(m.ToolCalls) > 0 {
+		ids := make([]string, 0, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
+			ids = append(ids, tc.ID)
+		}
+		return ids
+	}
+	if len(m.RawAssistant) == 0 {
+		return nil
+	}
+	var raw struct {
+		ToolCalls []struct {
+			ID string `json:"id"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(m.RawAssistant, &raw); err != nil || len(raw.ToolCalls) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(raw.ToolCalls))
+	for _, tc := range raw.ToolCalls {
+		ids = append(ids, tc.ID)
+	}
+	return ids
 }
 
 // sseDelta mirrors the OpenAI streaming delta structure including tool call index.
