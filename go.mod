@@ -6,9 +6,7 @@ require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/codeany-ai/open-agent-sdk-go v0.1.0
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
-	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/larksuite/oapi-sdk-go/v3 v3.6.1
 	github.com/lib/pq v1.12.3
 	github.com/minio/minio-go/v7 v7.0.100
 	github.com/slack-go/slack v0.19.0
@@ -21,7 +19,7 @@ require (
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
-	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect

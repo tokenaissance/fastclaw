@@ -92,6 +92,7 @@ func main() {
 	rootCmd.AddCommand(policyCmd())
 	rootCmd.AddCommand(daemonCmd())
 	rootCmd.AddCommand(adminCmd())
+	rootCmd.AddCommand(apikeyCmd())
 	rootCmd.AddCommand(agentsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
