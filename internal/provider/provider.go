@@ -138,6 +138,13 @@ type StreamChunk struct {
 	// extended-thinking providers (Anthropic + DeepSeek /anthropic compat).
 	Thinking          string
 	ThinkingSignature string
+	// RawAssistant is the fully-serialized assistant message in the
+	// provider's wire format, emitted on the final (Done) chunk. When
+	// set, callers should persist it verbatim onto Message.RawAssistant
+	// instead of reconstructing — required so DeepSeek (OpenAI-compat
+	// thinking mode) sees the correct top-level `reasoning_content` on
+	// replay, which it does not auto-generate.
+	RawAssistant json.RawMessage
 }
 
 // StreamReader reads streaming chunks from an LLM response.

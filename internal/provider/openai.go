@@ -37,12 +37,19 @@ func NewOpenAI(apiKey, apiBase string) *OpenAIProvider {
 
 // apiMessage is the wire format for a message sent to the OpenAI API.
 // It uses json.RawMessage for Content to support both string and array formats.
+//
+// ReasoningContent is DeepSeek's thinking-mode field. DeepSeek requires
+// it to be echoed back on subsequent turns or it returns
+// `invalid_request_error: The reasoning_content in the thinking mode
+// must be passed back to the API.` Pure OpenAI ignores unknown fields,
+// so omitempty keeps non-DeepSeek providers unaffected.
 type apiMessage struct {
-	Role       string          `json:"role"`
-	Content    json.RawMessage `json:"content,omitempty"`
-	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content,omitempty"`
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Name             string          `json:"name,omitempty"`
 }
 
 type chatRequest struct {
@@ -56,30 +63,136 @@ type chatRequest struct {
 
 // toAPIMessages converts provider Messages to wire-format apiMessages,
 // handling ContentParts for multimodal messages.
+//
+// Defensive sanitization: OpenAI/DeepSeek reject any request where an
+// assistant message with `tool_calls` is not immediately followed by a
+// `tool` message answering each tool_call_id. Dirty sessions can land
+// us in that state — e.g. the agent's tool-loop detector at
+// loop.go:1218 appends the assistant's tool_calls then breaks out
+// without executing the tools, leaving orphans behind. Old sessions
+// from before the streamed-RawAssistant fix can also carry orphan
+// tool_calls inside the persisted RawAssistant. Either case used to
+// surface as `An assistant message with 'tool_calls' must be followed
+// by tool messages`. We strip the offending tool_calls (and any
+// orphan tool replies) at wire-build time so the request goes through
+// — the session keeps its historical record untouched.
 func toAPIMessages(msgs []Message) []json.RawMessage {
-	out := make([]json.RawMessage, len(msgs))
+	orphanAssistant, orphanTool := findOrphanToolCalls(msgs)
+	out := make([]json.RawMessage, 0, len(msgs))
 	for i, m := range msgs {
+		if orphanTool[i] {
+			continue
+		}
+
 		// For assistant messages with cached raw JSON, use it directly
-		// to guarantee prompt cache hits (byte-identical prefix).
-		if m.Role == "assistant" && len(m.RawAssistant) > 0 {
-			out[i] = m.RawAssistant
+		// to guarantee prompt cache hits (byte-identical prefix) —
+		// unless the cached message has orphan tool_calls, in which
+		// case rebuild it without them.
+		if m.Role == "assistant" && len(m.RawAssistant) > 0 && !orphanAssistant[i] {
+			out = append(out, m.RawAssistant)
 			continue
 		}
 
 		am := apiMessage{
 			Role:       m.Role,
-			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
+		}
+		if !orphanAssistant[i] {
+			am.ToolCalls = m.ToolCalls
 		}
 		if len(m.ContentParts) > 0 {
 			am.Content, _ = json.Marshal(m.ContentParts)
 		} else {
 			am.Content, _ = json.Marshal(m.Content)
 		}
-		out[i], _ = json.Marshal(am)
+		raw, _ := json.Marshal(am)
+		out = append(out, raw)
 	}
 	return out
+}
+
+// findOrphanToolCalls walks msgs and flags assistant messages whose
+// declared tool_calls are not fully answered by immediately-following
+// tool messages, plus the tool messages that would dangle after the
+// strip. Both `m.ToolCalls` and tool_calls embedded in
+// `m.RawAssistant` are considered, since old sessions only stored
+// them in the raw JSON.
+func findOrphanToolCalls(msgs []Message) (orphanAssistant, orphanTool map[int]bool) {
+	orphanAssistant = map[int]bool{}
+	orphanTool = map[int]bool{}
+	for i, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		want := assistantToolCallIDs(m)
+		if len(want) == 0 {
+			continue
+		}
+		// Collect IDs from the run of tool messages immediately following.
+		got := map[string]bool{}
+		j := i + 1
+		for j < len(msgs) && msgs[j].Role == "tool" {
+			if id := msgs[j].ToolCallID; id != "" {
+				got[id] = true
+			}
+			j++
+		}
+		missing := false
+		for _, id := range want {
+			if !got[id] {
+				missing = true
+				break
+			}
+		}
+		if !missing {
+			continue
+		}
+		orphanAssistant[i] = true
+		// Drop any tool messages that referenced this assistant's
+		// (now-removed) tool_calls so the API doesn't reject them as
+		// dangling tool replies.
+		wantSet := map[string]bool{}
+		for _, id := range want {
+			wantSet[id] = true
+		}
+		for k := i + 1; k < j; k++ {
+			if wantSet[msgs[k].ToolCallID] {
+				orphanTool[k] = true
+			}
+		}
+	}
+	return
+}
+
+// assistantToolCallIDs extracts tool_call IDs from a stored assistant
+// Message, checking both the parsed ToolCalls field and tool_calls
+// embedded in the raw JSON (older sessions that streamed the message
+// only carry the IDs inside RawAssistant).
+func assistantToolCallIDs(m Message) []string {
+	if len(m.ToolCalls) > 0 {
+		ids := make([]string, 0, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
+			ids = append(ids, tc.ID)
+		}
+		return ids
+	}
+	if len(m.RawAssistant) == 0 {
+		return nil
+	}
+	var raw struct {
+		ToolCalls []struct {
+			ID string `json:"id"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(m.RawAssistant, &raw); err != nil || len(raw.ToolCalls) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(raw.ToolCalls))
+	for _, tc := range raw.ToolCalls {
+		ids = append(ids, tc.ID)
+	}
+	return ids
 }
 
 // sseDelta mirrors the OpenAI streaming delta structure including tool call index.
@@ -91,9 +204,10 @@ type sseToolCallDelta struct {
 }
 
 type sseDelta struct {
-	Role      string             `json:"role,omitempty"`
-	Content   string             `json:"content,omitempty"`
-	ToolCalls []sseToolCallDelta `json:"tool_calls,omitempty"`
+	Role             string             `json:"role,omitempty"`
+	Content          string             `json:"content,omitempty"`
+	ReasoningContent string             `json:"reasoning_content,omitempty"`
+	ToolCalls        []sseToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 type sseChoice struct {
@@ -182,6 +296,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 		toolCalls := make(map[int]*ToolCall)
+		var contentBuilder, reasoningBuilder strings.Builder
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -190,15 +305,45 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 			}
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
-				// Send final chunk with accumulated tool calls
+				// Send final chunk with accumulated tool calls and a
+				// fully-formed RawAssistant. DeepSeek thinking mode
+				// requires reasoning_content to round-trip on the next
+				// turn (or the API rejects with 400), so we serialize
+				// the assistant message in the OpenAI wire format here
+				// and let callers persist it verbatim.
+				//
+				// Note: RawAssistant intentionally omits tool_calls.
+				// ChatStream is only used by the agent loop's
+				// "no-more-tools, stream the final reply" branch
+				// (loop.go:1130) — if the model belatedly emits
+				// tool_calls there, FastClaw deliberately ignores them
+				// and never executes them, so persisting them would
+				// leave the session with an assistant.tool_calls that
+				// has no following tool response, causing the next
+				// turn to be rejected with `An assistant message with
+				// 'tool_calls' must be followed by tool messages`.
+				// tool_calls round-tripping happens through the
+				// non-stream Chat path (parseSSE) in the ReAct loop.
 				var tcs []ToolCall
 				for i := 0; i < len(toolCalls); i++ {
 					if tc, ok := toolCalls[i]; ok {
 						tcs = append(tcs, *tc)
 					}
 				}
+				reasoning := reasoningBuilder.String()
+				rawMsg := apiMessage{
+					Role:             "assistant",
+					ReasoningContent: reasoning,
+				}
+				rawMsg.Content, _ = json.Marshal(contentBuilder.String())
+				raw, _ := json.Marshal(rawMsg)
 				select {
-				case ch <- StreamChunk{ToolCalls: tcs, Done: true}:
+				case ch <- StreamChunk{
+					ToolCalls:    tcs,
+					Done:         true,
+					Thinking:     reasoning,
+					RawAssistant: raw,
+				}:
 				case <-ctx.Done():
 				}
 				return
@@ -242,8 +387,13 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 				}
 			}
 
+			if delta.ReasoningContent != "" {
+				reasoningBuilder.WriteString(delta.ReasoningContent)
+			}
+
 			// Yield content chunks
 			if delta.Content != "" {
+				contentBuilder.WriteString(delta.Content)
 				select {
 				case ch <- StreamChunk{Content: delta.Content}:
 				case <-ctx.Done():
@@ -266,6 +416,7 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var contentBuilder strings.Builder
+	var reasoningBuilder strings.Builder
 	toolCalls := make(map[int]*ToolCall)
 
 	for scanner.Scan() {
@@ -292,6 +443,9 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 
 		if delta.Content != "" {
 			contentBuilder.WriteString(delta.Content)
+		}
+		if delta.ReasoningContent != "" {
+			reasoningBuilder.WriteString(delta.ReasoningContent)
 		}
 
 		for _, tc := range delta.ToolCalls {
@@ -324,8 +478,10 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 		return nil, fmt.Errorf("read stream: %w", err)
 	}
 
+	reasoning := reasoningBuilder.String()
 	result := &Response{
-		Content: contentBuilder.String(),
+		Content:  contentBuilder.String(),
+		Thinking: reasoning,
 	}
 	for i := 0; i < len(toolCalls); i++ {
 		if tc, ok := toolCalls[i]; ok {
@@ -335,9 +491,13 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 
 	// Capture raw assistant message for cache-safe replay.
 	// Reconstruct the exact message format the API would expect back.
+	// reasoning_content must round-trip for DeepSeek's thinking mode
+	// (otherwise the next turn fails with `The reasoning_content in
+	// the thinking mode must be passed back to the API.`).
 	rawMsg := apiMessage{
-		Role:      "assistant",
-		ToolCalls: result.ToolCalls,
+		Role:             "assistant",
+		ToolCalls:        result.ToolCalls,
+		ReasoningContent: reasoning,
 	}
 	rawMsg.Content, _ = json.Marshal(result.Content)
 	result.RawAssistant, _ = json.Marshal(rawMsg)

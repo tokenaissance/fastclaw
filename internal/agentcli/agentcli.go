@@ -558,7 +558,7 @@ func providerPreset(name string) providerDefaults {
 	case "groq":
 		return providerDefaults{"https://api.groq.com/openai/v1", "openai-chat", "bearer-token", "GROQ_API_KEY"}
 	case "deepseek":
-		return providerDefaults{"https://api.deepseek.com/v1", "openai-chat", "bearer-token", "DEEPSEEK_API_KEY"}
+		return providerDefaults{"https://api.deepseek.com", "openai-chat", "bearer-token", "DEEPSEEK_API_KEY"}
 	case "mistral":
 		return providerDefaults{"https://api.mistral.ai/v1", "openai-chat", "bearer-token", "MISTRAL_API_KEY"}
 	case "openai":

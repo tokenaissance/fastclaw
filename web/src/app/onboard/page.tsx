@@ -54,6 +54,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
   openrouter: "OpenRouter",
   anthropic: "Anthropic",
+  deepseek: "DeepSeek",
   ollama: "Ollama",
   custom: "Custom",
 };
@@ -71,31 +72,43 @@ const AUTH_TYPE_LABELS: Record<string, string> = {
 // PROVIDERS holds the per-preset defaults the form pre-fills when the
 // user picks a provider from the dropdown. `models[0]` is shown as the
 // placeholder in the Default model input — the user types over it.
+// authType is synced too so switching from Anthropic (api-key) to a
+// Bearer-token provider doesn't leave the form on the wrong auth.
 const PROVIDERS: Record<
   string,
-  { apiBase: string; apiType: string; models: string[] }
+  { apiBase: string; apiType: string; authType: string; models: string[] }
 > = {
   openai: {
     apiBase: "https://api.openai.com/v1",
     apiType: "openai-chat",
+    authType: "bearer-token",
     models: ["gpt-5.5"],
   },
   openrouter: {
     apiBase: "https://openrouter.ai/api/v1",
     apiType: "openai-chat",
+    authType: "bearer-token",
     models: ["google/gemini-3-flash-preview"],
   },
   anthropic: {
     apiBase: "https://api.anthropic.com",
     apiType: "anthropic-messages",
-    models: ["claude-sonnet-4.7"],
+    authType: "api-key",
+    models: ["claude-opus-4.7", "claude-sonnet-4.7", "claude-haiku-4.5"],
+  },
+  deepseek: {
+    apiBase: "https://api.deepseek.com",
+    apiType: "openai-chat",
+    authType: "bearer-token",
+    models: ["deepseek-v4-pro"],
   },
   ollama: {
     apiBase: "http://localhost:11434/v1",
     apiType: "openai-chat",
+    authType: "bearer-token",
     models: ["qwen3.5:35b-a3b-int4"],
   },
-  custom: { apiBase: "", apiType: "openai-chat", models: [] },
+  custom: { apiBase: "", apiType: "openai-chat", authType: "bearer-token", models: [] },
 };
 
 export default function OnboardPage() {
@@ -158,6 +171,7 @@ export default function OnboardPage() {
     if (preset) {
       setApiBase(preset.apiBase);
       setApiType(preset.apiType);
+      setAuthType(preset.authType);
       if (preset.models[0]) setModel(preset.models[0]);
     }
     // Provider name auto-fills with the preset key — user can still
@@ -570,6 +584,7 @@ function ProviderStep(props: {
                 <SelectItem value="openai">OpenAI</SelectItem>
                 <SelectItem value="openrouter">OpenRouter</SelectItem>
                 <SelectItem value="anthropic">Anthropic</SelectItem>
+                <SelectItem value="deepseek">DeepSeek</SelectItem>
                 <SelectItem value="ollama">Ollama</SelectItem>
                 <SelectItem value="custom">Custom</SelectItem>
               </SelectContent>

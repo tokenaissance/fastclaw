@@ -1141,6 +1141,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				defer close(outCh)
 				var full strings.Builder
 				var thinking, thinkingSig string
+				var rawAssistant json.RawMessage
 				for {
 					chunk, ok := sr.Next()
 					if !ok {
@@ -1155,6 +1156,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 					if chunk.ThinkingSignature != "" {
 						thinkingSig = chunk.ThinkingSignature
 					}
+					if len(chunk.RawAssistant) > 0 {
+						rawAssistant = chunk.RawAssistant
+					}
 					select {
 					case outCh <- chunk:
 					case <-ctx.Done():
@@ -1162,10 +1166,17 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 					}
 				}
 				msg := provider.Message{Role: "assistant", Content: full.String(), Thinking: thinking}
-				if thinking != "" {
-					// Pack {thinking, signature} into RawAssistant so the next
-					// turn can echo content[].thinking back to extended-
-					// thinking providers that require it.
+				switch {
+				case len(rawAssistant) > 0:
+					// Provider already serialized the assistant message
+					// in its wire format (e.g. OpenAI/DeepSeek with
+					// reasoning_content). Persist verbatim so the next
+					// turn replays it byte-identically — required for
+					// DeepSeek thinking mode.
+					msg.RawAssistant = rawAssistant
+				case thinking != "":
+					// Anthropic extended thinking: pack {thinking, signature}
+					// as a content-block so the next turn can echo it back.
 					if raw, err := json.Marshal(map[string]string{
 						"type":      "thinking",
 						"thinking":  thinking,
