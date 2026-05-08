@@ -124,6 +124,7 @@ function renderContentWithDataImages(
 }
 
 import { usePageHeader } from "@/components/sidebar";
+import { channelLabel } from "@/components/channel-icon";
 
 interface ProducedFile {
   path: string; // path relative to workspace
@@ -187,6 +188,12 @@ interface ChatSession {
   id: string;
   title?: string;
   preview: string;
+  // channel/accountId/chatId travel with the listing so the chat
+  // page can decide whether composing into this session is allowed
+  // (only `web` is — IM channels have no reverse-send path).
+  channel?: string;
+  accountId?: string;
+  chatId?: string;
 }
 
 function generateSessionId() {
@@ -614,6 +621,17 @@ export default function AgentChatPage() {
     const s = sessions.find((x) => x.id === sessionId);
     setSessionTitle(s?.title || s?.preview || "");
   }, [sessionId, sessions]);
+
+  // Channel of the currently-open session, derived from the sessions
+  // list. Brand-new web chats don't have a row yet — the fallback to
+  // "web" keeps composing enabled for them. IM sessions get a banner +
+  // disabled input because composing here would write to the agent's
+  // session but never reach the upstream messenger.
+  const currentChannel = useMemo<string>(() => {
+    const s = sessions.find((x) => x.id === sessionId);
+    return s?.channel || "web";
+  }, [sessions, sessionId]);
+  const isReadOnlyChannel = currentChannel !== "web";
 
   const handleRenameTitle = useCallback(
     async (next: string) => {
@@ -1434,6 +1452,25 @@ export default function AgentChatPage() {
         {/* Input */}
         <div className="shrink-0 px-4 pb-6 pt-2">
           <div className="mx-auto max-w-2xl relative">
+            {isReadOnlyChannel && (
+              // The web compose path can't deliver into upstream IM
+              // platforms (no reverse channel adapter, no outbound
+              // routing), so writing here would silently corrupt the
+              // session: the agent would process the turn, the IM
+              // user would never see it, and on refresh the original
+              // session's history wins because the orphan write
+              // landed under a triple lookup that didn't match.
+              // Block the input outright and tell the user where to
+              // reply.
+              <div className="mb-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                This conversation lives on{" "}
+                <span className="font-medium text-foreground">
+                  {channelLabel(currentChannel)}
+                </span>
+                . Reply from there — messages typed here won't reach the user on
+                the other side.
+              </div>
+            )}
             {slashOpen && filteredSkills.length > 0 && (
               <SlashMenu
                 skills={filteredSkills}
@@ -1500,7 +1537,7 @@ export default function AgentChatPage() {
               <div className="flex items-center gap-2">
                 <label
                   className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
-                    !selectedAgent || sending
+                    !selectedAgent || sending || isReadOnlyChannel
                       ? "opacity-50 cursor-not-allowed"
                       : "hover:bg-muted hover:text-foreground cursor-pointer"
                   }`}
@@ -1513,7 +1550,7 @@ export default function AgentChatPage() {
                     multiple
                     className="sr-only"
                     onChange={handleFilePick}
-                    disabled={!selectedAgent || sending}
+                    disabled={!selectedAgent || sending || isReadOnlyChannel}
                   />
                 </label>
                 <textarea
@@ -1523,11 +1560,13 @@ export default function AgentChatPage() {
                   onKeyDown={handleKeyDown}
                   onBlur={() => setTimeout(() => setSlashOpen(false), 120)}
                   placeholder={
-                    selectedAgent
-                      ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
-                      : "Select an agent first"
+                    isReadOnlyChannel
+                      ? `Read-only — reply from ${channelLabel(currentChannel)}`
+                      : selectedAgent
+                        ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
+                        : "Select an agent first"
                   }
-                  disabled={!selectedAgent || sending}
+                  disabled={!selectedAgent || sending || isReadOnlyChannel}
                   rows={1}
                   className="flex-1 resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
                   style={{ maxHeight: 200, minHeight: 24 }}
@@ -1544,7 +1583,7 @@ export default function AgentChatPage() {
                 ) : (
                   <Button
                     onClick={handleSend}
-                    disabled={(!input.trim() && attachments.length === 0) || !selectedAgent}
+                    disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyChannel}
                     size="icon"
                     className="h-8 w-8 shrink-0 rounded-lg"
                     aria-label="Send message"

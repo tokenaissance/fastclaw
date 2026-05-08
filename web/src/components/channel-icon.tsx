@@ -1,46 +1,43 @@
-import {
-  Globe,
-  Send,
-  MessageCircle,
-  Hash,
-  Slack,
-  MessagesSquare,
-} from "lucide-react";
+// Brand asset paths copied to /public/channels/. Same set the
+// dashboard's Channels page uses, so the sidebar / chats list and the
+// connect dialog share one visual identity.
+const ASSETS: Record<string, string> = {
+  telegram: "/channels/telegram.svg",
+  discord: "/channels/discord.svg",
+  slack: "/channels/slack.svg",
+  line: "/channels/line.png",
+  feishu: "/channels/feishu.png",
+  wechat: "/channels/wechat.svg",
+};
 
-// ChannelIcon renders a small per-channel glyph next to a chat title.
-// Lucide doesn't ship brand icons for every messenger we support, so we
-// pick the closest semantically-fitting glyph and let the icon do its
-// job as a "this thread came from <somewhere other than web>" hint —
-// the dashboard isn't trying to be a brand kit.
+// ChannelIcon renders the per-channel brand mark next to a chat title.
+// Returns null for web / unknown channels — web is the default place a
+// chat lives in this UI, so a generic globe glyph next to every web
+// session adds noise without information. IM rows still get their
+// brand mark to disambiguate.
 //
-// Unknown / empty channel falls back to the web globe so legacy rows
-// (where the channel column escaped backfill) still render something.
+// Images carry their own colors; we don't apply a text-* class. WeChat's
+// source artwork is non-square (50×40) — object-contain letterboxes it
+// inside the box, so it gets a small scale-up to land at visual parity
+// with the square marks beside it.
 export function ChannelIcon({
   channel,
-  className = "size-3.5 shrink-0 text-muted-foreground",
+  className = "size-4 shrink-0",
 }: {
   channel?: string;
   className?: string;
 }) {
-  switch (channel) {
-    case "telegram":
-      return <Send className={className} aria-label="Telegram" />;
-    case "wechat":
-      return <MessageCircle className={className} aria-label="WeChat" />;
-    case "line":
-      return <MessagesSquare className={className} aria-label="LINE" />;
-    case "discord":
-      return <Hash className={className} aria-label="Discord" />;
-    case "slack":
-      return <Slack className={className} aria-label="Slack" />;
-    case "feishu":
-      return <MessageCircle className={className} aria-label="Feishu" />;
-    case "web":
-    case "":
-    case undefined:
-    default:
-      return <Globe className={className} aria-label="Web" />;
-  }
+  const src = channel ? ASSETS[channel] : undefined;
+  if (!src) return null;
+  const extra = channel === "wechat" ? "scale-150" : "";
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={src}
+      alt={channel ?? ""}
+      className={`${className} object-contain ${extra}`}
+    />
+  );
 }
 
 // channelLabel returns a human-readable name suitable for tooltips.
