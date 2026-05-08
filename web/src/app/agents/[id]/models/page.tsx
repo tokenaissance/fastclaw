@@ -55,16 +55,20 @@ import { useAgentName } from "@/hooks/use-agent-name";
 //   - Agent-scope `agents.defaults.model` overrides system default.
 // Empty override here => inherit system default.
 
+// `models` are common model IDs pre-filled into the form when the
+// preset is selected. The user can keep, edit, or remove them. Empty
+// list means "no sensible default" (custom / openrouter / ollama all
+// vary too much to ship a baked-in suggestion).
 const PROVIDER_PRESETS: Record<
   string,
-  { apiBase: string; apiType: string; authType: string }
+  { apiBase: string; apiType: string; authType: string; models: string[] }
 > = {
-  openai: { apiBase: "https://api.openai.com/v1", apiType: "openai-chat", authType: "bearer-token" },
-  openrouter: { apiBase: "https://openrouter.ai/api/v1", apiType: "openai-chat", authType: "bearer-token" },
-  anthropic: { apiBase: "https://api.anthropic.com", apiType: "anthropic-messages", authType: "api-key" },
-  deepseek: { apiBase: "https://api.deepseek.com", apiType: "openai-chat", authType: "bearer-token" },
-  ollama: { apiBase: "http://localhost:11434/v1", apiType: "openai-chat", authType: "bearer-token" },
-  custom: { apiBase: "", apiType: "openai-chat", authType: "bearer-token" },
+  openai: { apiBase: "https://api.openai.com/v1", apiType: "openai-chat", authType: "bearer-token", models: ["gpt-5.5"] },
+  openrouter: { apiBase: "https://openrouter.ai/api/v1", apiType: "openai-chat", authType: "bearer-token", models: [] },
+  anthropic: { apiBase: "https://api.anthropic.com", apiType: "anthropic-messages", authType: "api-key", models: ["claude-sonnet-4.7"] },
+  deepseek: { apiBase: "https://api.deepseek.com", apiType: "openai-chat", authType: "bearer-token", models: ["deepseek-v4-pro", "deepseek-v4-flash"] },
+  ollama: { apiBase: "http://localhost:11434/v1", apiType: "openai-chat", authType: "bearer-token", models: [] },
+  custom: { apiBase: "", apiType: "openai-chat", authType: "bearer-token", models: [] },
 };
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -113,6 +117,14 @@ function emptyModel(): ModelEntry {
     contextWindow: 200000,
     maxTokens: 8192,
   };
+}
+
+// presetModelRows produces ready-to-edit ModelEntry rows for the IDs
+// declared on a preset, so the dialog opens with common models already
+// filled in instead of an empty list.
+function presetModelRows(preset: string): ModelEntry[] {
+  const ids = PROVIDER_PRESETS[preset]?.models || [];
+  return ids.map((id) => ({ ...emptyModel(), id, name: id }));
 }
 
 export default function AgentModelsPage() {
@@ -251,7 +263,7 @@ export default function AgentModelsPage() {
     setFormApi(PROVIDER_PRESETS["openai"].apiType);
     setFormAuthType(PROVIDER_PRESETS["openai"].authType);
     setFormApiKey("");
-    setFormModels([]);
+    setFormModels(presetModelRows("openai"));
     setModelTests({});
     setDialogOpen(true);
   };
@@ -287,6 +299,11 @@ export default function AgentModelsPage() {
     setDialogOpen(true);
   };
 
+  // Preset switching is treated as "give me a clean slate for this
+  // provider" — same way it overwrites apiBase/apiType, it also
+  // refreshes the models list with the preset's known model IDs. Edit
+  // mode (openEditDialog) loads stored models directly and never goes
+  // through this path, so user-saved configurations are never clobbered.
   const handlePresetChange = (preset: string) => {
     setFormPreset(preset);
     const cfg = PROVIDER_PRESETS[preset];
@@ -296,6 +313,7 @@ export default function AgentModelsPage() {
       setFormAuthType(cfg.authType);
     }
     setFormName(preset === "custom" ? "" : preset);
+    setFormModels(presetModelRows(preset));
     setModelTests({});
   };
 
