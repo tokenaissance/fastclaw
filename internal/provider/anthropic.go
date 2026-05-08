@@ -21,13 +21,12 @@ type AnthropicProvider struct {
 
 // NewAnthropic creates a new Anthropic Messages API provider.
 func NewAnthropic(apiKey, apiBase string) *AnthropicProvider {
-	if apiBase == "" {
+	if strings.TrimSpace(apiBase) == "" {
 		apiBase = "https://api.anthropic.com"
 	}
-	apiBase = strings.TrimRight(apiBase, "/")
 	return &AnthropicProvider{
 		apiKey:  apiKey,
-		apiBase: apiBase,
+		apiBase: NormalizeAPIBase(apiBase, "anthropic-messages"),
 		client:  &http.Client{},
 	}
 }

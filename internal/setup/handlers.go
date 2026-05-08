@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -601,20 +603,42 @@ func (s *Server) handleTestStoredProvider(w http.ResponseWriter, r *http.Request
 	if !s.authorizeScope(w, r, rec.Scope, rec.ScopeID, scopeRead) {
 		return
 	}
+	// The browser never receives the unmasked API key, so it stays
+	// server-side via the stored row. But everything else (apiBase,
+	// apiType, authType) is freely editable in the form and the user
+	// expects Test to exercise *what they typed*, not the saved row —
+	// otherwise tweaking the URL and clicking Test silently re-pings
+	// the old URL and reports green. Honor any overrides the client
+	// sends; fall back to the stored values when a field is omitted.
 	var body struct {
-		Model string `json:"model"`
+		Model    string  `json:"model"`
+		APIBase  *string `json:"apiBase,omitempty"`
+		APIType  *string `json:"apiType,omitempty"`
+		AuthType *string `json:"authType,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	pc := config.ProviderConfig{}
 	if blob, err := json.Marshal(rec.Data); err == nil {
 		_ = json.Unmarshal(blob, &pc)
 	}
+	apiBase := pc.APIBase
+	if body.APIBase != nil {
+		apiBase = *body.APIBase
+	}
+	apiType := pc.APIType
+	if body.APIType != nil {
+		apiType = *body.APIType
+	}
+	authType := pc.AuthType
+	if body.AuthType != nil {
+		authType = *body.AuthType
+	}
 	jsonResponse(w, http.StatusOK, runProviderTest(r.Context(), testProviderRequest{
-		APIBase:  pc.APIBase,
+		APIBase:  apiBase,
 		APIKey:   pc.APIKey,
 		Model:    body.Model,
-		APIType:  pc.APIType,
-		AuthType: pc.AuthType,
+		APIType:  apiType,
+		AuthType: authType,
 	}))
 }
 
@@ -622,8 +646,15 @@ func (s *Server) handleTestStoredProvider(w http.ResponseWriter, r *http.Request
 // upstream provider. Shared between the inline test (key supplied in
 // the request body, used during create / re-key) and the stored test
 // (key looked up server-side, used during edit).
+//
+// We're deliberately stricter than "HTTP 2xx = ok" because some
+// upstreams (one-api / new-api gateways, generic reverse proxies, even
+// a misconfigured nginx) happily return 200 with HTML on a wrong path.
+// A bare 2xx check there reports green for a URL that the runtime will
+// later 404 on. So after the request we also require the response to
+// look like a real Messages / ChatCompletion object.
 func runProviderTest(ctx context.Context, req testProviderRequest) map[string]any {
-	base := strings.TrimRight(req.APIBase, "/")
+	base := provider.NormalizeAPIBase(req.APIBase, req.APIType)
 	var testURL string
 	var body io.Reader
 	if req.APIType == "anthropic-messages" {
@@ -662,14 +693,54 @@ func runProviderTest(ctx context.Context, req testProviderRequest) map[string]an
 		return map[string]any{"ok": false, "error": err.Error()}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return map[string]any{"ok": true}
-	}
 	respBody, _ := io.ReadAll(resp.Body)
-	return map[string]any{
-		"ok":    false,
-		"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody))),
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return map[string]any{
+			"ok":    false,
+			"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(respBody)), 240)),
+		}
 	}
+	if err := validateProviderTestBody(req.APIType, respBody); err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	return map[string]any{"ok": true}
+}
+
+// validateProviderTestBody confirms the 2xx body is a real Messages /
+// ChatCompletion object rather than an HTML splash page or a generic
+// gateway "ok" payload. Returns nil if the shape matches.
+func validateProviderTestBody(apiType string, body []byte) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return fmt.Errorf("empty response body")
+	}
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		return fmt.Errorf("response is not JSON: %s", truncate(string(trimmed), 120))
+	}
+	var probe map[string]any
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return fmt.Errorf("response is not valid JSON: %v", err)
+	}
+	if apiType == "anthropic-messages" {
+		if _, ok := probe["content"].([]any); ok {
+			return nil
+		}
+		if t, _ := probe["type"].(string); t == "message" {
+			return nil
+		}
+		return fmt.Errorf("response missing Anthropic Messages fields (content/type=message)")
+	}
+	if _, ok := probe["choices"].([]any); ok {
+		return nil
+	}
+	return fmt.Errorf("response missing OpenAI Chat Completion field 'choices'")
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // --- /api/tasks ---

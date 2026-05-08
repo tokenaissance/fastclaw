@@ -27,10 +27,9 @@ type OpenAIProvider struct {
 // but the resolution path picked up an empty cfg. An empty apiBase now
 // causes calls to fail loudly, which is what we want.
 func NewOpenAI(apiKey, apiBase string) *OpenAIProvider {
-	apiBase = strings.TrimRight(apiBase, "/")
 	return &OpenAIProvider{
 		apiKey:  apiKey,
-		apiBase: apiBase,
+		apiBase: NormalizeAPIBase(apiBase, "openai-chat"),
 		client:  &http.Client{},
 	}
 }

@@ -336,7 +336,11 @@ export default function ModelsPage() {
       targets.map(async ({ idx, id }) => {
         try {
           const result = useStoredKey && editingRow
-            ? await testStoredProvider(editingRow.id, id)
+            ? await testStoredProvider(editingRow.id, id, {
+                apiBase: formApiBase,
+                apiType: formApiType,
+                authType: formAuthType,
+              })
             : await testProvider({
                 apiBase: formApiBase,
                 apiKey: formApiKey,

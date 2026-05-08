@@ -474,14 +474,20 @@ export async function deleteProvider(id: string) {
 // own apiKey, so the Edit dialog can verify a model id without forcing
 // the user to re-paste the secret. The backend never returns unmasked
 // keys to the browser, so this is the only way to test from edit mode.
+//
+// Non-secret overrides (apiBase / apiType / authType) are passed through
+// when the user has edited them in the form — the saved row's values are
+// only used as fallback. Without this, editing just the URL and clicking
+// Test would silently re-ping the old saved URL and report green.
 export async function testStoredProvider(
   providerId: string,
   model: string,
+  overrides?: { apiBase?: string; apiType?: string; authType?: string },
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await apiFetch(`/api/providers/${providerId}/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model }),
+    body: JSON.stringify({ model, ...(overrides ?? {}) }),
   });
   return res.json();
 }
