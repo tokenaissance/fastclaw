@@ -127,24 +127,26 @@ func (s *Server) handleListAgentChannels(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	caller := s.effectiveUserID(r)
+	_ = rec // kept around in case future logic gates on agent ownership again
 
-	// Channel rows now carry agent_id directly, so listing this agent's
-	// channels is a simple two-prong query:
-	//   1. (user_id='', agent_id=id): agent's "official" rows (anyone
-	//      using the agent inherits)
-	//   2. (user_id=caller, agent_id=id): caller's per-(user, agent)
-	//      overrides — non-owner self-bindings, or owner's
-	//      personalized binding on top of the official one
-	// The legacy bindings indirection (kind=setting, name=bindings)
-	// that used to map (channelType, accountID) → agentID is gone.
+	// Channel rows always carry the binder's user_id + the target
+	// agent_id, so the caller's view is "what I bound to this agent" —
+	// (user_id=caller, agent_id=id). The first ListConfigs covers the
+	// owner's own bindings on their agent and a non-owner's per-(user,
+	// agent) overlay alike.
+	//
+	// We additionally pull (user_id='', agent_id=id) for legacy
+	// installs whose pre-refactor "scope=agent" rows escaped the
+	// migration backfill (e.g. an agent without a user_id at the
+	// time). New rows are never written there.
 	out := make([]channelOut, 0)
+	if caller != "" {
+		if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, caller, id); err == nil {
+			out = append(out, flattenChannelRows(rows, "agent", "", "")...)
+		}
+	}
 	if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, "", id); err == nil {
 		out = append(out, flattenChannelRows(rows, "agent", "", "")...)
-	}
-	if caller != "" && caller != rec.UserID {
-		if userRows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, caller, id); err == nil {
-			out = append(out, flattenChannelRows(userRows, "user", "", "")...)
-		}
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"channels": out})
 }
