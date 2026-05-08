@@ -205,6 +205,19 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 				// turn (or the API rejects with 400), so we serialize
 				// the assistant message in the OpenAI wire format here
 				// and let callers persist it verbatim.
+				//
+				// Note: RawAssistant intentionally omits tool_calls.
+				// ChatStream is only used by the agent loop's
+				// "no-more-tools, stream the final reply" branch
+				// (loop.go:1130) — if the model belatedly emits
+				// tool_calls there, FastClaw deliberately ignores them
+				// and never executes them, so persisting them would
+				// leave the session with an assistant.tool_calls that
+				// has no following tool response, causing the next
+				// turn to be rejected with `An assistant message with
+				// 'tool_calls' must be followed by tool messages`.
+				// tool_calls round-tripping happens through the
+				// non-stream Chat path (parseSSE) in the ReAct loop.
 				var tcs []ToolCall
 				for i := 0; i < len(toolCalls); i++ {
 					if tc, ok := toolCalls[i]; ok {
@@ -214,7 +227,6 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 				reasoning := reasoningBuilder.String()
 				rawMsg := apiMessage{
 					Role:             "assistant",
-					ToolCalls:        tcs,
 					ReasoningContent: reasoning,
 				}
 				rawMsg.Content, _ = json.Marshal(contentBuilder.String())
