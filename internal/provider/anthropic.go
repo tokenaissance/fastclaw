@@ -577,5 +577,19 @@ func (p *AnthropicProvider) parseSSE(body io.Reader) (*Response, error) {
 		}
 	}
 
+	// Fallback: some non-Claude models served via anthropic-compat
+	// endpoints (e.g. MiMo) emit Claude's training-format tool-call XML
+	// inside a text content block instead of returning a real tool_use
+	// block. Recover those calls so the agent loop can still dispatch
+	// tools, and strip the XML from the visible content.
+	if len(result.ToolCalls) == 0 {
+		if cleaned, calls := extractLeakedToolCalls(result.Content); len(calls) > 0 {
+			slog.Warn("recovered leaked tool-call XML from text content",
+				"count", len(calls))
+			result.Content = cleaned
+			result.ToolCalls = calls
+		}
+	}
+
 	return result, nil
 }
