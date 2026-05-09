@@ -99,10 +99,16 @@ func Init(ctx context.Context, st store.Store, name string, opts InitOptions) (*
 	if err != nil {
 		return nil, err
 	}
+	// Without --id we treat init as create-only: a name collision is a
+	// mistake (likely a forgotten --id), not an implicit update. --id
+	// remains the documented update path for dashboard-created agents.
+	if existing != nil && opts.AgentID == "" {
+		return nil, fmt.Errorf("agent %q already exists (id %s); use a different name, or pass --id %s to update it", displayName, existing.ID, existing.ID)
+	}
 
-	// Re-initing an existing agent without an explicit --username preserves
-	// the current owner instead of trying to look up the default admin
-	// (which may not be the agent's owner).
+	// Updating an existing agent (--id) without --username preserves the
+	// current owner instead of looking up the default admin (which may
+	// not be the agent's owner).
 	var owner *users.Account
 	var ownerCreated bool
 	var generatedPassword string

@@ -100,22 +100,45 @@ func TestInitProviderPreflightRunsBeforeWrites(t *testing.T) {
 	}
 }
 
-func TestInitReuseByName(t *testing.T) {
+func TestInitRejectsDuplicateName(t *testing.T) {
 	st := freshStore(t)
 
 	res1, err := Init(context.Background(), st, "alpha", InitOptions{Description: "first"})
 	if err != nil {
 		t.Fatalf("init 1: %v", err)
 	}
-	res2, err := Init(context.Background(), st, "alpha", InitOptions{Description: "second"})
+	_, err = Init(context.Background(), st, "alpha", InitOptions{Description: "second"})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected duplicate-name error, got %v", err)
+	}
+	rec, err := st.GetAgent(context.Background(), res1.Agent.ID)
 	if err != nil {
-		t.Fatalf("init 2: %v", err)
+		t.Fatalf("get: %v", err)
+	}
+	if rec.Config["description"] != "first" {
+		t.Fatalf("description was overwritten despite the rejection: %#v", rec.Config)
+	}
+}
+
+func TestInitUpdatesByExplicitID(t *testing.T) {
+	st := freshStore(t)
+
+	res1, err := Init(context.Background(), st, "alpha", InitOptions{Description: "first"})
+	if err != nil {
+		t.Fatalf("init 1: %v", err)
+	}
+	res2, err := Init(context.Background(), st, "alpha", InitOptions{
+		AgentID:     res1.Agent.ID,
+		Description: "second",
+	})
+	if err != nil {
+		t.Fatalf("update by --id: %v", err)
 	}
 	if res2.Created {
-		t.Fatal("expected re-init to update, not create")
+		t.Fatal("expected --id to update, not create")
 	}
-	if res1.Agent.ID != res2.Agent.ID {
-		t.Fatalf("agent id changed across re-init: %s -> %s", res1.Agent.ID, res2.Agent.ID)
+	if res2.Agent.ID != res1.Agent.ID {
+		t.Fatalf("agent id changed: %s -> %s", res1.Agent.ID, res2.Agent.ID)
 	}
 	if res2.Agent.Config["description"] != "second" {
 		t.Fatalf("description not updated: %#v", res2.Agent.Config)
@@ -164,16 +187,19 @@ func TestInitRejectsRebindToOtherUser(t *testing.T) {
 		t.Fatalf("create bob: %v", err)
 	}
 
-	// Re-init with --username bob: must refuse.
-	_, err = Init(context.Background(), st, "alpha", InitOptions{Username: "bob"})
+	// Update via --id with --username bob: must refuse the silent rebind.
+	_, err = Init(context.Background(), st, "alpha", InitOptions{
+		AgentID:  res1.Agent.ID,
+		Username: "bob",
+	})
 	if err == nil || !strings.Contains(err.Error(), "is owned by user") {
 		t.Fatalf("expected rebind refusal, got %v", err)
 	}
 
-	// Re-init without --username: owner preserved.
-	res3, err := Init(context.Background(), st, "alpha", InitOptions{})
+	// Update via --id without --username: owner preserved.
+	res3, err := Init(context.Background(), st, "alpha", InitOptions{AgentID: res1.Agent.ID})
 	if err != nil {
-		t.Fatalf("re-init: %v", err)
+		t.Fatalf("update by --id: %v", err)
 	}
 	if res3.Agent.UserID != res1.Agent.UserID {
 		t.Fatalf("owner silently rebound: %s -> %s", res1.Agent.UserID, res3.Agent.UserID)
