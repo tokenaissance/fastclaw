@@ -872,16 +872,19 @@ export function ChatScreen() {
     const projectIdHint = urlProjectId;
 
     // Pin the sessionId into the URL on the first send so a refresh
-    // keeps the user in the same conversation. ChatScreen lives in the
-    // agent layout, so this navigation only swaps the (null-returning)
-    // child page — ChatScreen itself does not remount and the stream
-    // we're about to start is uninterrupted. We use `router.replace`
-    // rather than `window.history.replaceState` so usePathname (and
-    // anything that derives from it, e.g. `navigateOnce` dedupe in the
-    // sidebar) sees the new URL.
+    // keeps the user in the same conversation. We use the native
+    // History API instead of `router.replace` because output:'export'
+    // only pre-renders the `_` placeholder for /chat/[session]; a
+    // router.replace to the real sid triggers an RSC fetch that the
+    // SPA fallback can't satisfy, and Next falls back to a hard
+    // window.location navigation — which kills the in-flight stream
+    // we're about to start. Next 16's app-router patches
+    // history.replaceState to dispatch ACTION_RESTORE, so usePathname /
+    // useSearchParams (and the sidebar's navigateOnce dedupe that
+    // derives from them) still see the new URL.
     const target = `/agents/${selectedAgent}/chat/${sessionId}/`;
     if (pathname !== target) {
-      router.replace(target);
+      window.history.replaceState(null, "", target);
     }
 
     // Upload attachments first so the agent can read them by name on its
@@ -1320,7 +1323,11 @@ export function ChatScreen() {
 
   const handleSelectSession = (sid: string) => {
     setSessionId(sid);
-    router.replace(`/agents/${selectedAgent}/chat/${sid}/`);
+    // history.replaceState (not router.replace) for the same reason as
+    // handleSend: /chat/[session] is only pre-rendered for the `_`
+    // placeholder under output:'export', so router-driven navigation to
+    // a real sid hard-reloads. See the longer note in handleSend.
+    window.history.replaceState(null, "", `/agents/${selectedAgent}/chat/${sid}/`);
   };
 
   const formatTime = (ts: number) =>
@@ -1337,19 +1344,6 @@ export function ChatScreen() {
   // instead of taking over the headline, so users always know which
   // agent they're chatting with first.
   const heroTitle = "What can I do for you?";
-
-  // Compact "X ago" / "MMM dd" formatter for the project info card.
-  // Returns "" for falsy inputs so the meta line collapses cleanly
-  // when the API hasn't supplied a timestamp.
-  const formatProjectTime = (iso?: string): string => {
-    if (!iso) return "";
-    const t = Date.parse(iso);
-    if (Number.isNaN(t)) return "";
-    return new Date(t).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    });
-  };
 
   return (
     <div className="flex h-[calc(100vh-3rem)] flex-row">
@@ -1372,24 +1366,6 @@ export function ChatScreen() {
                 <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">
                   {heroTitle}
                 </h1>
-                {urlProjectId && projectInfo && (
-                  <div className="mt-6 inline-flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-left">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                      <FolderOpen className="size-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">
-                        {projectInfo.name}
-                      </div>
-                      <div className="truncate text-xs text-muted-foreground">
-                        {projectInfo.description?.trim() ||
-                          (formatProjectTime(projectInfo.updatedAt)
-                            ? `Updated ${formatProjectTime(projectInfo.updatedAt)}`
-                            : "New chat in this project")}
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
@@ -1736,24 +1712,37 @@ export function ChatScreen() {
                     style={{ maxHeight: 240, minHeight: 72 }}
                   />
                   <div className="mt-2 flex items-center justify-between">
-                    <label
-                      className={`flex h-9 w-9 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors ${
-                        !selectedAgent || sending || isReadOnlyChannel
-                          ? "opacity-50 cursor-not-allowed"
-                          : "hover:bg-muted hover:text-foreground cursor-pointer"
-                      }`}
-                      aria-label="Attach files"
-                    >
-                      <Paperclip className="h-4 w-4" />
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        multiple
-                        className="sr-only"
-                        onChange={handleFilePick}
-                        disabled={!selectedAgent || sending || isReadOnlyChannel}
-                      />
-                    </label>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <label
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors ${
+                          !selectedAgent || sending || isReadOnlyChannel
+                            ? "opacity-50 cursor-not-allowed"
+                            : "hover:bg-muted hover:text-foreground cursor-pointer"
+                        }`}
+                        aria-label="Attach files"
+                      >
+                        <Paperclip className="h-4 w-4" />
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          multiple
+                          className="sr-only"
+                          onChange={handleFilePick}
+                          disabled={!selectedAgent || sending || isReadOnlyChannel}
+                        />
+                      </label>
+                      {urlProjectId && projectInfo && (
+                        <div
+                          className="flex h-9 min-w-0 items-center gap-1.5 rounded-full border border-border px-3 text-xs text-muted-foreground"
+                          title={projectInfo.name}
+                        >
+                          <FolderOpen className="size-3.5 shrink-0" />
+                          <span className="truncate max-w-[20ch]">
+                            {projectInfo.name}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                     {sending ? (
                       <Button
                         onClick={handleStop}

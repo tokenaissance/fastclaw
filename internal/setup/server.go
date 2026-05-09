@@ -435,20 +435,45 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			// Nested dynamic segment fallback: routes like
 			// agents/[id]/chat/[session] and agents/[id]/project/[pid]
-			// emit a single placeholder ("_") at build time. When
-			// neither the concrete URL nor the agent-id substitution
-			// resolved to a real file, swap the last segment with the
-			// placeholder so any /chat/<sid>/ or /project/<pid>/
-			// renders the right component shell. Add new dynamic
-			// routes to dynamicLeaves below as they get introduced.
-			dynamicLeaves := map[string]bool{"chat": true, "project": true}
+			// emit a single placeholder ("_") at build time. Substitute
+			// "_" for any segment that sits immediately under a known
+			// dynamic-parent (chat, project), regardless of what
+			// follows. This covers BOTH the page HTML
+			//   /chat/<sid>/                            → /chat/_/index.html
+			// AND the per-route RSC payloads Next 16 fetches during
+			// client-side navigation:
+			//   /chat/<sid>/index.txt                   → /chat/_/index.txt
+			//   /chat/<sid>/__next.agents.$d$id.chat.$d$session.__PAGE__.txt
+			//   …
+			// Without this, App Router's RSC fetch on a sidebar click
+			// gets a 404 (or the root index.html), gives up on soft
+			// navigation, and falls back to window.location — which
+			// flickers the page and tears down any in-flight stream.
+			// Add new dynamic routes to dynamicParents below as they
+			// get introduced.
+			dynamicParents := map[string]bool{"chat": true, "project": true}
 			sub := strings.Split(parts[2], "/")
-			if len(sub) >= 2 && dynamicLeaves[sub[len(sub)-2]] {
-				sub[len(sub)-1] = "_"
-				placeholder := "agents/default/" + strings.Join(sub, "/") + "/index.html"
+			substituted := false
+			for i := 0; i < len(sub)-1; i++ {
+				if dynamicParents[sub[i]] && sub[i+1] != "_" {
+					sub[i+1] = "_"
+					substituted = true
+				}
+			}
+			if substituted {
+				placeholder := "agents/default/" + strings.Join(sub, "/")
 				if f, err := h.fs.Open(placeholder); err == nil {
+					stat, statErr := f.Stat()
 					f.Close()
-					http.ServeFileFS(w, r, h.fs, placeholder)
+					if statErr == nil && !stat.IsDir() {
+						http.ServeFileFS(w, r, h.fs, placeholder)
+						return
+					}
+				}
+				placeholderIndex := placeholder + "/index.html"
+				if f, err := h.fs.Open(placeholderIndex); err == nil {
+					f.Close()
+					http.ServeFileFS(w, r, h.fs, placeholderIndex)
 					return
 				}
 			}
