@@ -128,6 +128,11 @@ type Registry struct {
 	// hash so both layers agree on what "the same call" means.
 	turnFailMu sync.Mutex
 	turnFails  map[turnFailKey]string
+	// shellMgr owns every `exec(run_in_background=true)` shell so the
+	// agent can later read their output via bash_output and terminate
+	// them via kill_shell. Sessions outlive individual turns; they die
+	// only on explicit kill or on Registry.Close.
+	shellMgr *shellManager
 }
 
 type turnFailKey struct {
@@ -260,9 +265,21 @@ func NewRegistry(systemRoot, userRoot string) *Registry {
 		tools:      make(map[string]registeredTool),
 		systemRoot: systemRoot,
 		userRoot:   userRoot,
+		shellMgr:   newShellManager(),
 	}
 	r.registerBuiltins()
 	return r
+}
+
+// Close releases per-Registry resources. Currently terminates every
+// running background shell (started via exec with run_in_background)
+// so they don't outlive their owning agent. Safe to call multiple
+// times. Callers that don't have a clean shutdown hook can omit it —
+// the OS reaps zombies when the FastClaw process exits anyway.
+func (r *Registry) Close() {
+	if r.shellMgr != nil {
+		r.shellMgr.Close()
+	}
 }
 
 // Register adds a tool to the registry (as a built-in tool).
@@ -356,6 +373,8 @@ func (r *Registry) registerBuiltins() {
 	registerExec(r)
 	registerFile(r)
 	registerApplyPatch(r)
+	registerBashOutput(r)
+	registerKillShell(r)
 	registerMessage(r)
 }
 

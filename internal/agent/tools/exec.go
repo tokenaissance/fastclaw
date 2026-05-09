@@ -15,10 +15,11 @@ import (
 )
 
 type execArgs struct {
-	Command string `json:"command"`
-	Stdin   string `json:"stdin,omitempty"`   // optional: piped to the command's stdin
-	Timeout int    `json:"timeout,omitempty"` // seconds, default 30
-	Sandbox bool   `json:"sandbox,omitempty"` // force sandbox for this call
+	Command         string `json:"command"`
+	Stdin           string `json:"stdin,omitempty"`             // optional: piped to the command's stdin
+	Timeout         int    `json:"timeout,omitempty"`           // seconds, default 30
+	Sandbox         bool   `json:"sandbox,omitempty"`           // force sandbox for this call
+	RunInBackground bool   `json:"run_in_background,omitempty"` // launch detached, return bash_id for bash_output / kill_shell
 }
 
 // MetaSandboxPrefix marks an exec result as having run inside a sandbox.
@@ -87,6 +88,10 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 				"type":        "boolean",
 				"description": "Force execution in sandbox container",
 			},
+			"run_in_background": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Launch the command in the background and return a bash_id immediately. Use this for long-running processes (dev servers, build watchers, migrations). Read output later via bash_output(bash_id); terminate via kill_shell(bash_id). Background sessions live until killed or the agent shuts down.",
+			},
 		},
 		"required": []string{"command"},
 	}, makeExecToolFull(r, sbCfg, envProvider, skillDirs))
@@ -143,6 +148,34 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 		// sandbox is mandatory after construction (sibling agent wanted
 		// it, or admin flipped settings.sandbox.enabled mid-process).
 		useSandbox := args.Sandbox || (sbCfg != nil && sbCfg.Enabled) || (r != nil && r.sandboxRequired)
+
+		// Background mode is host-only in v1. Sandbox-mode background
+		// would need StartBackground / Poll / Kill on sandbox.Executor
+		// (or per-backend tmux-inside-container plumbing) — both are
+		// follow-ups. Until then, point the model at tmux as a
+		// workaround so it has a path forward inside sandboxes.
+		if args.RunInBackground {
+			if useSandbox {
+				return "", fmt.Errorf("run_in_background is not yet supported in sandbox mode — start the long-running command via tmux inside the sandbox instead, e.g. exec({command: \"tmux new-session -d -s job '<your command>'\"}) then exec({command: \"tmux capture-pane -t job -p\"}) to read output and exec({command: \"tmux kill-session -t job\"}) to stop")
+			}
+			if r == nil || r.shellMgr == nil {
+				return "", fmt.Errorf("run_in_background unavailable: shell manager not initialised")
+			}
+			// Build env exactly like the synchronous path so skills
+			// running in the background see their FAL_KEY etc.
+			var sessEnv []string
+			if envProvider != nil && skillDirs != nil {
+				if skillEnv := resolveSkillEnv(args.Command, envProvider, skillDirs); len(skillEnv) > 0 {
+					sessEnv = mergeEnv(os.Environ(), skillEnv)
+				}
+			}
+			s, err := r.shellMgr.Start(command, sessEnv)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Started background shell %s for command: %s\nUse bash_output(bash_id=%q) to read output, kill_shell(bash_id=%q) to terminate.", s.id, args.Command, s.id, s.id), nil
+		}
+
 		if useSandbox && sbCfg != nil && sbCfg.Pool != nil {
 			sb := sbCfg.Pool.Get(sbCfg.AgentID, sbCfg.Image, sbCfg.Workspace, sbCfg.Policy)
 			out, err := sb.Exec(execCtx, command, "/workspace")
@@ -280,6 +313,10 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 				"type":        "integer",
 				"description": "Timeout in seconds (default 30)",
 			},
+			"run_in_background": map[string]interface{}{
+				"type":        "boolean",
+				"description": "Launch in background. NOT YET SUPPORTED in sandbox mode — use `tmux new-session -d -s NAME '<cmd>'` directly instead.",
+			},
 		},
 		"required": []string{"command"},
 	}, func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
@@ -289,6 +326,9 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		}
 		if args.Command == "" {
 			return "", fmt.Errorf("command is required")
+		}
+		if args.RunInBackground {
+			return "", fmt.Errorf("run_in_background is not yet supported in sandbox mode — use tmux inside the sandbox instead: exec({command: \"tmux new-session -d -s job '<your command>'\"}) to start, exec({command: \"tmux capture-pane -t job -p\"}) to read, exec({command: \"tmux kill-session -t job\"}) to stop")
 		}
 		timeout := 30
 		if args.Timeout > 0 {
