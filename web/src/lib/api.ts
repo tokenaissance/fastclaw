@@ -896,7 +896,7 @@ export interface ToolResultMetadata {
 }
 
 export interface ChatStreamEvent {
-  type: "content" | "tool_call" | "tool_result" | "error" | "done";
+  type: "content" | "tool_call" | "tool_result" | "error" | "done" | "subagent_progress";
   // Per-session monotonic sequence assigned by chat_events. Lets the
   // chat page dedupe events arriving on both the active POST stream
   // and the parallel /api/chat/subscribe SSE connection. -1 means
@@ -910,6 +910,11 @@ export interface ChatStreamEvent {
     result?: string;
     message?: string;
     metadata?: ToolResultMetadata;
+    // subagent_progress payload — only populated when type === "subagent_progress".
+    iteration?: number;
+    max?: number;
+    phase?: "thinking" | "running" | "final-delivery" | "done";
+    tools?: string[];
   };
 }
 

@@ -22,7 +22,19 @@ const subagentDefaultTimeout = 15 * time.Minute
 
 // RunSubagent implements tools.SubagentRunner so the delegate_task tool
 // can call back into the Agent without creating an import cycle.
-func (a *Agent) RunSubagent(ctx context.Context, task string, maxIterations int) (string, error) {
+//
+// Always emits a `subagent_progress` event with phase="done" on exit
+// (success, error, or panic-via-defer) so the frontend's "currently
+// delegating" indicator can clear cleanly between serial sub-agent
+// runs — even when the next sub-agent doesn't start immediately or
+// the parent decides to handle the result before issuing another
+// delegate_task.
+func (a *Agent) RunSubagent(ctx context.Context, task string, maxIterations int) (out string, err error) {
+	defer func() {
+		emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+			"phase": "done",
+		}})
+	}()
 	return a.runSubagentLoop(ctx, task, maxIterations)
 }
 
@@ -101,6 +113,18 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 			"iteration", i+1,
 			"max", maxIterations,
 		)
+		// Heartbeat to the parent's chat stream so the UI can show
+		// the user that a sub-agent is making progress and where it
+		// is. Without this the delegate_task tool card looks frozen
+		// for the entire sub-agent run (often 5-15 min). We emit at
+		// the start of every iteration plus right before tool execution
+		// (with the tool name) so the user sees both "thinking" and
+		// "running web_search" phases.
+		emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+			"iteration": i + 1,
+			"max":       maxIterations,
+			"phase":     "thinking",
+		}})
 
 		callTools := toolDefs
 		llmMsgs := messages
@@ -167,6 +191,20 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 			break
 		}
 
+		// Second heartbeat: tools are about to run. Surface their names
+		// so the UI can show "running web_search" / "running exec
+		// (camoufox-cli open …)" instead of just a spinner.
+		toolNames := make([]string, 0, len(resp.ToolCalls))
+		for _, tc := range resp.ToolCalls {
+			toolNames = append(toolNames, tc.Function.Name)
+		}
+		emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+			"iteration": i + 1,
+			"max":       maxIterations,
+			"phase":     "running",
+			"tools":     toolNames,
+		}})
+
 		results := a.engine.executeToolsConcurrently(ctx, a.registry, resp.ToolCalls, a.workspacePath)
 		roundAllFailed := true
 		for idx, r := range results {
@@ -193,6 +231,11 @@ func (a *Agent) runSubagentLoop(ctx context.Context, task string, maxIterations 
 	// HandleMessage; the system message reads naturally in both contexts.
 	slog.Warn("subagent max iterations reached — forcing final delivery",
 		"agent", a.name, "max", maxIterations)
+	emitEvent(ctx, ChatEvent{Type: "subagent_progress", Data: map[string]any{
+		"iteration": maxIterations,
+		"max":       maxIterations,
+		"phase":     "final-delivery",
+	}})
 	finalMessages := append(messages, capReachedNudge(maxIterations))
 	finalResp, err := a.provider.Chat(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
 	if err != nil {

@@ -472,6 +472,17 @@ export function ChatScreen() {
   // we re-fetch on every write_file/edit_file event that touches
   // todo.md plus once at mount. Empty `items` hides the panel.
   const [todoItems, setTodoItems] = useState<TodoItem[]>([]);
+  // Last subagent_progress event from the active delegate_task run.
+  // Cleared when the subagent reports phase="done" or when sending
+  // turns off, so it never lingers across turns. Only one subagent
+  // runs at a time (delegate_task is registered serial) so we don't
+  // need to key this by tool_call_id.
+  const [subagentProgress, setSubagentProgress] = useState<null | {
+    iteration?: number;
+    max?: number;
+    phase?: "thinking" | "running" | "final-delivery" | "done";
+    tools?: string[];
+  }>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [filesSheetOpen, setFilesSheetOpen] = useState(false);
   const [sessionTitle, setSessionTitle] = useState<string>("");
@@ -688,7 +699,21 @@ export function ChatScreen() {
     const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}&since=${since}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (ev) => {
-      let data: { seq?: number; type?: string; text?: string; data?: { content?: string; message?: string; metadata?: ToolResultMetadata } };
+      let data: {
+        seq?: number;
+        type?: string;
+        text?: string;
+        data?: {
+          content?: string;
+          message?: string;
+          metadata?: ToolResultMetadata;
+          // subagent_progress fields
+          iteration?: number;
+          max?: number;
+          phase?: "thinking" | "running" | "final-delivery" | "done";
+          tools?: string[];
+        };
+      };
       try {
         data = JSON.parse(ev.data);
       } catch {
@@ -753,6 +778,20 @@ export function ChatScreen() {
               ...prev,
               { id: `e-${Date.now()}`, role: "agent", content: `Error: ${msg}`, timestamp: Date.now() },
             ]);
+            break;
+          }
+          case "subagent_progress": {
+            claim();
+            if (data.data?.phase === "done") {
+              setSubagentProgress(null);
+            } else {
+              setSubagentProgress({
+                iteration: data.data?.iteration,
+                max: data.data?.max,
+                phase: data.data?.phase,
+                tools: data.data?.tools,
+              });
+            }
             break;
           }
           case "done": {
@@ -941,6 +980,9 @@ export function ChatScreen() {
     // Reset the todo panel on session change so the previous chat's
     // checklist doesn't briefly flash before the new one's fetch lands.
     setTodoItems([]);
+    // Same for the subagent progress indicator — never carry it across
+    // sessions; a fresh load means no in-flight delegate_task to track.
+    setSubagentProgress(null);
     // Refresh todo.md alongside the history fetch. We don't gate the
     // rest of the load on it — a 404 (no todo.md yet) is the normal
     // empty-session case.
@@ -1288,6 +1330,23 @@ export function ChatScreen() {
             });
             break;
           }
+          case "subagent_progress": {
+            // Subagent emitted a heartbeat. Stored as a single
+            // "current run state" since delegate_task is registered
+            // serial — only one subagent in flight at any time.
+            // phase="done" clears the indicator.
+            if (evt.data?.phase === "done") {
+              setSubagentProgress(null);
+            } else {
+              setSubagentProgress({
+                iteration: evt.data?.iteration,
+                max: evt.data?.max,
+                phase: evt.data?.phase,
+                tools: evt.data?.tools,
+              });
+            }
+            break;
+          }
           case "error": {
             // Surface backend errors as a chat bubble. Without this the
             // turn just hangs — the model failed (provider 4xx/5xx,
@@ -1426,6 +1485,10 @@ export function ChatScreen() {
     } finally {
       abortRef.current = null;
       setSending(false);
+      // Belt-and-suspenders: the subagent's done event clears this on
+      // the happy path, but if a network blip drops that event we don't
+      // want a stale "iteration 5/20" sitting under a finished turn.
+      setSubagentProgress(null);
       textareaRef.current?.focus();
     }
   }, [input, attachments, selectedAgent, sessionId, sending, loadSessions, pathname, router, urlProjectId]);
@@ -1664,6 +1727,7 @@ export function ChatScreen() {
                           surfacedSrcs={surfacedSrcs}
                           agentId={selectedAgent}
                           sessionId={sessionId}
+                          subagentProgress={subagentProgress}
                         />
                         {filePanels}
                       </div>,
@@ -1676,6 +1740,7 @@ export function ChatScreen() {
                           surfacedSrcs={surfacedSrcs}
                           agentId={selectedAgent}
                           sessionId={sessionId}
+                          subagentProgress={subagentProgress}
                         />
                         {filePanels}
                       </div>,
@@ -2266,13 +2331,26 @@ function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
  *  `nested`, the outer flex/max-width wrappers are dropped so a parent
  *  container (ToolRoundsBundle) can stack rounds without each one
  *  re-imposing its own bubble alignment. */
-function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, roundIndex }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string; sessionId: string; nested?: boolean; roundIndex?: number }) {
+function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, roundIndex, subagentProgress }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string; sessionId: string; nested?: boolean; roundIndex?: number; subagentProgress?: { iteration?: number; max?: number; phase?: "thinking" | "running" | "final-delivery" | "done"; tools?: string[] } | null }) {
   const [groupOpen, setGroupOpen] = useState(false);
   const [expandedTool, setExpandedTool] = useState<Record<string, boolean>>({});
 
   const tools = msg.toolCalls || [];
   const doneCount = tools.filter((tc) => tc.result != null).length;
   const allDone = doneCount === tools.length;
+
+  // delegate_task is registered serial, so only the FIRST not-yet-
+  // returned delegate_task in this round corresponds to the active
+  // subagentProgress event stream. Older ones already finished;
+  // later ones are queued on the mutex and have no progress yet.
+  const activeDelegateId = (() => {
+    for (const tc of tools) {
+      if (tc.name === "delegate_task" && tc.result == null) {
+        return tc.id;
+      }
+    }
+    return null;
+  })();
 
   const toggleTool = (id: string) =>
     setExpandedTool((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -2395,6 +2473,23 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
                             {tc.result.length > 2000 ? tc.result.slice(0, 2000) + "..." : tc.result}
                           </pre>
                         </div>
+                      ) : tc.name === "delegate_task" && tc.id === activeDelegateId && subagentProgress ? (
+                        <div className="text-xs text-muted-foreground/80 italic">
+                          {(() => {
+                            const it = subagentProgress.iteration;
+                            const mx = subagentProgress.max;
+                            const phase = subagentProgress.phase;
+                            const tools = subagentProgress.tools;
+                            const counter = it && mx ? `Iteration ${it}/${mx}` : "Sub-agent running";
+                            let detail = "";
+                            if (phase === "thinking") detail = "thinking";
+                            else if (phase === "running" && tools?.length) detail = `running ${tools.join(", ")}`;
+                            else if (phase === "final-delivery") detail = "synthesizing final answer";
+                            return detail ? `${counter} · ${detail}` : counter;
+                          })()}
+                        </div>
+                      ) : tc.name === "delegate_task" && tc.result == null && tc.id !== activeDelegateId ? (
+                        <p className="text-xs text-muted-foreground/60 italic">Queued (waiting on prior sub-agent)…</p>
                       ) : (
                         <p className="text-xs text-muted-foreground/60 italic">Executing...</p>
                       )}
@@ -2431,11 +2526,13 @@ function ToolRoundsBundle({
   surfacedSrcs,
   agentId,
   sessionId,
+  subagentProgress,
 }: {
   rounds: ChatMessage[];
   surfacedSrcs?: ReadonlySet<string>;
   agentId: string;
   sessionId: string;
+  subagentProgress?: { iteration?: number; max?: number; phase?: "thinking" | "running" | "final-delivery" | "done"; tools?: string[] } | null;
 }) {
   const [open, setOpen] = useState(false);
   const allTools = rounds.flatMap((r) => r.toolCalls || []);
@@ -2478,6 +2575,7 @@ function ToolRoundsBundle({
                   sessionId={sessionId}
                   nested
                   roundIndex={idx + 1}
+                  subagentProgress={subagentProgress}
                 />
               ))}
             </div>
