@@ -24,6 +24,72 @@ var bootstrapFiles = []string{
 	"IDENTITY.md",
 }
 
+// taskDelegationPrompt teaches the agent when to reach for delegate_task.
+// Without this, even when the tool description is in the tool catalog,
+// flash-tier models keep cramming all the work into their own loop and
+// burn the iteration cap on exploration instead of synthesis. Surfacing
+// the pattern at the top of the system prompt — with a concrete WHEN /
+// WHEN-NOT and a worked example — moves use of the tool from "if the
+// model happens to remember" to "default plan shape for fan-out work".
+const taskDelegationPrompt = `# Task delegation
+
+When a user request decomposes into several large independent chunks
+(find 30 leads in 3 different categories; review 5 files; draft 10
+emails; visit 8 URLs and extract the same fields from each), reach for
+the ` + "`delegate_task`" + ` tool. Each call spawns a sub-agent with its
+OWN fresh context and its OWN full tool-iteration budget, and returns
+only the final deliverable to you as a tool result. That keeps your
+context clean of the dozens of intermediate searches the sub-agent runs,
+and lets you produce the user's final answer from a small set of
+already-synthesized sub-results — instead of burning your own iteration
+cap on the exploration.
+
+## When to delegate
+
+- Lookup fan-out: "find 30 X" → delegate 3× "find 10 X with these
+  criteria" rather than running 30 searches yourself.
+- Per-item processing: "summarize each of these 8 docs" → delegate one
+  per doc (or a couple per batch).
+- Long synthesis after long exploration: do the exploration in a
+  sub-agent, get back just the structured artifact, then write the
+  final user-facing message from your own clean context.
+
+## When NOT to delegate
+
+- One-shot ops (a single search, a single file edit, a single
+  calculation) — direct tool calls are cheaper.
+- Tasks that need YOUR ongoing conversation context with the user —
+  sub-agents don't see prior turns; what you don't pass in the ` + "`task`" + `
+  arg, they can't act on.
+- The final user-facing message itself — that one you compose, not a
+  sub-agent. Sub-agent output is raw material, you do the assembly.
+
+## How to write a good task arg
+
+Sub-agents see ONLY what you put in ` + "`task`" + `. Include: the criteria
+(geography, industry, team size, etc.), any prior findings they should
+build on, and a concrete output format. The optional ` + "`expected_output`" + `
+arg is appended verbatim — use it when the format matters for
+downstream assembly. Example:
+
+    delegate_task(
+      task: "Find 10 solo / 1-person insurance agencies in Austin, TX...
+             Owner-operated only. Exclude national chains. Look at
+             Google Maps + local directories.",
+      expected_output: "Markdown table: | name | owner | city | phone |
+                        phone_type | email_or_form | source_url |
+                        why_fit |. One row per agency, no preamble."
+    )
+
+## Plan first when delegating
+
+For multi-chunk work, plan the decomposition upfront. If the user
+turned on Plan mode (your first response is plan-only, no tools), make
+each sub-agent invocation an explicit step. If they didn't, still
+sketch the breakdown in your first text reply BEFORE issuing
+delegate_task calls — the user gets a chance to steer before you
+commit a batch.`
+
 
 // GroupContext holds information about the group chat environment for system prompt injection.
 type GroupContext struct {
@@ -260,6 +326,13 @@ Then in your final reply, write: ![](/workspace/output.png)`
 		}
 		parts = append(parts, sandboxPrompt)
 	}
+
+	// Task delegation guidance — only injected when the registry will
+	// actually surface `delegate_task` (always, in the current build,
+	// but kept conditional so flavors that disable it don't get a stale
+	// reference). Reaches the model before bootstrap files so it shapes
+	// the planning step rather than reading like a footer.
+	parts = append(parts, taskDelegationPrompt)
 
 	// 3. Bootstrap files
 	for _, name := range bootstrapFiles {
