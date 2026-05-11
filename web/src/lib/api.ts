@@ -1,8 +1,10 @@
 export interface StatusResponse {
   configured: boolean;
+  registrationOpen?: boolean;
   running: boolean;
   port: number;
   mode?: string;
+  version?: string;
   uptime: string;
   agents: AgentInfo[];
   channels: ChannelInfo[];
@@ -12,6 +14,37 @@ export interface StatusResponse {
   userId?: string;
   isAdmin?: boolean;
   users?: number;
+}
+
+export interface RegisterRequest {
+  username: string;
+  email: string;
+  password: string;
+  displayName?: string;
+}
+
+export async function register(req: RegisterRequest): Promise<MeResponse> {
+  const res = await fetch("/api/register", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function getRegistration(): Promise<{ open: boolean }> {
+  const res = await apiFetch("/api/admin/registration");
+  return res.json();
+}
+
+export async function setRegistration(open: boolean): Promise<{ open: boolean }> {
+  const res = await apiFetch("/api/admin/registration", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ open }),
+  });
+  return res.json();
 }
 
 export interface AgentInfo {
@@ -640,6 +673,9 @@ export interface ChatHistoryMessage {
   toolCalls?: { id: string; name: string; arguments: string }[];
   name?: string;
   toolCallId?: string;
+  // For role==="tool" this carries the sandbox flag etc.; for
+  // role==="assistant" it can carry iterationCapReached / iterationCapValue
+  // so the chat UI can badge the bubble on history reload.
   metadata?: ToolResultMetadata;
   // Set on user-role messages whose original turn carried image
   // attachments. The chat UI renders these as inline thumbnails on
@@ -820,6 +856,12 @@ export async function sendChat(agentId: string, sessionId: string, message: stri
 
 export interface ToolResultMetadata {
   sandbox?: boolean;
+  // Stamped on the forced-final-delivery assistant message that the
+  // backend emits when the per-turn tool-iteration cap was hit. Lets the
+  // UI surface a small badge so the user knows the answer was synthesized
+  // under-budget and may be incomplete.
+  iterationCapReached?: boolean;
+  iterationCapValue?: number;
 }
 
 export interface ChatStreamEvent {

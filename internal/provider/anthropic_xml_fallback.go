@@ -10,31 +10,37 @@ import (
 
 // extractLeakedToolCalls scavenges Claude-style tool-call XML that some
 // non-Anthropic models (notably MiMo via xiaomimimo's anthropic-compat
-// endpoint) emit as plain text instead of returning a structured
-// content_block of type "tool_use". The model has clearly seen Claude's
-// training format `<function_calls><invoke name="X"><parameter name="P">v
-// </parameter></invoke></function_calls>` and reproduces it verbatim,
-// but the upstream gateway never converts it back to a tool_use block,
-// so it leaks into the assistant's text content.
+// endpoint, and DeepSeek-derivatives that use the `<｜｜DSML｜｜...>`
+// fullwidth-pipe marker style) emit as plain text instead of returning a
+// structured content_block of type "tool_use". The model has clearly seen
+// Claude's training format `<function_calls><invoke name="X"><parameter
+// name="P">v</parameter></invoke></function_calls>` (or a close cousin)
+// and reproduces it verbatim, but the upstream gateway never converts it
+// back to a tool_use block, so it leaks into the assistant's text content.
 //
 // When detected, we strip the XML from the text and synthesize ToolCall
 // entries the agent loop can dispatch normally. Returns the cleaned
 // content and any synthesized calls. If no XML pattern is found,
 // returns the input text unchanged and a nil slice.
 //
-// We tolerate an optional `antml:` namespace prefix on the tags (Claude
-// sometimes uses it) and the `string="true|false"` attribute on
-// parameters: when string="false" the value is treated as raw JSON
+// The tag prefix is optional and tolerant: Claude uses `antml:`, and
+// DeepSeek-style models wrap tags in fullwidth pipes like
+// `｜｜DSML｜｜` (note: U+FF5C, not ASCII `|`). The outer wrapper tag is
+// either `function_calls` (Claude) or `tool_calls` (DSML/OpenAI-ish).
+// The `string="true|false"` attribute on parameters controls JSON
+// decoding: when string="false" the value is parsed as raw JSON
 // (numbers, booleans, arrays); otherwise it's encoded as a string.
+const tagPrefixPattern = `(?:antml:|｜｜[^｜<>]+｜｜)?`
+
 var (
-	leakedFunctionCallsRe = regexp.MustCompile(`(?s)<(?:antml:)?function_calls>(.*?)</(?:antml:)?function_calls>`)
-	leakedInvokeRe        = regexp.MustCompile(`(?s)<(?:antml:)?invoke\s+name="([^"]+)"\s*>(.*?)</(?:antml:)?invoke>`)
-	leakedParameterRe     = regexp.MustCompile(`(?s)<(?:antml:)?parameter\s+name="([^"]+)"([^>]*)>(.*?)</(?:antml:)?parameter>`)
+	leakedFunctionCallsRe = regexp.MustCompile(`(?s)<` + tagPrefixPattern + `(?:function|tool)_calls>(.*?)</` + tagPrefixPattern + `(?:function|tool)_calls>`)
+	leakedInvokeRe        = regexp.MustCompile(`(?s)<` + tagPrefixPattern + `invoke\s+name="([^"]+)"\s*>(.*?)</` + tagPrefixPattern + `invoke>`)
+	leakedParameterRe     = regexp.MustCompile(`(?s)<` + tagPrefixPattern + `parameter\s+name="([^"]+)"([^>]*)>(.*?)</` + tagPrefixPattern + `parameter>`)
 	leakedStringAttrRe    = regexp.MustCompile(`string="(true|false)"`)
 )
 
 func extractLeakedToolCalls(text string) (cleaned string, calls []ToolCall) {
-	if text == "" || !strings.Contains(text, "function_calls") {
+	if text == "" || (!strings.Contains(text, "function_calls") && !strings.Contains(text, "tool_calls")) {
 		return text, nil
 	}
 

@@ -56,7 +56,7 @@ type DockerSandbox struct {
 // explicit policy with NetMode: "none".
 func NewDockerSandbox(image, workspace string, policy *Policy) *DockerSandbox {
 	if image == "" {
-		image = "fastclaw/sandbox:latest"
+		image = "thinkany/fastclaw-sandbox:latest"
 	}
 	if policy == nil {
 		policy = &Policy{}
@@ -123,6 +123,47 @@ func (s *DockerSandbox) Create() error {
 		"create",
 		"--interactive",
 		"--label", "fastclaw=sandbox",
+	}
+
+	// Inherit the host's HTTP(S)_PROXY config so curl / pip / npm / git
+	// inside the sandbox can reach blocked origins through whatever
+	// proxy fastclaw itself uses. Without this, in restricted networks
+	// (GFW etc.) DNS for the target domain resolves to a sinkhole and
+	// the container sees TLS resets surfaced as NS_ERROR_NET_INTERRUPT
+	// in Camoufox / Playwright. Localhost-bound proxy URLs are rewritten
+	// to host.docker.internal — `127.0.0.1` inside the container means
+	// the container itself, never the host. Cloud deploys typically have
+	// no proxy env, so this whole loop is a no-op there.
+	rewroteToHostInternal := false
+	for _, k := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
+		v := os.Getenv(k)
+		if v == "" {
+			continue
+		}
+		// Only rewrite the proxy URL itself, not NO_PROXY's bypass list.
+		switch k {
+		case "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy":
+			if strings.Contains(v, "127.0.0.1") || strings.Contains(v, "localhost") {
+				v = strings.ReplaceAll(v, "127.0.0.1", "host.docker.internal")
+				v = strings.ReplaceAll(v, "localhost", "host.docker.internal")
+				rewroteToHostInternal = true
+			}
+		}
+		// Preserve operator-supplied env (SetEnv) — explicit beats inherited.
+		if _, set := s.env[k]; !set {
+			args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+
+	// Only force-resolve host.docker.internal when we actually rewrote a
+	// proxy URL to point at it. Always-adding the flag would be harmless
+	// on modern Docker (20.10+ host-gateway keyword), but adding it
+	// conditionally keeps the cloud path — where no proxy env is set —
+	// byte-identical to the pre-change behavior and avoids duplicating
+	// the host.docker.internal entry that Docker Desktop / OrbStack
+	// already inject themselves.
+	if rewroteToHostInternal {
+		args = append(args, "--add-host", "host.docker.internal:host-gateway")
 	}
 
 	// Mount workspace

@@ -6,7 +6,7 @@ import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { getAgent, getChatHistoryWithCursor, getChatSessions, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, uploadAgentFiles, getAuthToken, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw } from "lucide-react";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -147,6 +147,10 @@ interface ChatMessage {
   toolCalls?: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[];
   files?: ProducedFile[];
   attachments?: UserAttachment[];
+  // Assistant-side metadata (e.g. iteration-cap badge). Stamped from
+  // either the live content event's `metadata` payload or the
+  // ChatHistoryMessage.metadata on a refresh.
+  metadata?: ToolResultMetadata;
 }
 
 // Tailwind class string applied to every chat-bubble markdown wrapper
@@ -271,11 +275,11 @@ function buildChatMessages(history: ChatHistoryMessage[]): ChatMessage[] {
         history[i].content &&
         !(history[i].toolCalls && history[i].toolCalls!.length > 0)
       ) {
-        msgs.push({ id: `h-${i}`, role: "agent", content: history[i].content || "", timestamp: 0 });
+        msgs.push({ id: `h-${i}`, role: "agent", content: history[i].content || "", timestamp: 0, metadata: history[i].metadata });
         i++;
       }
     } else if (h.role === "assistant") {
-      msgs.push({ id: `h-${i}`, role: "agent", content: h.content || "", timestamp: 0 });
+      msgs.push({ id: `h-${i}`, role: "agent", content: h.content || "", timestamp: 0, metadata: h.metadata });
       i++;
     } else {
       i++; // skip unexpected
@@ -563,7 +567,7 @@ export function ChatScreen() {
     const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}&since=${since}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (ev) => {
-      let data: { seq?: number; type?: string; text?: string; data?: { content?: string; message?: string } };
+      let data: { seq?: number; type?: string; text?: string; data?: { content?: string; message?: string; metadata?: ToolResultMetadata } };
       try {
         data = JSON.parse(ev.data);
       } catch {
@@ -586,7 +590,8 @@ export function ChatScreen() {
         switch (data.type) {
           case "content": {
             const content = data.data?.content || "";
-            if (!content) break;
+            const meta = data.data?.metadata;
+            if (!content && !meta) break;
             claim();
             setMessages((prev) => {
               if (transientBubbleIdRef.current) {
@@ -596,13 +601,27 @@ export function ChatScreen() {
                   updated[idx] = {
                     ...updated[idx],
                     content: (updated[idx].content || "") + content,
+                    metadata: meta ? { ...updated[idx].metadata, ...meta } : updated[idx].metadata,
                   };
                   return updated;
                 }
               }
+              // Metadata-only retro-stamp event with no transient
+              // bubble: attach to the most recent agent bubble so the
+              // badge sticks across an active subscribe session.
+              if (!content && meta) {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  if (prev[i].role === "agent") {
+                    const updated = [...prev];
+                    updated[i] = { ...updated[i], metadata: { ...updated[i].metadata, ...meta } };
+                    return updated;
+                  }
+                }
+                return prev;
+              }
               const id = `resume-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
               transientBubbleIdRef.current = id;
-              return [...prev, { id, role: "agent", content, timestamp: Date.now() }];
+              return [...prev, { id, role: "agent", content, timestamp: Date.now(), metadata: meta }];
             });
             break;
           }
@@ -1002,10 +1021,30 @@ export function ChatScreen() {
         switch (evt.type) {
           case "content": {
             const content = evt.data?.content || "";
+            const meta = evt.data?.metadata;
             if (content === "__NEW_SESSION__") {
               handleNewChat();
               loadSessions(selectedAgent);
               return;
+            }
+            // Metadata-only event with empty content: the backend uses
+            // this to retro-stamp the previous bubble (e.g. for the
+            // streaming forced-final-delivery path where chunks flow
+            // through a separate channel and the metadata follows after).
+            // Apply to the last agent message instead of creating an
+            // empty new bubble.
+            if (!content && meta) {
+              setMessages((prev) => {
+                for (let i = prev.length - 1; i >= 0; i--) {
+                  if (prev[i].role === "agent") {
+                    const updated = [...prev];
+                    updated[i] = { ...updated[i], metadata: { ...updated[i].metadata, ...meta } };
+                    return updated;
+                  }
+                }
+                return prev;
+              });
+              break;
             }
             if (curCalls.length > 0) {
               // Content after tool calls = new round. Finalize current group, start fresh.
@@ -1015,7 +1054,7 @@ export function ChatScreen() {
             curContent = content;
             setMessages((prev) => [
               ...prev,
-              { id: `a-${Date.now()}`, role: "agent", content, timestamp: Date.now() },
+              { id: `a-${Date.now()}`, role: "agent", content, timestamp: Date.now(), metadata: meta },
             ]);
             break;
           }
@@ -1314,6 +1353,22 @@ export function ChatScreen() {
     setTimeout(() => setCopiedId(null), 1500);
   };
 
+  // handleRetry refills the composer with this message's content so the
+  // user can verify/edit before resending. Deliberately not auto-sending —
+  // a one-click resend that quietly discards the existing agent reply is
+  // too easy to fire by accident.
+  const handleRetry = (msg: ChatMessage) => {
+    setInput(msg.content);
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        const end = el.value.length;
+        el.setSelectionRange(end, end);
+      }
+    }, 0);
+  };
+
   const handleNewChat = () => {
     const newId = generateSessionId();
     setSessionId(newId);
@@ -1472,7 +1527,7 @@ export function ChatScreen() {
                     }`}
                   >
                     <div
-                      className={`rounded-2xl px-4 py-2.5 ${
+                      className={`rounded-2xl px-4 py-2.5 break-words ${
                         msg.role === "user"
                           ? "bg-primary/10 dark:bg-primary/15 text-foreground rounded-br-md"
                           : "bg-muted rounded-bl-md"
@@ -1537,6 +1592,14 @@ export function ChatScreen() {
                           )}
                         </div>
                       )}
+                      {msg.role === "agent" && msg.metadata?.iterationCapReached && (
+                        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200">
+                          <span className="font-medium">Iteration limit reached</span>
+                          <span className="opacity-80">
+                            Agent hit the {msg.metadata.iterationCapValue ?? ""} tool-call budget before finishing. The answer above was synthesized from partial results — fields may be marked unknown / partial. Continue the conversation to push further.
+                          </span>
+                        </div>
+                      )}
                     </div>
                     {msg.files && msg.files.length > 0 && (
                       <FilesPanel agentId={selectedAgent} files={msg.files} />
@@ -1546,33 +1609,59 @@ export function ChatScreen() {
                         msg.role === "user" ? "justify-end" : "justify-start"
                       }`}
                     >
-                      {msg.timestamp > 0 && (
-                        <span className="text-[10px] text-muted-foreground/60">
-                          {formatTime(msg.timestamp)}
-                        </span>
-                      )}
-                      {msg.role === "agent" && (
-                        <button
-                          onClick={() => handleCopy(msg)}
-                          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-muted text-muted-foreground/60 hover:text-muted-foreground transition-all"
-                          title="Copy"
-                        >
-                          {copiedId === msg.id ? (
-                            <Check className="h-3 w-3 text-emerald-500" />
-                          ) : (
-                            <Copy className="h-3 w-3" />
+                      {msg.role === "user" ? (
+                        <>
+                          {msg.timestamp > 0 && (
+                            <span className="opacity-0 group-hover:opacity-100 text-[10px] text-muted-foreground/60 transition-all">
+                              {formatTime(msg.timestamp)}
+                            </span>
                           )}
-                        </button>
-                      )}
-                      {msg.role === "agent" && (
-                        <button
-                          onClick={() => setFilesSheetOpen(true)}
-                          className="opacity-0 group-hover:opacity-100 inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-muted text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-all"
-                          title="View task files"
-                        >
-                          <FolderOpen className="h-3 w-3" />
-                          <span>Files</span>
-                        </button>
+                          <button
+                            onClick={() => handleCopy(msg)}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-muted text-muted-foreground/60 hover:text-muted-foreground transition-all"
+                            title="Copy"
+                          >
+                            {copiedId === msg.id ? (
+                              <Check className="h-3 w-3 text-emerald-500" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                          </button>
+                          <button
+                            onClick={() => handleRetry(msg)}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-muted text-muted-foreground/60 hover:text-muted-foreground transition-all"
+                            title="Resend (refills the composer)"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          {msg.timestamp > 0 && (
+                            <span className="text-[10px] text-muted-foreground/60">
+                              {formatTime(msg.timestamp)}
+                            </span>
+                          )}
+                          <button
+                            onClick={() => handleCopy(msg)}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-muted text-muted-foreground/60 hover:text-muted-foreground transition-all"
+                            title="Copy"
+                          >
+                            {copiedId === msg.id ? (
+                              <Check className="h-3 w-3 text-emerald-500" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                          </button>
+                          <button
+                            onClick={() => setFilesSheetOpen(true)}
+                            className="opacity-0 group-hover:opacity-100 inline-flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-muted text-[10px] text-muted-foreground/60 hover:text-muted-foreground transition-all"
+                            title="View task files"
+                          >
+                            <FolderOpen className="h-3 w-3" />
+                            <span>Files</span>
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -1766,7 +1855,7 @@ export function ChatScreen() {
                   </div>
                 </>
               ) : (
-                <div className="flex items-center gap-2">
+                <div className="flex items-end gap-2">
                   <label
                     className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
                       !selectedAgent || sending || isReadOnlyChannel
@@ -2163,14 +2252,15 @@ function ToolRoundsBundle({
 }
 
 /** File extension → icon + preview kind. */
-function fileKind(path: string): { icon: typeof File; preview: "image" | "pdf" | "markdown" | "text" | "none" } {
+function fileKind(path: string): { icon: typeof File; preview: "image" | "pdf" | "markdown" | "html" | "text" | "none" } {
   const ext = path.toLowerCase().split(".").pop() || "";
   if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico"].includes(ext)) return { icon: ImageIcon, preview: "image" };
   if (ext === "pdf") return { icon: FileText, preview: "pdf" };
   if (ext === "md" || ext === "markdown") return { icon: FileText, preview: "markdown" };
+  if (ext === "html" || ext === "htm") return { icon: FileCode, preview: "html" };
   if (["mp4", "webm", "mov", "mkv"].includes(ext)) return { icon: Film, preview: "none" };
   if (["mp3", "wav", "ogg", "flac", "m4a"].includes(ext)) return { icon: Music, preview: "none" };
-  if (["js", "ts", "tsx", "jsx", "py", "go", "rs", "c", "cpp", "h", "java", "rb", "sh", "json", "yaml", "yml", "toml", "xml", "html", "css"].includes(ext))
+  if (["js", "ts", "tsx", "jsx", "py", "go", "rs", "c", "cpp", "h", "java", "rb", "sh", "json", "yaml", "yml", "toml", "xml", "css"].includes(ext))
     return { icon: FileCode, preview: "text" };
   if (["txt", "csv", "log"].includes(ext)) return { icon: FileText, preview: "text" };
   return { icon: File, preview: "none" };
@@ -2538,8 +2628,10 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
   const basename = file.path.split("/").pop() || file.path;
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [htmlView, setHtmlView] = useState<"rendered" | "source">("rendered");
 
   useEffect(() => {
+    // HTML fetches its text lazily only when the user switches to source view.
     if (preview !== "markdown" && preview !== "text") return;
     let cancelled = false;
     fetch(src)
@@ -2548,6 +2640,16 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
       .catch((e) => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; };
   }, [src, preview]);
+
+  useEffect(() => {
+    if (preview !== "html" || htmlView !== "source" || text !== null) return;
+    let cancelled = false;
+    fetch(src)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
+      .then((t) => { if (!cancelled) setText(t); })
+      .catch((e) => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
+  }, [src, preview, htmlView, text]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" onClick={onClose}>
@@ -2561,6 +2663,15 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {preview === "html" && (
+              <button
+                onClick={() => setHtmlView(htmlView === "rendered" ? "source" : "rendered")}
+                className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                title={htmlView === "rendered" ? "View source" : "View rendered"}
+              >
+                {htmlView === "rendered" ? <Code2 className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            )}
             <a
               href={downloadUrl}
               className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
@@ -2595,6 +2706,23 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
           )}
           {preview === "text" && (
             error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
+            : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
+            : (
+              <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-muted/30 rounded p-3">{text}</pre>
+            )
+          )}
+          {preview === "html" && (
+            htmlView === "rendered" ? (
+              // sandbox="allow-scripts" runs the page in a null origin: CSS,
+              // animations, charts work, but scripts can't reach parent
+              // cookies/storage/API — safe for untrusted agent output.
+              <iframe
+                src={src}
+                sandbox="allow-scripts"
+                className="h-full w-full border-0 rounded bg-white"
+                title={basename}
+              />
+            ) : error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
             : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
             : (
               <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-muted/30 rounded p-3">{text}</pre>

@@ -548,6 +548,12 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 				}
 				entry["toolCalls"] = calls
 			}
+			// Surface persisted assistant-side metadata so the UI can
+			// re-render iteration-cap badges, etc. on history reload —
+			// without this, the badge only ever showed on the live turn.
+			if len(m.Metadata) > 0 {
+				entry["metadata"] = m.Metadata
+			}
 			// Skip empty assistant messages (no content, no tool calls)
 			if m.Content == "" && len(m.ToolCalls) == 0 {
 				continue
@@ -1176,9 +1182,40 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		}
 	}
 
+	slog.Warn("max tool iterations reached — forcing final delivery", "agent", a.name, "max", a.maxToolIterations)
+	// Forced final delivery: one more LLM call with tools disabled and a
+	// nudge that tells the model to synthesize what it has. Replaces the
+	// old behavior of just returning a canned warning, which left users
+	// with zero deliverable after a full iteration budget got burned.
+	finalMessages := append(messages, capReachedNudge(a.maxToolIterations))
+	if a.piiScrubEnabled {
+		finalMessages = privacy.ScrubMessages(finalMessages)
+	}
+	finalContent := ""
+	finalResp, finalErr := a.provider.Chat(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
+	if finalErr == nil {
+		finalContent = finalResp.Content
+	}
+	if finalContent == "" {
+		// Synthesis call itself failed or returned empty — fall back to
+		// the canned line so the user still gets *something* with the
+		// badge attached.
+		finalContent = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
+	}
+	capMeta := iterationCapMetadata(a.maxToolIterations)
+	sess.Append(provider.Message{
+		Role:      "assistant",
+		Content:   finalContent,
+		Metadata:  capMeta,
+		Timestamp: time.Now().UnixMilli(),
+	})
+	emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{
+		"content":  finalContent,
+		"metadata": capMeta,
+	}})
+	emitEvent(ctx, ChatEvent{Type: "done"})
 	a.runPostTurn(ctx, messages, totalToolCalls)
-	slog.Warn("max tool iterations reached", "agent", a.name, "max", a.maxToolIterations)
-	return "I've reached the maximum number of tool iterations. Here's what I have so far."
+	return finalContent
 }
 
 // isFailedToolResult is the agent loop's heuristic for "this tool
@@ -1542,7 +1579,91 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		}
 	}
 
-	return a.stringStream("I've reached the maximum number of tool iterations. Here's what I have so far.")
+	slog.Warn("max tool iterations reached — streaming forced final delivery", "agent", a.name, "max", a.maxToolIterations)
+	return a.streamFinalDeliveryAfterCap(ctx, messages, sess)
+}
+
+// streamFinalDeliveryAfterCap runs one extra ChatStream with tools
+// disabled and a synthesis nudge, then persists the assistant message
+// with iteration-cap metadata so the chat UI can badge the bubble.
+// Returned StreamReader matches the contract of the normal "final
+// response" branch above so callers don't need a special case.
+func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, messages []provider.Message, sess *session.Session) *provider.StreamReader {
+	capMeta := iterationCapMetadata(a.maxToolIterations)
+	finalMessages := append(messages, capReachedNudge(a.maxToolIterations))
+	sr, err := a.provider.ChatStream(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
+	if err != nil {
+		// Streaming endpoint failed — persist+emit a fallback line
+		// with the badge so the user still gets the signal.
+		fallback := fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
+		sess.Append(provider.Message{Role: "assistant", Content: fallback, Metadata: capMeta, Timestamp: time.Now().UnixMilli()})
+		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": fallback, "metadata": capMeta}})
+		return a.stringStream(fallback)
+	}
+
+	outCh := make(chan provider.StreamChunk, 64)
+	outReader := provider.NewStreamReader(outCh)
+	go func() {
+		defer close(outCh)
+		var full strings.Builder
+		var thinking, thinkingSig string
+		var rawAssistant json.RawMessage
+		for {
+			chunk, ok := sr.Next()
+			if !ok {
+				break
+			}
+			if chunk.Content != "" {
+				full.WriteString(chunk.Content)
+			}
+			if chunk.Thinking != "" {
+				thinking = chunk.Thinking
+			}
+			if chunk.ThinkingSignature != "" {
+				thinkingSig = chunk.ThinkingSignature
+			}
+			if len(chunk.RawAssistant) > 0 {
+				rawAssistant = chunk.RawAssistant
+			}
+			select {
+			case outCh <- chunk:
+			case <-ctx.Done():
+				return
+			}
+		}
+		content := full.String()
+		if content == "" {
+			content = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
+		}
+		finalMsg := provider.Message{
+			Role:      "assistant",
+			Content:   content,
+			Thinking:  thinking,
+			Metadata:  capMeta,
+			Timestamp: time.Now().UnixMilli(),
+		}
+		switch {
+		case len(rawAssistant) > 0:
+			finalMsg.RawAssistant = rawAssistant
+		case thinking != "":
+			if raw, err := json.Marshal(map[string]string{
+				"type":      "thinking",
+				"thinking":  thinking,
+				"signature": thinkingSig,
+			}); err == nil {
+				finalMsg.RawAssistant = raw
+			}
+		}
+		sess.Append(finalMsg)
+		// Out-of-band content event so SSE subscribers + chat_events
+		// archive carry the cap-reached flag — chunks themselves don't
+		// have a metadata field, so we publish it once here.
+		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{
+			"content":  "",
+			"metadata": capMeta,
+		}})
+	}()
+	return outReader
 }
 
 // extractToolMeta strips a FC_META prefix (if present) from a tool result and
@@ -1554,6 +1675,35 @@ func extractToolMeta(result string) (string, map[string]any) {
 		return strings.TrimPrefix(result, tools.MetaSandboxPrefix), map[string]any{"sandbox": true}
 	}
 	return result, nil
+}
+
+// capReachedNudge is the system message we append before the forced
+// final delivery turn. Spells out two things: (a) tools are disabled
+// for this call so don't try, (b) deliver the structured output the
+// user asked for from whatever was already gathered, marking gaps
+// explicitly rather than skipping fields. The model was generally
+// burning the entire budget on exploration without ever circling back
+// to synthesis — surfacing the constraint explicitly is the cheapest
+// nudge that produces a usable artifact.
+func capReachedNudge(maxIterations int) provider.Message {
+	return provider.Message{
+		Role: "system",
+		Content: fmt.Sprintf(
+			"You've used all %d tool-call iterations available for this turn. Tools are now disabled for this final response — do not attempt to call any. Synthesize what you've already gathered into the most complete deliverable you can: if the user asked for a structured artifact (table, list, ICP summary, email drafts, etc.), produce it now from the existing tool results. For any fields you couldn't resolve, mark them as 'unknown' / 'not found' / 'partial' rather than dropping rows or skipping the structure — give the user something usable plus an honest note about what's missing. Do not apologize without delivering content.",
+			maxIterations,
+		),
+	}
+}
+
+// iterationCapMetadata is the assistant-side metadata stamped on the
+// forced final-delivery message so the UI can badge the bubble. Kept
+// as a constructor so the key name stays canonical across the streaming
+// and non-streaming paths.
+func iterationCapMetadata(maxIterations int) map[string]any {
+	return map[string]any{
+		"iterationCapReached": true,
+		"iterationCapValue":   maxIterations,
+	}
 }
 
 // stringStream creates a StreamReader that yields a single string.

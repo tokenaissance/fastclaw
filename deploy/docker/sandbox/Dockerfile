@@ -1,25 +1,26 @@
 # fastclaw-sandbox — runtime image for the agent's exec sandbox.
 #
 # Why this exists: the default `python:3.12-slim` image only has Python.
-# Skills like `agent-browser` are Node CLIs that drive headless Chromium,
-# so `npx` / Chromium are missing and the agent's first install attempt
-# fails with `npm: not found`. This image bundles Python + Node +
-# Chromium (via Playwright) so the common skill set works out of the
-# box.
+# Bundled skills (like camoufox-cli) drive a real browser, so we need
+# Python + Node + a browser binary pre-installed so the agent can run
+# `camoufox-cli open <url>` on the first turn with zero round-trips.
 #
-# Base: Microsoft's Playwright image already has Chromium + Firefox +
-# WebKit + their system deps wired up; we just add Python on top so we
-# don't lose the python:3.12-slim baseline.
+# Base: `node:22-bookworm-slim` — small Debian image with Node already
+# wired up. We add Python on top and let camoufox-cli pull its own
+# anti-detect Firefox (Camoufox) via `camoufox-cli install --with-deps`.
 
-FROM mcr.microsoft.com/playwright:v1.49.0-jammy
+FROM node:22-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Python 3 + pip + venv. Jammy ships python3.10 — that's fine for
-# skills (the agent's own runtime is the Go binary, not Python). If a
-# skill needs 3.12 specifically, override the base or add deadsnakes.
+# System deps: Python toolchain + the usual fetch/cert essentials +
+# CJK/emoji fonts so Firefox can render real glyphs instead of tofu
+# (.notdef) on Chinese/Japanese/Korean pages and emoji-laden sites.
+# `sudo` is needed because camoufox-cli's `install --with-deps` shells
+# out to `sudo apt-get …` to grab Firefox runtime libs even when the
+# caller is already root.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         python3 \
@@ -28,37 +29,59 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
- && ln -sf /usr/bin/python3 /usr/local/bin/python \
- && rm -rf /var/lib/apt/lists/*
+        sudo \
+        fonts-noto-cjk \
+        fonts-noto-color-emoji \
+ && ln -sf /usr/bin/python3 /usr/local/bin/python
 
-# Common Python deps the python:3.12-slim users picked up by reflex.
-# Skipping anything heavy (numpy/pandas) — install on demand from skills.
-# Jammy's system python isn't PEP 668 externally-managed, and the
-# bundled pip predates --break-system-packages, so we install plainly.
-RUN pip install --no-cache-dir \
+# camoufox-cli + uv (provides `uv` and `uvx`) + common Python utilities.
+# Debian Bookworm enforces PEP 668 on the system Python;
+# `--break-system-packages` is the documented escape hatch and safe
+# inside a container.
+RUN pip install --break-system-packages --no-cache-dir \
+        camoufox-cli \
+        uv \
         requests \
         pillow \
         beautifulsoup4 \
         lxml
 
-# Pre-install the agent-browser CLI globally so `agent-browser …`
-# resolves immediately. Failure non-fatal: a registry hiccup at build
-# time still produces a runnable image and the agent can fall back
-# to `npm i -g agent-browser` at runtime.
-RUN npm install -g agent-browser || true
+# Pull Camoufox (anti-detect Firefox) + the system libs it needs to run
+# headless. `--with-deps` shells out to apt for the Firefox runtime
+# dependencies, so this has to happen before we wipe apt lists below.
+# We deliberately let this fail the build if it errors — a silently
+# broken browser ships an image that looks fine until the first
+# `camoufox-cli open` blows up at runtime, which is worse than a
+# build-time failure with an actionable error message.
+RUN camoufox-cli install --with-deps
 
-# Make Playwright's bundled Chromium discoverable to agent-browser.
-# agent-browser auto-launch only checks four fixed locations
-# (its own cache, system Chrome, Puppeteer cache, ~/.cache/ms-playwright)
-# and ignores PLAYWRIGHT_BROWSERS_PATH, so without this it errors with
-# "Chrome not found" even though arm64 Chromium is sitting at
-# /ms-playwright/chromium-*/chrome-linux/chrome. The /usr/bin/chromium-browser
-# symlink trips agent-browser's "System Chrome" check, which is what
-# upstream's own error message recommends for non-x86_64 hosts (Chrome
-# for Testing has no Linux ARM64 build, so `agent-browser install`
-# isn't an option on Apple Silicon / Graviton). Glob expands at build
-# time to today's revision, so a Playwright base bump just regenerates
-# the symlink on the next image build.
-RUN ln -sfn "$(echo /ms-playwright/chromium-*/chrome-linux/chrome)" /usr/bin/chromium-browser
+RUN rm -rf /var/lib/apt/lists/*
+
+# Auto-inject --proxy from $HTTPS_PROXY (or its lowercase variants) into
+# every camoufox-cli call when the caller didn't pass --proxy explicitly.
+# Playwright/Camoufox don't pick up HTTPS_PROXY for the browser process —
+# only the --proxy flag works — so without this shim a sandbox in a
+# proxy-only network (e.g. behind the GFW) silently fails with
+# `NS_ERROR_NET_INTERRUPT` on the first Page.goto, even though curl /
+# pip / npm in the same container work fine via the env vars.
+#
+# Move the pip-installed entry point to camoufox-cli-bin and replace
+# /usr/local/bin/camoufox-cli with the shim so PATH-based lookups (the
+# only way the agent invokes it) flow through us transparently.
+RUN mv /usr/local/bin/camoufox-cli /usr/local/bin/camoufox-cli-bin \
+ && printf '%s\n' \
+        '#!/bin/sh' \
+        'proxy="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"' \
+        'if [ -n "$proxy" ]; then' \
+        '    for a in "$@"; do' \
+        '        case "$a" in' \
+        '            --proxy|--proxy=*) exec /usr/local/bin/camoufox-cli-bin "$@" ;;' \
+        '        esac' \
+        '    done' \
+        '    exec /usr/local/bin/camoufox-cli-bin --proxy "$proxy" "$@"' \
+        'fi' \
+        'exec /usr/local/bin/camoufox-cli-bin "$@"' \
+    > /usr/local/bin/camoufox-cli \
+ && chmod +x /usr/local/bin/camoufox-cli
 
 WORKDIR /workspace

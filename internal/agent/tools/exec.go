@@ -18,7 +18,7 @@ import (
 type execArgs struct {
 	Command         string `json:"command"`
 	Stdin           string `json:"stdin,omitempty"`             // optional: piped to the command's stdin
-	Timeout         int    `json:"timeout,omitempty"`           // seconds, default 30
+	Timeout         int    `json:"timeout,omitempty"`           // seconds, default 120
 	Sandbox         bool   `json:"sandbox,omitempty"`           // force sandbox for this call
 	RunInBackground bool   `json:"run_in_background,omitempty"` // launch detached, return bash_id for bash_output / kill_shell
 }
@@ -83,7 +83,7 @@ func registerExecFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 			},
 			"timeout": map[string]interface{}{
 				"type":        "integer",
-				"description": "Timeout in seconds (default 30)",
+				"description": "Timeout in seconds (default 120). Headless-browser workflows (camoufox-cli) need a longer ceiling for the first call — the daemon + browser cold-start can take 2-3 min when traffic is proxied; subsequent calls in the same session are sub-second.",
 			},
 			"sandbox": map[string]interface{}{
 				"type":        "boolean",
@@ -127,7 +127,7 @@ func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvPro
 			}
 		}
 
-		timeout := 30
+		timeout := 120
 		if args.Timeout > 0 {
 			timeout = args.Timeout
 		}
@@ -333,7 +333,7 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 				},
 				"timeout": map[string]interface{}{
 					"type":        "integer",
-					"description": "Timeout in seconds (default 30)",
+					"description": "Timeout in seconds (default 120). Headless-browser workflows (camoufox-cli) need a longer ceiling for the first call — the daemon + browser cold-start can take 2-3 min when traffic is proxied; subsequent calls in the same session are sub-second.",
 				},
 			},
 			"required": []string{"command"},
@@ -352,7 +352,7 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 					return "", fmt.Errorf("dangerous command blocked: %s", args.Command)
 				}
 			}
-			timeout := 30
+			timeout := 120
 			if args.Timeout > 0 {
 				timeout = args.Timeout
 			}
@@ -400,7 +400,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 			},
 			"timeout": map[string]interface{}{
 				"type":        "integer",
-				"description": "Timeout in seconds (default 30)",
+				"description": "Timeout in seconds (default 120). Headless-browser workflows (camoufox-cli) need a longer ceiling for the first call — the daemon + browser cold-start can take 2-3 min when traffic is proxied; subsequent calls in the same session are sub-second.",
 			},
 			"run_in_background": map[string]interface{}{
 				"type":        "boolean",
@@ -419,7 +419,7 @@ func registerSandboxedExec(r *Registry, ex sandbox.Executor) {
 		if args.RunInBackground {
 			return "", fmt.Errorf("run_in_background is not yet supported in sandbox mode — use tmux inside the sandbox instead: exec({command: \"tmux new-session -d -s job '<your command>'\"}) to start, exec({command: \"tmux capture-pane -t job -p\"}) to read, exec({command: \"tmux kill-session -t job\"}) to stop")
 		}
-		timeout := 30
+		timeout := 120
 		if args.Timeout > 0 {
 			timeout = args.Timeout
 		}

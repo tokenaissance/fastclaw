@@ -94,6 +94,55 @@ func TestExtractLeakedToolCalls_AntmlPrefix(t *testing.T) {
 	}
 }
 
+// DeepSeek-style "DSML" marker format observed in the wild from a model
+// served via an anthropic-compat endpoint:
+//
+//	<｜｜DSML｜｜tool_calls>
+//	  <｜｜DSML｜｜invoke name="web_search">
+//	    <｜｜DSML｜｜parameter name="query" string="true">solo business...</｜｜DSML｜｜parameter>
+//	  </｜｜DSML｜｜invoke>
+//	</｜｜DSML｜｜tool_calls>
+//
+// Note: the pipes are U+FF5C (FULLWIDTH VERTICAL LINE), not ASCII `|`,
+// and the outer wrapper is `tool_calls` (not `function_calls`).
+func TestExtractLeakedToolCalls_DSMLFullwidthPrefix(t *testing.T) {
+	openTC := "<" + "｜｜DSML｜｜tool_calls>"
+	closeTC := "<" + "/｜｜DSML｜｜tool_calls>"
+	openInvDSML := "<" + "｜｜DSML｜｜invoke name="
+	closInvDSML := "<" + "/｜｜DSML｜｜invoke>"
+	openPDSML := "<" + "｜｜DSML｜｜parameter name="
+	closPDSML := "<" + "/｜｜DSML｜｜parameter>"
+
+	in := openTC + "\n" +
+		openInvDSML + `"web_search">` + "\n" +
+		openPDSML + `"query" string="true">solo business consultant` + closPDSML + "\n" +
+		closInvDSML + "\n" +
+		openInvDSML + `"web_search">` + "\n" +
+		openPDSML + `"query" string="true">independent management consultant` + closPDSML + "\n" +
+		closInvDSML + "\n" +
+		closeTC
+
+	cleaned, calls := extractLeakedToolCalls(in)
+	if strings.Contains(cleaned, "DSML") || strings.Contains(cleaned, "tool_calls") || strings.Contains(cleaned, "invoke name") {
+		t.Errorf("xml not stripped: %q", cleaned)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(calls))
+	}
+	for i, want := range []string{"solo business consultant", "independent management consultant"} {
+		if calls[i].Function.Name != "web_search" {
+			t.Errorf("call[%d] name=%q", i, calls[i].Function.Name)
+		}
+		var args map[string]any
+		if err := json.Unmarshal([]byte(calls[i].Function.Arguments), &args); err != nil {
+			t.Fatalf("args not valid json: %v", err)
+		}
+		if args["query"] != want {
+			t.Errorf("call[%d] query=%q, want %q", i, args["query"], want)
+		}
+	}
+}
+
 func TestExtractLeakedToolCalls_MultipleInvokes(t *testing.T) {
 	in := openFC +
 		openInv + `"a">` + openP + `"x">1` + closP + closInv +

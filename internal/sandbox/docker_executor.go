@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -37,24 +39,70 @@ func (d *DockerExecutor) Exec(ctx context.Context, command string, timeout time.
 		execCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	// docker is client/daemon — exec.CommandContext only SIGKILLs the local
-	// `docker exec` CLI, which just detaches the attached client; the inner
-	// process inside the container keeps running until natural completion.
-	// That's why "Stop" in the UI doesn't actually stop a running tool.
-	// Force-remove the container on cancel — the attached CLI returns
-	// immediately, the inner process dies with the container, and the next
-	// Exec call lazy-recreates the sandbox. Workspace is a host bind-mount
-	// so user files aren't affected.
+
+	// docker is client/daemon — exec.CommandContext only SIGKILLs the
+	// local `docker exec` CLI, which just detaches the attached client;
+	// the inner process inside the container keeps running until natural
+	// completion. To make timeouts actually take effect *inside* the
+	// container, we wrap the user command in `setsid` so it becomes a
+	// new session leader, stash its pid (== its pgid) in a marker file,
+	// and on cancel run a *separate* `docker exec` that signals the
+	// entire process group via `kill -KILL -$pgid`.
+	//
+	// This replaces the old behavior of force-removing the whole
+	// container on cancel, which preserved the workspace bind-mount but
+	// nuked any sibling daemons — most painfully camoufox-cli's headless
+	// Firefox, which takes ~3 minutes to cold-start through a proxy on
+	// the next call. Pgrp-scoped kill leaves the container — and the
+	// camoufox daemon, which Python spawned with start_new_session=True
+	// so it lives in its own session — alive.
+	//
+	// Command is passed via env to avoid quoting fights with the inner
+	// `sh -c`; eval re-parses it so pipes/redirects/expansions behave
+	// the same as if the caller had run `sh -c "$command"` directly.
+	marker := randomExecMarker()
+	pgidFile := "/tmp/fc-pgid-" + marker
+	wrapped := fmt.Sprintf(
+		`__FC_PGID=%s __FC_CMD=%s setsid -w sh -c 'echo $$ > "$__FC_PGID"; eval "$__FC_CMD"'`,
+		shellQuote(pgidFile), shellQuote(command),
+	)
+
 	done := make(chan struct{})
 	go func() {
 		select {
 		case <-execCtx.Done():
-			_ = d.sb.Close()
+			// Best-effort: fire a separate docker exec to kill the pgrp.
+			// 5s budget so a stuck `docker exec` here doesn't wedge the
+			// caller — if it can't reach the daemon we already lost.
+			killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer killCancel()
+			_, _ = d.sb.Exec(killCtx, fmt.Sprintf(
+				`pgid=$(cat %s 2>/dev/null); [ -n "$pgid" ] && kill -KILL -"$pgid"; rm -f %s`,
+				shellQuote(pgidFile), shellQuote(pgidFile)),
+				"")
 		case <-done:
 		}
 	}()
 	defer close(done)
-	return d.sb.Exec(execCtx, command, "/workspace")
+
+	out, err := d.sb.Exec(execCtx, wrapped, "/workspace")
+	// On normal exit, the goroutine never fires — clean the marker
+	// ourselves. On timeout, the goroutine already rm'd it.
+	if execCtx.Err() == nil {
+		_, _ = d.sb.Exec(context.Background(),
+			fmt.Sprintf("rm -f %s", shellQuote(pgidFile)), "")
+	}
+	return out, err
+}
+
+// randomExecMarker returns 16 hex chars — sufficient to keep parallel
+// execs from clobbering each other's pgid files in /tmp.
+func randomExecMarker() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "0000000000000000"
+	}
+	return hex.EncodeToString(buf[:])
 }
 
 func (d *DockerExecutor) ReadFile(ctx context.Context, path string) (string, error) {
@@ -171,7 +219,7 @@ func poolKey(agentID, projectID, sessionID string) string {
 // NewDockerExecutorPool creates a pool of Docker-backed executors.
 func NewDockerExecutorPool(image, workspaceRoot string, policy *Policy) *DockerExecutorPool {
 	if image == "" {
-		image = "fastclaw/sandbox:latest"
+		image = "thinkany/fastclaw-sandbox:latest"
 	}
 	return &DockerExecutorPool{
 		executors:     make(map[string]*DockerExecutor),
