@@ -23,6 +23,7 @@ import {
   BrainIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
+  MessagesSquareIcon,
   PlusIcon,
   SettingsIcon,
   SparklesIcon,
@@ -56,28 +57,28 @@ function extractAgentId(pathname: string): string | null {
 
 // Platform nav for regular users — non-admins see what they can do for
 // themselves. Models lets them configure their own user-scope providers;
-// Settings covers Account + General (Runtime is hidden inside the layout
-// for non-admin). Skills/Users stay admin-only — Skills currently has no
-// user-scope install path so a sidebar entry would just dead-end on 403s.
-// API Keys is also admin-only in the sidebar: regular users don't need
-// to issue programmatic credentials in the typical product flow, so we
-// keep the entry off their nav.
-const USER_NAV: NavItem[] = [
+// Settings opens the User-only dialog (Account + General). Skills/Users
+// stay admin-only — Skills currently has no user-scope install path so
+// a sidebar entry would just dead-end on 403s. API Keys is also
+// admin-only: regular users don't need to issue programmatic credentials.
+//
+// The Settings entry is a click-only item (no url) — its onClick is
+// attached at render time so it can call into component state.
+const USER_NAV_BASE: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
-  { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 
-const ADMIN_NAV: NavItem[] = [
+const ADMIN_NAV_BASE: NavItem[] = [
   { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
   { title: "Tools", url: "/tools/", icon: WrenchIcon },
   { title: "Users", url: "/admin/users/", icon: UsersIcon },
+  { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
   { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
-  { title: "Settings", url: "/settings/", icon: SettingsIcon },
 ];
 
 // "New chat" is active iff we're parked on the bare /chat/ page with
@@ -123,7 +124,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const [agentRoles, setAgentRoles] = React.useState<Record<string, "owner" | "viewer">>({});
   const [sessions, setSessions] = React.useState<SessionItem[]>([]);
   const [projects, setProjects] = React.useState<ProjectEntry[]>([]);
+  // Single dialog state covers both entry points: the agent-scoped
+  // footer button (full Agent + User tabs) and the platform-nav
+  // Settings entry (User tabs only). `settingsUserOnly` picks the mode.
   const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const [settingsUserOnly, setSettingsUserOnly] = React.useState(false);
 
   // Keep status polling so the online dot / admin flag stay fresh.
   React.useEffect(() => {
@@ -245,7 +250,21 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   // been provisioned and jump into chat — it just hides the Create
   // button. So we keep the Agents nav entry visible.
   const quotaLocked = me?.user?.agentQuota === 0;
-  const platformItems = isAdmin ? ADMIN_NAV : USER_NAV;
+  const openPlatformSettings = React.useCallback(() => {
+    setSettingsUserOnly(true);
+    setSettingsOpen(true);
+  }, []);
+  const platformItems: NavItem[] = React.useMemo(() => {
+    const base = isAdmin ? ADMIN_NAV_BASE : USER_NAV_BASE;
+    return [
+      ...base,
+      {
+        title: "Settings",
+        icon: SettingsIcon,
+        onClick: openPlatformSettings,
+      },
+    ];
+  }, [isAdmin, openPlatformSettings]);
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -297,7 +316,10 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             <SidebarMenuItem>
               <SidebarMenuButton
                 tooltip="Settings"
-                onClick={() => setSettingsOpen(true)}
+                onClick={() => {
+                  setSettingsUserOnly(false);
+                  setSettingsOpen(true);
+                }}
               >
                 <SettingsIcon />
                 <span>Settings</span>
@@ -318,6 +340,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       <AgentSettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
+        userOnly={settingsUserOnly}
         role={
           activeAgentId && agentRoles[activeAgentId] === "viewer"
             ? "viewer"

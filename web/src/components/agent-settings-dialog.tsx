@@ -70,20 +70,27 @@ export function AgentSettingsDialog({
   onOpenChange,
   defaultTab,
   role = "owner",
+  userOnly = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   defaultTab?: AgentSettingsTab;
   role?: "owner" | "viewer";
+  // userOnly hides the Agent section entirely. Used by the platform
+  // sidebar's Settings button, which has no agent context — it should
+  // only expose Account + General.
+  userOnly?: boolean;
 }) {
-  const agentTabs = role === "viewer"
-    ? AGENT_TABS.filter((t) => t.id === "channels")
-    : AGENT_TABS;
-  // Viewers don't see Profile, so fall back to Channels (their only
-  // Agent tab) when no defaultTab is provided. Owners stay on Profile
-  // for backwards-compat with existing entry points.
+  const agentTabs = userOnly
+    ? []
+    : role === "viewer"
+      ? AGENT_TABS.filter((t) => t.id === "channels")
+      : AGENT_TABS;
+  // Pick the landing tab: userOnly opens on General (User section);
+  // viewers land on Channels (their only Agent tab); owners on Profile.
   const initialTab: AgentSettingsTab =
-    defaultTab ?? (role === "viewer" ? "channels" : "profile");
+    defaultTab ??
+    (userOnly ? "general" : role === "viewer" ? "channels" : "profile");
   const [tab, setTab] = React.useState<AgentSettingsTab>(initialTab);
 
   // Reset to the requested tab whenever the dialog re-opens, so a fresh
@@ -102,16 +109,22 @@ export function AgentSettingsDialog({
         )}
       >
         <aside className="flex flex-col gap-1 border-r bg-muted/40 p-3 overflow-y-auto">
-          <SectionLabel>Agent</SectionLabel>
-          {agentTabs.map((t) => (
-            <TabButton
-              key={t.id}
-              tab={t}
-              active={tab === t.id}
-              onSelect={setTab}
-            />
-          ))}
-          <SectionLabel className="mt-3">User</SectionLabel>
+          {agentTabs.length > 0 && (
+            <>
+              <SectionLabel>Agent</SectionLabel>
+              {agentTabs.map((t) => (
+                <TabButton
+                  key={t.id}
+                  tab={t}
+                  active={tab === t.id}
+                  onSelect={setTab}
+                />
+              ))}
+            </>
+          )}
+          <SectionLabel className={agentTabs.length > 0 ? "mt-3" : undefined}>
+            User
+          </SectionLabel>
           {USER_TABS.map((t) => (
             <TabButton
               key={t.id}

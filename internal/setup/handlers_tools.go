@@ -41,22 +41,6 @@ var builtinCatalog = []categoryCatalog{
 			{Name: "searxng", Label: "SearxNG (self-hosted)", NeedsURL: true, Models: []string{"default"}},
 		},
 	},
-	{
-		Name:  "image_gen",
-		Label: "Image Generation",
-		Providers: []providerCatalog{
-			{Name: "openai", Label: "OpenAI Images", NeedsKey: true, Models: []string{"gpt-image-1", "dall-e-3", "dall-e-2"}},
-			{Name: "fal", Label: "fal.ai", NeedsKey: true, Models: []string{"flux-dev", "flux-schnell", "flux-pro"}},
-		},
-	},
-	{
-		Name:  "tts",
-		Label: "Text to Speech",
-		Providers: []providerCatalog{
-			{Name: "openai", Label: "OpenAI TTS", NeedsKey: true, Models: []string{"tts-1", "tts-1-hd"}},
-			{Name: "minimax", Label: "MiniMax", NeedsKey: true, Models: []string{"speech-02-hd", "speech-02-turbo"}},
-		},
-	},
 }
 
 // handleGetTools returns the categories + provider catalog and the user's

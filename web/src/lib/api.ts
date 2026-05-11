@@ -238,6 +238,12 @@ export function getAuthToken(): string {
 // and always includes the cookie session for username/password logins. Cookie
 // is the primary credential for the web UI; the bearer is only used by
 // programmatic clients that put the token into localStorage manually.
+//
+// When the page URL carries `?actAs=<userId>`, the same param is mirrored
+// into every API request so super_admin opening another user's resources
+// (e.g. /agents/<id>/chat/<sid>/?actAs=<uid> reached from the admin Chats
+// page) actually reads/writes against that user's scope. The middleware-
+// level actAs lock makes these requests read-only.
 export async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   const token = getAuthToken();
   const headers: Record<string, string> = {
@@ -245,6 +251,12 @@ export async function apiFetch(url: string, init?: RequestInit): Promise<Respons
   };
   if (token) {
     headers["Authorization"] = `Bearer ${token}`;
+  }
+  if (typeof window !== "undefined") {
+    const pageActAs = new URLSearchParams(window.location.search).get("actAs");
+    if (pageActAs && !/[?&]actAs=/.test(url)) {
+      url += (url.includes("?") ? "&" : "?") + "actAs=" + encodeURIComponent(pageActAs);
+    }
   }
   return fetch(url, { credentials: "same-origin", ...init, headers });
 }
@@ -823,6 +835,26 @@ export async function deleteProject(
   return res.json();
 }
 
+
+// AdminChatSessionEntry extends ChatSessionEntry with the (user, agent)
+// ownership info needed to render a cross-tenant Chats listing — agent
+// name + owner display fields, joined server-side so the client doesn't
+// fan out per-agent. Backed by GET /api/admin/chats (super_admin only).
+export interface AdminChatSessionEntry extends ChatSessionEntry {
+  agentId: string;
+  agentName?: string;
+  userId: string;
+  ownerUsername?: string;
+  ownerDisplayName?: string;
+  ownerEmail?: string;
+}
+
+export async function adminListChats(): Promise<AdminChatSessionEntry[]> {
+  const res = await apiFetch("/api/admin/chats");
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data?.sessions) ? data.sessions : [];
+}
 
 export async function getChatSessions(agentId: string): Promise<ChatSessionEntry[]> {
   const res = await apiFetch(`/api/chat/sessions?agentId=${encodeURIComponent(agentId)}`);

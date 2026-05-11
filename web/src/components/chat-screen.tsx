@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -439,6 +439,13 @@ function parseAgentRoute(pathname: string): {
 export function ChatScreen() {
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // When `?actAs=<uid>` is in the URL, this chat is being opened by a
+  // super_admin viewing another user's session (read-only by middleware).
+  // Forces the composer into a disabled state and surfaces a banner so
+  // the admin can't try to type and get a silent 403.
+  const actAsUserId = searchParams?.get("actAs") || "";
+  const isActAsView = !!actAsUserId;
   const { sessionId: urlSessionId, projectId: urlProjectId } = useMemo(
     () => parseAgentRoute(pathname || ""),
     [pathname],
@@ -900,7 +907,13 @@ export function ChatScreen() {
     const s = sessions.find((x) => x.id === sessionId);
     return s?.channel || "web";
   }, [sessions, sessionId]);
+  // isReadOnlyChannel locks the composer for IM-bound sessions (replies
+  // must come from the upstream channel). isActAsView locks it when a
+  // super_admin opened this URL to inspect another user's chat. Both
+  // collapse to the same disabled state on the textarea / send button;
+  // the banners differ so the user knows *why*.
   const isReadOnlyChannel = currentChannel !== "web";
+  const isReadOnlyView = isReadOnlyChannel || isActAsView;
 
   const handleRenameTitle = useCallback(
     async (next: string) => {
@@ -1997,6 +2010,16 @@ export function ChatScreen() {
                 the other side.
               </div>
             )}
+            {isActAsView && !isReadOnlyChannel && (
+              // Super_admin viewing another user's chat via the admin
+              // Chats page (?actAs=<uid>). The middleware gates this as
+              // read-only for the whole request, so any send would 403
+              // — disable the composer and surface why.
+              <div className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                Read-only — you&apos;re viewing another user&apos;s chat.
+                Sending messages here is disabled.
+              </div>
+            )}
             {slashOpen && filteredSkills.length > 0 && (
               <SlashMenu
                 skills={filteredSkills}
@@ -2078,13 +2101,15 @@ export function ChatScreen() {
                     onKeyDown={handleKeyDown}
                     onBlur={() => setTimeout(() => setSlashOpen(false), 120)}
                     placeholder={
-                      isReadOnlyChannel
-                        ? `Read-only — reply from ${channelLabel(currentChannel)}`
-                        : selectedAgent
-                          ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
-                          : "Select an agent first"
+                      isActAsView
+                        ? "Read-only — viewing another user's chat"
+                        : isReadOnlyChannel
+                          ? `Read-only — reply from ${channelLabel(currentChannel)}`
+                          : selectedAgent
+                            ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
+                            : "Select an agent first"
                     }
-                    disabled={!selectedAgent || sending || isReadOnlyChannel}
+                    disabled={!selectedAgent || sending || isReadOnlyView}
                     rows={3}
                     className="block w-full resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
                     style={{ maxHeight: 240, minHeight: 72 }}
@@ -2093,7 +2118,7 @@ export function ChatScreen() {
                     <div className="flex items-center gap-2 min-w-0">
                       <label
                         className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors ${
-                          !selectedAgent || sending || isReadOnlyChannel
+                          !selectedAgent || sending || isReadOnlyView
                             ? "opacity-50 cursor-not-allowed"
                             : "hover:bg-muted hover:text-foreground cursor-pointer"
                         }`}
@@ -2106,7 +2131,7 @@ export function ChatScreen() {
                           multiple
                           className="sr-only"
                           onChange={handleFilePick}
-                          disabled={!selectedAgent || sending || isReadOnlyChannel}
+                          disabled={!selectedAgent || sending || isReadOnlyView}
                         />
                       </label>
                       {urlProjectId && projectInfo && (
@@ -2133,7 +2158,7 @@ export function ChatScreen() {
                     ) : (
                       <Button
                         onClick={() => handleSend()}
-                        disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyChannel}
+                        disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyView}
                         size="icon"
                         className="h-9 w-9 shrink-0 rounded-full"
                         aria-label="Send message"
@@ -2147,7 +2172,7 @@ export function ChatScreen() {
                 <div className="flex items-end gap-2">
                   <label
                     className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
-                      !selectedAgent || sending || isReadOnlyChannel
+                      !selectedAgent || sending || isReadOnlyView
                         ? "opacity-50 cursor-not-allowed"
                         : "hover:bg-muted hover:text-foreground cursor-pointer"
                     }`}
@@ -2160,7 +2185,7 @@ export function ChatScreen() {
                       multiple
                       className="sr-only"
                       onChange={handleFilePick}
-                      disabled={!selectedAgent || sending || isReadOnlyChannel}
+                      disabled={!selectedAgent || sending || isReadOnlyView}
                     />
                   </label>
                   <textarea
@@ -2170,13 +2195,15 @@ export function ChatScreen() {
                     onKeyDown={handleKeyDown}
                     onBlur={() => setTimeout(() => setSlashOpen(false), 120)}
                     placeholder={
-                      isReadOnlyChannel
-                        ? `Read-only — reply from ${channelLabel(currentChannel)}`
-                        : selectedAgent
-                          ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
-                          : "Select an agent first"
+                      isActAsView
+                        ? "Read-only — viewing another user's chat"
+                        : isReadOnlyChannel
+                          ? `Read-only — reply from ${channelLabel(currentChannel)}`
+                          : selectedAgent
+                            ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
+                            : "Select an agent first"
                     }
-                    disabled={!selectedAgent || sending || isReadOnlyChannel}
+                    disabled={!selectedAgent || sending || isReadOnlyView}
                     rows={1}
                     className="flex-1 resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
                     style={{ maxHeight: 200, minHeight: 24 }}
@@ -2193,7 +2220,7 @@ export function ChatScreen() {
                   ) : (
                     <Button
                       onClick={() => handleSend()}
-                      disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyChannel}
+                      disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyView}
                       size="icon"
                       className="h-8 w-8 shrink-0 rounded-lg"
                       aria-label="Send message"

@@ -11,6 +11,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/buildinfo"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
+	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
@@ -498,6 +499,80 @@ func (s *Server) respondAllAgents(w http.ResponseWriter, r *http.Request) {
 		out = append(out, entry)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"agents": out})
+}
+
+// handleAdminChats returns every chat session across every (user, agent)
+// pair, enriched with the owning user's username and the agent's name so
+// the platform-wide admin Chats page can render one flat table without
+// fanning out per-agent on the client. Super_admin only — registered on
+// /api/admin/chats and gated by the admin middleware.
+//
+// Implementation note: we don't go through the agent runtime here. The
+// runtime's session listing is keyed by the caller's userID (super_admin
+// browsing another user's agent gets an empty list — sessions stay
+// per-caller). Instead we bind a fresh StoreAdapter to each agent's OWNER
+// userID and ask it for that owner's sessions, which is what we want
+// for the cross-tenant overview.
+func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
+	if s.dataStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})
+		return
+	}
+	records, err := s.dataStore.ListAllAgents(r.Context())
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	ownerCache := map[string]*users.Account{}
+	resolveOwner := func(uid string) *users.Account {
+		if uid == "" {
+			return nil
+		}
+		if a, ok := ownerCache[uid]; ok {
+			return a
+		}
+		a, _ := s.accounts.Get(r.Context(), uid)
+		ownerCache[uid] = a
+		return a
+	}
+	out := make([]map[string]any, 0)
+	for _, ar := range records {
+		if ar.UserID == "" {
+			continue
+		}
+		adapter := session.NewStoreAdapter(s.dataStore, ar.UserID)
+		sessions, err := adapter.ListWebSessions(r.Context(), ar.ID)
+		if err != nil {
+			continue
+		}
+		owner := resolveOwner(ar.UserID)
+		for _, ws := range sessions {
+			entry := map[string]any{
+				"id":           ws.ID,
+				"agentId":      ar.ID,
+				"agentName":    ar.Name,
+				"userId":       ar.UserID,
+				"channel":      ws.Channel,
+				"accountId":    ws.AccountID,
+				"chatId":       ws.ChatID,
+				"projectId":    ws.ProjectID,
+				"title":        ws.Title,
+				"preview":      ws.Preview,
+				"thumbnailUrl": ws.ThumbnailURL,
+				"createdAt":    ws.CreatedAt,
+				"updatedAt":    ws.UpdatedAt,
+			}
+			if owner != nil {
+				entry["ownerUsername"] = owner.Username
+				entry["ownerEmail"] = owner.Email
+				if owner.DisplayName != "" {
+					entry["ownerDisplayName"] = owner.DisplayName
+				}
+			}
+			out = append(out, entry)
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"sessions": out})
 }
 
 // --- Admin provisioning (per-user) ---

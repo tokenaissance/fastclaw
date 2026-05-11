@@ -22,10 +22,6 @@ import {
   ChevronDown,
   X,
   Plus,
-  Search,
-  ImageIcon,
-  Volume2,
-  ChevronRight,
   KeyRound,
   Link as LinkIcon,
 } from "lucide-react";
@@ -38,14 +34,11 @@ import {
   type ToolProviderSettings,
   type ToolCategorySettings,
 } from "@/lib/api";
+import RuntimeSettingsPage from "@/app/settings/runtime/page";
 
-// categoryIcons picks a glyph for the left rail. Unknown categories fall
-// back to the generic wrench so plugin-added categories still render.
-const categoryIcons: Record<string, typeof Search> = {
-  web_search: Search,
-  image_gen: ImageIcon,
-  tts: Volume2,
-};
+// Sentinel value used as the active rail entry when Runtime is selected.
+// Real tool categories never start with "__" so this can never collide.
+const RUNTIME_ACTIVE = "__runtime__";
 
 export default function ToolsPage() {
   const [cfg, setCfg] = useState<ToolsConfig | null>(null);
@@ -107,9 +100,15 @@ export default function ToolsPage() {
 
   if (loading) {
     return (
-      <div className="p-6 space-y-4 max-w-6xl mx-auto">
-        <Skeleton className="h-8 w-40" />
-        <Skeleton className="h-96" />
+      <div className="flex flex-col md:flex-row md:gap-8 p-4 md:p-6 max-w-6xl mx-auto">
+        <aside className="md:w-48 md:shrink-0 mb-4 md:mb-0">
+          <Skeleton className="h-6 w-20 mb-4" />
+          <Skeleton className="h-9 w-full" />
+        </aside>
+        <div className="flex-1 min-w-0 space-y-4">
+          <Skeleton className="h-7 w-40" />
+          <Skeleton className="h-96" />
+        </div>
       </div>
     );
   }
@@ -117,117 +116,102 @@ export default function ToolsPage() {
   const activeCat = cfg?.categories.find((c) => c.name === active);
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Tools</h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            Configure provider API keys and fallback order. Tools with no configured provider are hidden from agents.
-          </p>
-        </div>
-        <Button onClick={handleSave} disabled={saving} variant={saved ? "outline" : "default"}>
-          {saved ? (
-            <><Check className="h-4 w-4 mr-2" /> Saved</>
-          ) : saving ? (
-            <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving…</>
-          ) : (
-            <><Save className="h-4 w-4 mr-2" /> Save</>
-          )}
-        </Button>
-      </div>
+    <div className="flex flex-col md:flex-row md:gap-8 p-4 md:p-6 max-w-6xl mx-auto md:min-h-[calc(100vh-3.5rem)]">
+      <aside className="md:w-48 md:shrink-0 mb-4 md:mb-0">
+        <h2 className="text-lg font-semibold tracking-tight mb-3 md:mb-4">Tools</h2>
+        <CategoryRail
+          categories={cfg?.categories || []}
+          active={active}
+          onSelect={setActive}
+        />
+      </aside>
+      <div className="flex-1 min-w-0">
+        {active !== RUNTIME_ACTIVE && (
+          <div className="flex items-center justify-end mb-4">
+            <Button onClick={handleSave} disabled={saving} variant={saved ? "outline" : "default"}>
+              {saved ? (
+                <><Check className="h-4 w-4 mr-2" /> Saved</>
+              ) : saving ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving…</>
+              ) : (
+                <><Save className="h-4 w-4 mr-2" /> Save</>
+              )}
+            </Button>
+          </div>
+        )}
 
-      {error && (
-        <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
-          {error}
-        </div>
-      )}
+        {error && active !== RUNTIME_ACTIVE && (
+          <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
 
-      {!cfg || cfg.categories.length === 0 ? (
-        <div className="rounded-lg border border-border bg-card p-8 text-center">
-          <Wrench className="h-8 w-8 text-muted-foreground/40 mx-auto mb-3" />
-          <p className="text-sm text-muted-foreground">
-            No tool categories available in this build.
-          </p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-[220px_1fr] gap-6 items-start">
-          <CategoryRail
-            categories={cfg.categories}
-            active={active}
-            onSelect={setActive}
-            configuredCount={(catName) => countConfiguredProviders(cfg.categories.find((c) => c.name === catName)!, providers)}
+        {active === RUNTIME_ACTIVE ? (
+          // Runtime is a deployment-wide knob (sandbox backend, etc.), not
+          // a per-category provider; it lives in the same rail as the tool
+          // categories purely as a convenient admin entry point. The
+          // component manages its own save / loading state.
+          <RuntimeSettingsPage />
+        ) : !cfg || cfg.categories.length === 0 ? (
+          <div className="rounded-lg border border-border bg-card p-8 text-center">
+            <Wrench className="h-8 w-8 text-muted-foreground/40 mx-auto mb-3" />
+            <p className="text-sm text-muted-foreground">
+              No tool categories available in this build.
+            </p>
+          </div>
+        ) : activeCat ? (
+          <CategoryPanel
+            catalog={activeCat}
+            providers={providers}
+            setProvider={updateProvider}
+            tools={tools[activeCat.name] || {}}
+            setTools={(patch) => updateCategory(activeCat.name, patch)}
           />
-          {activeCat ? (
-            <CategoryPanel
-              catalog={activeCat}
-              providers={providers}
-              setProvider={updateProvider}
-              tools={tools[activeCat.name] || {}}
-              setTools={(patch) => updateCategory(activeCat.name, patch)}
-            />
-          ) : null}
-        </div>
-      )}
+        ) : null}
+      </div>
     </div>
   );
-}
-
-function countConfiguredProviders(
-  cat: ToolCategoryCatalog,
-  providers: Record<string, ToolProviderSettings>,
-): number {
-  let n = 0;
-  for (const p of cat.providers) {
-    const v = providers[p.name];
-    if (!v) continue;
-    const hasKey = p.needsKey && v.apiKey && v.apiKey.trim();
-    const hasURL = p.needsUrl && v.endpoint && v.endpoint.trim();
-    if (hasKey || hasURL) n++;
-  }
-  return n;
 }
 
 function CategoryRail({
   categories,
   active,
   onSelect,
-  configuredCount,
 }: {
   categories: ToolCategoryCatalog[];
   active: string;
   onSelect: (name: string) => void;
-  configuredCount: (name: string) => number;
 }) {
+  const itemClass = (isActive: boolean) =>
+    "shrink-0 md:shrink-0 whitespace-nowrap rounded-md px-3 py-2 text-sm text-left transition " +
+    (isActive
+      ? "bg-accent text-accent-foreground"
+      : "text-muted-foreground hover:bg-muted hover:text-foreground");
+
   return (
-    <nav className="space-y-1 sticky top-6">
-      {categories.map((c) => {
-        const Icon = categoryIcons[c.name] || Wrench;
-        const isActive = c.name === active;
-        const count = configuredCount(c.name);
-        return (
-          <button
-            key={c.name}
-            onClick={() => onSelect(c.name)}
-            className={`w-full flex items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors ${
-              isActive
-                ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-            }`}
-          >
-            <Icon className="h-4 w-4 shrink-0" />
-            <div className="flex-1 min-w-0">
-              <p className={`text-sm ${isActive ? "font-medium" : ""}`}>{c.label}</p>
-              <p className="text-[10px] font-mono opacity-70 truncate">{c.name}</p>
-            </div>
-            {count > 0 && (
-              <span className={`text-[10px] rounded-full px-1.5 py-0.5 ${isActive ? "bg-primary/20" : "bg-muted"}`}>
-                {count}
-              </span>
-            )}
-            {isActive && <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
-          </button>
-        );
-      })}
+    <nav className="flex flex-row md:flex-col gap-1 overflow-x-auto md:overflow-visible -mx-1 px-1 md:mx-0 md:px-0">
+      {categories.map((c) => (
+        <button
+          key={c.name}
+          type="button"
+          onClick={() => onSelect(c.name)}
+          className={itemClass(c.name === active)}
+        >
+          {c.label}
+        </button>
+      ))}
+      {/* Runtime sits at the bottom of the rail (or rightmost on mobile);
+          super_admin-only — the underlying RuntimeSettingsPage redirects
+          anyone else away. The hairline divider visually separates it
+          from the per-category tool entries. */}
+      <div className="hidden md:block my-1 border-t border-border/60" />
+      <button
+        type="button"
+        onClick={() => onSelect(RUNTIME_ACTIVE)}
+        className={itemClass(active === RUNTIME_ACTIVE)}
+      >
+        Runtime
+      </button>
     </nav>
   );
 }
@@ -248,8 +232,10 @@ function CategoryPanel({
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-xl font-semibold">{catalog.label}</h3>
-        <p className="text-sm text-muted-foreground font-mono mt-0.5">{catalog.name}</p>
+        <h3 className="text-xl font-semibold tracking-tight">{catalog.label}</h3>
+        <p className="text-sm text-muted-foreground mt-1">
+          Configure provider API keys and fallback order. Tools with no configured provider are hidden from agents.
+        </p>
       </div>
 
       {/* One card per provider */}

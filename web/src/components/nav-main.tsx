@@ -14,13 +14,18 @@ import type { LucideIcon } from "lucide-react";
 
 export interface NavItem {
   title: string;
-  url: string;
+  // url is the navigation target. Optional when onClick is provided —
+  // a click-only item (e.g. one that opens a dialog) has no destination.
+  url?: string;
   icon: LucideIcon;
   // active overrides the default pathname-based prefix match. Use this
   // when two items share the same pathname and only differ in query
   // (e.g. "New chat" vs an open session under /agents/<id>/chat/, where
   // the prefix rule would highlight both).
   active?: boolean;
+  // onClick replaces the default router.push when present. Used for
+  // items that open a dialog instead of navigating.
+  onClick?: () => void;
 }
 
 function isActive(pathname: string, href: string) {
@@ -40,9 +45,12 @@ export function NavMain({
 
   // Prefetch target routes on idle so soft nav is ready when the user
   // clicks — mirrors what <Link> does automatically, but we're opting out
-  // of Link below to guarantee client-side nav.
+  // of Link below to guarantee client-side nav. Click-only items (no
+  // url) have nothing to prefetch.
   React.useEffect(() => {
-    items.forEach((item) => router.prefetch(item.url));
+    items.forEach((item) => {
+      if (item.url) router.prefetch(item.url);
+    });
   }, [items, router]);
 
   // The Base UI SidebarMenuButton `render` prop merges through
@@ -55,14 +63,22 @@ export function NavMain({
       <SidebarGroupLabel>{label}</SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
-          const active = item.active ?? isActive(pathname, item.url);
+          const active =
+            item.active ?? (item.url ? isActive(pathname, item.url) : false);
+          const handleClick = item.onClick
+            ? item.onClick
+            : item.url
+              ? () => router.push(item.url!)
+              : undefined;
           return (
-            <SidebarMenuItem key={item.url}>
+            <SidebarMenuItem key={item.url ?? item.title}>
               <SidebarMenuButton
                 isActive={active}
                 tooltip={item.title}
-                onClick={() => router.push(item.url)}
-                onMouseEnter={() => router.prefetch(item.url)}
+                onClick={handleClick}
+                onMouseEnter={() => {
+                  if (item.url) router.prefetch(item.url);
+                }}
               >
                 <item.icon />
                 <span>{item.title}</span>
