@@ -26,9 +26,15 @@ function isChatRoute(pathname: string, agentId: string): boolean {
   if (!agentId) return false;
   const base = `/agents/${agentId}`;
   if (pathname === base || pathname === `${base}/`) return true;
+  // Match `/chat` (with or without trailing segments) but NOT `/chats` —
+  // the chats list is a sibling route that must render on its own,
+  // without ChatScreen sitting underneath it.
+  const tail = pathname.slice(base.length);
   return (
-    pathname.startsWith(`${base}/chat`) ||
-    pathname.startsWith(`${base}/project`)
+    tail === "/chat" ||
+    tail.startsWith("/chat/") ||
+    tail === "/project" ||
+    tail.startsWith("/project/")
   );
 }
 
