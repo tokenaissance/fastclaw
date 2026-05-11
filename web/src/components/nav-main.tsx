@@ -33,8 +33,11 @@ function isActive(pathname: string, href: string) {
   return norm(pathname) === norm(href) || norm(pathname).startsWith(norm(href) + "/");
 }
 
+// label is optional — when omitted the SidebarGroupLabel row is skipped
+// so the section blends in as an unlabeled cluster (used for the standalone
+// Overview link and the footer Settings entry).
 export function NavMain({
-  label = "Platform",
+  label,
   items,
 }: {
   label?: string;
@@ -60,7 +63,7 @@ export function NavMain({
   // router.push gives a guaranteed client-side transition.
   return (
     <SidebarGroup>
-      <SidebarGroupLabel>{label}</SidebarGroupLabel>
+      {label && <SidebarGroupLabel>{label}</SidebarGroupLabel>}
       <SidebarMenu>
         {items.map((item) => {
           const active =

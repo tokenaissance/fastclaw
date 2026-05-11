@@ -55,27 +55,37 @@ function extractAgentId(pathname: string): string | null {
   return match ? match[1] : null;
 }
 
-// Platform nav for regular users — non-admins see what they can do for
-// themselves. Models lets them configure their own user-scope providers;
-// Settings opens the User-only dialog (Account + General). Skills/Users
-// stay admin-only — Skills currently has no user-scope install path so
-// a sidebar entry would just dead-end on 403s. API Keys is also
-// admin-only: regular users don't need to issue programmatic credentials.
+// Sidebar nav is rendered as a series of labeled sections so users can
+// scan it by domain instead of one flat list:
 //
-// The Settings entry is a click-only item (no url) — its onClick is
-// attached at render time so it can call into component state.
-const USER_NAV_BASE: NavItem[] = [
-  { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
+//   (no label)  Overview                         — landing dashboard
+//   Agent       Agents · Models · Skills · Tools — agent-building surfaces
+//   User        Users  · Chats  · API Keys       — admin platform tools
+//   (no label)  Settings                         — opens the user dialog
+//
+// Skills / Tools / User-group entries are admin-only. Non-admin sees the
+// Agent group with just Agents + Models, and the User group is omitted
+// entirely. Settings is a click-only item — its onClick is attached at
+// render time so it can call into component state.
+const OVERVIEW_ITEM: NavItem = {
+  title: "Overview",
+  url: "/overview/",
+  icon: LayoutDashboardIcon,
+};
+
+const USER_AGENT_GROUP: NavItem[] = [
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
 ];
 
-const ADMIN_NAV_BASE: NavItem[] = [
-  { title: "Overview", url: "/overview/", icon: LayoutDashboardIcon },
+const ADMIN_AGENT_GROUP: NavItem[] = [
   { title: "Agents", url: "/agents/", icon: BotIcon },
   { title: "Models", url: "/models/", icon: BrainIcon },
   { title: "Skills", url: "/skills/", icon: SparklesIcon },
   { title: "Tools", url: "/tools/", icon: WrenchIcon },
+];
+
+const ADMIN_USER_GROUP: NavItem[] = [
   { title: "Users", url: "/admin/users/", icon: UsersIcon },
   { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
   { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
@@ -250,21 +260,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   // been provisioned and jump into chat — it just hides the Create
   // button. So we keep the Agents nav entry visible.
   const quotaLocked = me?.user?.agentQuota === 0;
-  const openPlatformSettings = React.useCallback(() => {
-    setSettingsUserOnly(true);
-    setSettingsOpen(true);
-  }, []);
-  const platformItems: NavItem[] = React.useMemo(() => {
-    const base = isAdmin ? ADMIN_NAV_BASE : USER_NAV_BASE;
-    return [
-      ...base,
-      {
-        title: "Settings",
-        icon: SettingsIcon,
-        onClick: openPlatformSettings,
-      },
-    ];
-  }, [isAdmin, openPlatformSettings]);
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -285,7 +280,14 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             items={AGENT_NAV(activeAgentId, pathname, hasOpenSession)}
           />
         ) : (
-          <NavMain label="Platform" items={platformItems} />
+          <>
+            <NavMain items={[OVERVIEW_ITEM]} />
+            <NavMain
+              label="Agent"
+              items={isAdmin ? ADMIN_AGENT_GROUP : USER_AGENT_GROUP}
+            />
+            {isAdmin && <NavMain label="User" items={ADMIN_USER_GROUP} />}
+          </>
         )}
         {/* Projects are per-(user, agent), so viewers on a shared agent
             see/create their OWN projects — the owner's projects stay
@@ -304,29 +306,26 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         <NavSessions agentId={activeAgentId} sessions={sessions} />
       </SidebarContent>
       <SidebarFooter>
-        {/* Settings opens a tabbed dialog. Owners get the full agent
-            configuration panels (Profile / Customize / Models / Skills /
-            Channels / Scheduler); viewers on a shared agent get the
-            User panels (Account / General) plus Channels — Channels
-            stays available because viewers can bind their own IM
-            accounts to the shared agent. The dialog filters its own
-            tabs based on the role we pass in. */}
-        {activeAgentId && (
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                tooltip="Settings"
-                onClick={() => {
-                  setSettingsUserOnly(false);
-                  setSettingsOpen(true);
-                }}
-              >
-                <SettingsIcon />
-                <span>Settings</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        )}
+        {/* Settings is pinned to the footer regardless of route so the
+            entry point stays in one place. Mode keys off activeAgentId:
+            on an agent route the dialog opens with full agent tabs
+            (Profile / Customize / Models / Skills / Channels / Scheduler)
+            — viewers get a filtered subset; on platform routes it opens
+            in user-only mode (Account / General). */}
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip="Settings"
+              onClick={() => {
+                setSettingsUserOnly(!activeAgentId);
+                setSettingsOpen(true);
+              }}
+            >
+              <SettingsIcon />
+              <span>Settings</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
         <NavUser
           name={
             me?.user?.displayName ||
