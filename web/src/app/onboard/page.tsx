@@ -94,7 +94,7 @@ const PROVIDERS: Record<
     apiBase: "https://api.anthropic.com",
     apiType: "anthropic-messages",
     authType: "api-key",
-    models: ["claude-opus-4.7", "claude-sonnet-4.7", "claude-haiku-4.5"],
+    models: ["claude-opus-4-7", "claude-sonnet-4-7", "claude-haiku-4-5"],
   },
   deepseek: {
     apiBase: "https://api.deepseek.com",

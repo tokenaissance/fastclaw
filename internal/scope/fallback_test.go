@@ -50,15 +50,15 @@ func TestSettingPrecedence_AgentBeatsUserBeatsSystem(t *testing.T) {
 
 	// agent-scope override on top
 	if err := SaveSetting(ctx, db, "", agentID, "agents.defaults",
-		map[string]interface{}{"model": "anthropic/claude-opus-4.7"}); err != nil {
+		map[string]interface{}{"model": "anthropic/claude-opus-4-7"}); err != nil {
 		t.Fatalf("save agent: %v", err)
 	}
 	got = config.AgentDefaults{}
 	if err := SettingInto(ctx, db, "agents.defaults", userID, agentID, &got); err != nil {
 		t.Fatalf("setting into: %v", err)
 	}
-	if got.Model != "anthropic/claude-opus-4.7" {
-		t.Fatalf("agent should beat user: want anthropic/claude-opus-4.7, got %q", got.Model)
+	if got.Model != "anthropic/claude-opus-4-7" {
+		t.Fatalf("agent should beat user: want anthropic/claude-opus-4-7, got %q", got.Model)
 	}
 
 	// Verify the raw agent-scope row reads what we wrote, independent of
@@ -72,8 +72,8 @@ func TestSettingPrecedence_AgentBeatsUserBeatsSystem(t *testing.T) {
 	if rec == nil {
 		t.Fatal("agent-scope row missing after save")
 	}
-	if v, _ := rec.Data["model"].(string); v != "anthropic/claude-opus-4.7" {
-		t.Fatalf("agent-scope row model: want anthropic/claude-opus-4.7, got %q", v)
+	if v, _ := rec.Data["model"].(string); v != "anthropic/claude-opus-4-7" {
+		t.Fatalf("agent-scope row model: want anthropic/claude-opus-4-7, got %q", v)
 	}
 
 	// Delete agent-scope (empty data) → falls back to user-scope.
