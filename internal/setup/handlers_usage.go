@@ -2,58 +2,110 @@ package setup
 
 import (
 	"net/http"
-	"time"
+	"strconv"
 
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 )
 
-// handleGetUsage returns the per-(day, apikey, agent, kind) counter rows.
-// Wrapped by requireSuperAdmin in server.go. Filters: ?apiKey=, ?agent=,
-// ?kind=tokens_in,sandbox_seconds, ?since=, ?until=.
+// rangeFromQuery parses ?range=24h|7d|30d (default 7d) into a usage.Range
+// of last-N days. We don't expose precise hour windows on the admin
+// dashboard — daily buckets is good enough for "who burned what".
+func rangeFromQuery(r *http.Request) usage.Range {
+	switch r.URL.Query().Get("range") {
+	case "24h":
+		return usage.LastN(1)
+	case "30d":
+		return usage.LastN(30)
+	default:
+		return usage.LastN(7)
+	}
+}
+
+// limitFromQuery clamps ?limit= to [1, 100], defaulting to 10.
+func limitFromQuery(r *http.Request) int {
+	v, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || v <= 0 {
+		return 10
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
+// handleGetUsage returns the headline numbers for the admin dashboard:
+// total tokens, plus top agents and top users for the requested time
+// window. Wrapped by requireSuperAdmin in server.go.
 func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
 	if s.usage == nil {
-		jsonResponse(w, http.StatusOK, map[string]any{"rows": []any{}})
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"totals":    usage.Totals{},
+			"topAgents": []usage.Rank{},
+			"topUsers":  []usage.Rank{},
+		})
 		return
 	}
-	q := usage.Query{
-		APIKey: r.URL.Query().Get("apiKey"),
-		Agent:  r.URL.Query().Get("agent"),
-	}
-	if v := r.URL.Query().Get("since"); v != "" {
-		if t, err := time.Parse("2006-01-02", v); err == nil {
-			q.Since = t
-		} else if t, err := time.Parse(time.RFC3339, v); err == nil {
-			q.Since = t
-		}
-	}
-	if v := r.URL.Query().Get("until"); v != "" {
-		if t, err := time.Parse("2006-01-02", v); err == nil {
-			q.Until = t
-		} else if t, err := time.Parse(time.RFC3339, v); err == nil {
-			q.Until = t
-		}
-	}
-	if v := r.URL.Query().Get("kind"); v != "" {
-		q.Kinds = splitKinds(v)
-	}
-	rows, err := s.usage.Query(r.Context(), q)
+	rng := rangeFromQuery(r)
+	limit := limitFromQuery(r)
+	totals, err := s.usage.Totals(r.Context(), rng)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"rows": rows})
+	topAgents, err := s.usage.TopAgents(r.Context(), rng, limit)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	topUsers, err := s.usage.TopUsers(r.Context(), rng, limit)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"range":     r.URL.Query().Get("range"),
+		"totals":    totals,
+		"topAgents": topAgents,
+		"topUsers":  topUsers,
+	})
 }
 
-func splitKinds(s string) []usage.Kind {
-	var out []usage.Kind
-	start := 0
-	for i := 0; i <= len(s); i++ {
-		if i == len(s) || s[i] == ',' {
-			if i > start {
-				out = append(out, usage.Kind(s[start:i]))
-			}
-			start = i + 1
-		}
+// handleGetAgentUsage returns per-session token rollups for one agent
+// — the data behind the "Token Usage" tab in the agent settings
+// dialog. Owner-gated via requireAgentOwner, so chat viewers of a
+// public agent don't get to see the owner's other sessions. The
+// `sessions` list is a Rank[] keyed by session_key (rendered with
+// session title client-side after a name lookup).
+func (s *Server) handleGetAgentUsage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rec := s.requireAgentOwner(w, r, id)
+	if rec == nil {
+		return
 	}
-	return out
+	if s.usage == nil {
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"range":    r.URL.Query().Get("range"),
+			"totals":   nil,
+			"sessions": []any{},
+		})
+		return
+	}
+	rng := rangeFromQuery(r)
+	limit := limitFromQuery(r)
+	if limit < 50 {
+		// Sessions list is the headline view on this tab; default
+		// limit (10 from limitFromQuery) is too short. Cap at 50
+		// rows unless the caller explicitly asked for fewer.
+		limit = 50
+	}
+	sessions, err := s.usage.SessionsForAgent(r.Context(), id, "", rng, limit)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"range":    r.URL.Query().Get("range"),
+		"agentId":  id,
+		"sessions": sessions,
+	})
 }

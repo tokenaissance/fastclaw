@@ -380,6 +380,12 @@ func (m *Manager) getByKey(key, channel, accountID, chatID, projectID string) *S
 // — losing one archive row is recoverable from the working set, and we
 // don't want history to silently drop chat replies if the audit table
 // hiccups.
+// Key returns the opaque session_key this Session is bound to.
+// Exposed so callers that need to tag external records by session
+// (e.g. usage metering's per-session token rollup) don't have to
+// reach into the struct.
+func (s *Session) Key() string { return s.sessionKey }
+
 func (s *Session) Append(msg provider.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

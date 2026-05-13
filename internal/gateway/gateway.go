@@ -33,6 +33,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders/imagegen"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders/tts"
+	"github.com/fastclaw-ai/fastclaw/internal/toolproviders/webfetch"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders/websearch"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/webhook"
@@ -42,6 +43,7 @@ import (
 var toolProviderRegistry = func() *toolproviders.Registry {
 	r := toolproviders.NewRegistry()
 	websearch.RegisterAll(r)
+	webfetch.RegisterAll(r)
 	imagegen.RegisterAll(r)
 	tts.RegisterAll(r)
 	return r
@@ -79,6 +81,13 @@ func registerAgentToolChains(cfg *config.Config, agents []*agent.Agent) {
 		}
 		if chain := buildToolChainFromResolved(resolved, "tts"); chain != nil {
 			ag.RegisterTTSChain(chain)
+		}
+		// web_fetch: chain-first, otherwise the agent keeps the
+		// built-in direct fetcher already registered at construction
+		// time (RegisterWebFetch in loop.go), so this call only swaps
+		// the backend when an admin actually configured a chain.
+		if chain := buildToolChainFromResolved(resolved, "web_fetch"); chain != nil {
+			ag.RegisterWebFetchChain(chain)
 		}
 	}
 }
@@ -230,10 +239,15 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	}
 	slog.Info("object store", "type", defaultStr(osCfg.Type, "local"))
 
-	meter := usage.NewMemMeter()
-	ws := workspace.NewMetered(wsInner, func(ctx context.Context, agentID string, bytes int64) {
-		meter.Add(ctx, "", agentID, usage.WorkspaceBytes, bytes)
-	})
+	// LLM token metering: SQLMeter UPSERTs into token_usage_daily on the
+	// same DB the Store opened, so admin reports survive restart. Falls
+	// back to MemMeter if the store doesn't expose a *sql.DB (shouldn't
+	// happen in real installs — only an embedded test double would).
+	var meter usage.Meter = usage.NewMemMeter()
+	if dbs, ok := st.(*store.DBStore); ok {
+		meter = usage.NewSQLMeter(dbs.DB(), dbs.Dialect())
+	}
+	ws := wsInner
 
 	chanMgr := channels.NewManager(mb)
 	// Always-on web channel: routes cron-fired (and any other
@@ -304,7 +318,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		workspace:   ws,
 		usage:       meter,
 		sandboxPool: systemSandboxPool,
-		users:       newUserSpaceRegistry(mb, st, ws, systemSandboxPool),
+		users:       newUserSpaceRegistry(mb, st, ws, meter, systemSandboxPool),
 		chanMgr:     chanMgr,
 		webChan:     webChan,
 		scheduler:   scheduler,

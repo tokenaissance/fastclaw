@@ -47,6 +47,15 @@ func NewDBStore(dialect, dsn string) (*DBStore, error) {
 	return &DBStore{db: db, dialect: dialect}, nil
 }
 
+// DB returns the underlying *sql.DB so satellite packages (e.g.
+// internal/usage) can run their own queries against the same
+// connection pool without re-opening the DSN.
+func (d *DBStore) DB() *sql.DB { return d.db }
+
+// Dialect returns "postgres" or "sqlite" so satellite packages can pick
+// the right placeholder syntax / upsert form for their queries.
+func (d *DBStore) Dialect() string { return d.dialect }
+
 func driverName(dialect string) string {
 	switch dialect {
 	case "postgres":
@@ -124,6 +133,70 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	}
 	if err := d.migrateSessionsAddProjectID(ctx); err != nil {
 		return fmt.Errorf("migrate sessions.project_id: %w", err)
+	}
+	if err := d.migrateTokenUsageAddProvider(ctx); err != nil {
+		return fmt.Errorf("migrate token_usage_daily.provider: %w", err)
+	}
+	return nil
+}
+
+// migrateTokenUsageAddProvider retrofits a `provider` column onto an
+// older token_usage_daily that was created before per-provider
+// breakdown shipped. Pre-release schemas only had (day, user, agent,
+// session, model) in the PK, which made GROUP BY provider impossible
+// (and let same-name models from different providers collide). Since
+// the table only holds accrued counters that the dashboard re-reads
+// every refresh, dropping it on the rare upgrade path is cheaper than
+// rebuilding the PK with a SQLite "create new + copy + swap" dance.
+// Idempotent: returns early if the column already exists, no-op if
+// the table itself doesn't exist yet (fresh installs run the new
+// CREATE TABLE in migrationSQL).
+func (d *DBStore) migrateTokenUsageAddProvider(ctx context.Context) error {
+	exists, err := d.tableExists(ctx, "token_usage_daily")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	has, err := d.tableHasColumn(ctx, "token_usage_daily", "provider")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	if _, err := d.db.ExecContext(ctx, `DROP TABLE token_usage_daily`); err != nil {
+		return fmt.Errorf("drop old token_usage_daily: %w", err)
+	}
+	// migrationSQL's CREATE TABLE IF NOT EXISTS will recreate it with
+	// the new schema on the next pass. We rely on the fact that this
+	// migration step runs AFTER migrationSQL in the same Migrate()
+	// call ordering — so the table comes back with the right shape
+	// before any agent traffic hits it.
+	if _, err := d.db.ExecContext(ctx, `CREATE TABLE token_usage_daily (
+		day DATE NOT NULL,
+		user_id TEXT NOT NULL DEFAULT '',
+		agent_id TEXT NOT NULL DEFAULT '',
+		session_key TEXT NOT NULL DEFAULT '',
+		provider TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		input_tokens BIGINT NOT NULL DEFAULT 0,
+		output_tokens BIGINT NOT NULL DEFAULT 0,
+		cache_read_tokens BIGINT NOT NULL DEFAULT 0,
+		cache_create_tokens BIGINT NOT NULL DEFAULT 0,
+		request_count BIGINT NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, user_id, agent_id, session_key, provider, model)
+	)`); err != nil {
+		return fmt.Errorf("recreate token_usage_daily: %w", err)
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_agent ON token_usage_daily (agent_id, day)`); err != nil {
+		return err
+	}
+	if _, err := d.db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_user ON token_usage_daily (user_id, day)`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1224,6 +1297,37 @@ func (d *DBStore) migrationSQL() []string {
 			PRIMARY KEY (user_id, agent_id, project_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_projects_listing ON projects (user_id, agent_id, updated_at DESC)`,
+		// token_usage_daily is the per-(day, user, agent, session,
+		// provider, model) counter behind the admin Usage dashboard.
+		// Every successful LLM Chat / ChatStream lands one row via
+		// UPSERT — see internal/usage.SQLMeter. Empty user_id is
+		// preserved on write (admin-owned or cron-fired agents) and
+		// rendered as "system" in the UI. Provider is the per-agent
+		// override key (e.g. "anthropic-messages"); "" means the agent
+		// used the shared provider with no override. The PK is the
+		// six-tuple so GROUP BY any subset rolls up cleanly without
+		// extra indexing.
+		`CREATE TABLE IF NOT EXISTS token_usage_daily (
+			day DATE NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			agent_id TEXT NOT NULL DEFAULT '',
+			session_key TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			input_tokens BIGINT NOT NULL DEFAULT 0,
+			output_tokens BIGINT NOT NULL DEFAULT 0,
+			cache_read_tokens BIGINT NOT NULL DEFAULT 0,
+			cache_create_tokens BIGINT NOT NULL DEFAULT 0,
+			request_count BIGINT NOT NULL DEFAULT 0,
+			PRIMARY KEY (day, user_id, agent_id, session_key, provider, model)
+		)`,
+		// Range scans on day are the dominant query (24h/7d/30d filter)
+		// — the PK starts with day so SQLite/Postgres both use it without
+		// a secondary index. The extra indexes below speed up
+		// non-time-prefixed lookups (e.g. "all rows for agent X across
+		// all time") when the table grows.
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_agent ON token_usage_daily (agent_id, day)`,
+		`CREATE INDEX IF NOT EXISTS idx_token_usage_user ON token_usage_daily (user_id, day)`,
 	}
 }
 

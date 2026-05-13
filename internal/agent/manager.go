@@ -11,6 +11,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
@@ -45,6 +46,7 @@ type managerOpts struct {
 	memoryStore     MemoryStore
 	workspaceStore  workspace.Store
 	dataStore       store.Store
+	meter           usage.Meter
 	userID          string
 	globalSkillsCfg config.SkillsCfg
 }
@@ -79,6 +81,13 @@ func WithWorkspaceStore(ws workspace.Store) ManagerOption {
 // review and are wrong for short-fuse reminders).
 func WithDataStore(st store.Store) ManagerOption {
 	return func(o *managerOpts) { o.dataStore = st }
+}
+
+// WithMeter installs the admin-level token meter on every agent so each
+// provider.Chat / ChatStream call records into token_usage_daily. Omit
+// to disable metering (tests, single-user dev runs).
+func WithMeter(m usage.Meter) ManagerOption {
+	return func(o *managerOpts) { o.meter = m }
 }
 
 // WithGlobalSkillsCfg propagates cfg.Skills (entries + agentEntries
@@ -213,6 +222,12 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// at execute time (bindSession stamps them per-turn) so the
 		// fired message routes back to the originating chat.
 		tools.RegisterCronTools(ag.registry, m.opts.dataStore, m.uid, rc.ID)
+	}
+	// Stamp agentID even when no workspaceStore is wired (single-user
+	// local mode), so usage metering can record per-agent rollups.
+	ag.agentID = rc.ID
+	if m.opts.meter != nil {
+		ag.SetMeter(m.opts.meter)
 	}
 	return ag
 }

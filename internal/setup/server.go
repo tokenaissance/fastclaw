@@ -353,6 +353,9 @@ func (s *Server) Run(ctx context.Context) error {
 	// Cross-tenant agent list moved into /api/agents?all=true (admin-only
 	// when the param is set). /api/usage replaces /api/admin/usage.
 	mux.HandleFunc("GET /api/usage", admin(s.handleGetUsage))
+	// Per-agent usage: owner-gated (or super_admin) inside the handler
+	// itself via requireAgentOwner, so we use the plain auth wrapper here.
+	mux.HandleFunc("GET /api/agents/{id}/usage", auth(s.handleGetAgentUsage))
 
 	// OpenAI-compatible API and WebSocket gateway.
 	if s.apiServer != nil {

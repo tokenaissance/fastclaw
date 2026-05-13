@@ -114,11 +114,21 @@ type ToolFunction struct {
 	Parameters  interface{} `json:"parameters"`
 }
 
+// Usage reports token counts returned by the provider. Zero values are
+// fine — admin metering treats absent fields as "not reported".
+type Usage struct {
+	InputTokens         int
+	OutputTokens        int
+	CacheReadTokens     int // Anthropic prompt-cache hit tokens (read)
+	CacheCreationTokens int // Anthropic prompt-cache write tokens
+}
+
 // Response is the result of a Chat call.
 type Response struct {
 	Content      string
 	ToolCalls    []ToolCall
 	Thinking     string          // model's reasoning/thinking content (extracted for memory)
+	Usage        Usage           // token counts for metering (zero when provider didn't report)
 	RawAssistant json.RawMessage // exact API response message JSON (for cache-safe replay)
 }
 
@@ -138,6 +148,10 @@ type StreamChunk struct {
 	// extended-thinking providers (Anthropic + DeepSeek /anthropic compat).
 	Thinking          string
 	ThinkingSignature string
+	// Usage is reported on the final (Done) chunk if the provider
+	// emitted token counts (Anthropic message_delta.usage, OpenAI
+	// usage block). Zero on intermediate chunks.
+	Usage Usage
 	// RawAssistant is the fully-serialized assistant message in the
 	// provider's wire format, emitted on the final (Done) chunk. When
 	// set, callers should persist it verbatim onto Message.RawAssistant
@@ -187,6 +201,17 @@ func StripProviderPrefix(model string) string {
 		return model[idx+1:]
 	}
 	return model
+}
+
+// SplitProviderModel splits "<providerKey>/<modelId>" into its two parts.
+// When there's no slash (model uses the shared provider with no per-agent
+// override), the first return is "" and the model name comes back
+// unchanged. Inverse of "prov + / + model".
+func SplitProviderModel(s string) (provider, model string) {
+	if idx := strings.Index(s, "/"); idx >= 0 {
+		return s[:idx], s[idx+1:]
+	}
+	return "", s
 }
 
 // NewProvider creates a Provider based on apiType.

@@ -21,6 +21,7 @@ import { AgentSettingsDialog } from "@/components/agent-settings-dialog";
 import {
   BotIcon,
   BrainIcon,
+  CoinsIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   MessagesSquareIcon,
@@ -88,6 +89,7 @@ const ADMIN_AGENT_GROUP: NavItem[] = [
 const ADMIN_USER_GROUP: NavItem[] = [
   { title: "Users", url: "/admin/users/", icon: UsersIcon },
   { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
+  { title: "Token Usage", url: "/admin/usage/", icon: CoinsIcon },
   { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
 ];
 

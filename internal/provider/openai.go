@@ -52,12 +52,33 @@ type apiMessage struct {
 }
 
 type chatRequest struct {
-	Model       string            `json:"model"`
-	Messages    []json.RawMessage `json:"messages"`
-	Tools       []Tool            `json:"tools,omitempty"`
-	MaxTokens   int               `json:"max_tokens,omitempty"`
-	Temperature float64           `json:"temperature,omitempty"`
-	Stream      bool              `json:"stream"`
+	Model         string            `json:"model"`
+	Messages      []json.RawMessage `json:"messages"`
+	Tools         []Tool            `json:"tools,omitempty"`
+	MaxTokens     int               `json:"max_tokens,omitempty"`
+	Temperature   float64           `json:"temperature,omitempty"`
+	Stream        bool              `json:"stream"`
+	StreamOptions *streamOptions    `json:"stream_options,omitempty"`
+}
+
+// streamOptions.include_usage tells OpenAI-compat APIs to emit one final
+// chunk carrying total token counts before [DONE]. Without this flag the
+// streaming path returns no usage at all.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
+}
+
+// sseUsage mirrors the `usage` block returned on the final SSE chunk
+// when stream_options.include_usage is set. Some OpenAI-compat APIs
+// (e.g. DeepSeek) expose prompt-cache hit/miss tokens via
+// prompt_tokens_details — we capture them so admin metering can split
+// cache reads out of input_tokens later if needed.
+type sseUsage struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	PromptTokensDetails *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details,omitempty"`
 }
 
 // toAPIMessages converts provider Messages to wire-format apiMessages,
@@ -216,6 +237,7 @@ type sseChoice struct {
 
 type sseResponse struct {
 	Choices []sseChoice `json:"choices"`
+	Usage   *sseUsage   `json:"usage,omitempty"` // present only on the final chunk when include_usage=true
 }
 
 func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool) (*http.Request, error) {
@@ -225,6 +247,12 @@ func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, t
 		MaxTokens:   maxTokens,
 		Temperature: temperature,
 		Stream:      stream,
+	}
+	if stream {
+		// Ask the API to emit a final usage chunk before [DONE] so admin
+		// metering can record per-call token counts. Providers that
+		// don't honor the flag silently drop it.
+		req.StreamOptions = &streamOptions{IncludeUsage: true}
 	}
 	if len(tools) > 0 {
 		req.Tools = tools
@@ -296,6 +324,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 
 		toolCalls := make(map[int]*ToolCall)
 		var contentBuilder, reasoningBuilder strings.Builder
+		var usage Usage
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -341,6 +370,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 					ToolCalls:    tcs,
 					Done:         true,
 					Thinking:     reasoning,
+					Usage:        usage,
 					RawAssistant: raw,
 				}:
 				case <-ctx.Done():
@@ -352,6 +382,10 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				slog.Warn("parse SSE chunk", "error", err, "data", data)
 				continue
+			}
+
+			if chunk.Usage != nil {
+				usage = openaiUsageToProvider(chunk.Usage)
 			}
 
 			if len(chunk.Choices) == 0 {
@@ -417,6 +451,7 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 	var contentBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	toolCalls := make(map[int]*ToolCall)
+	var usage Usage
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -432,6 +467,10 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			slog.Warn("parse SSE chunk", "error", err, "data", data)
 			continue
+		}
+
+		if chunk.Usage != nil {
+			usage = openaiUsageToProvider(chunk.Usage)
 		}
 
 		if len(chunk.Choices) == 0 {
@@ -481,6 +520,7 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 	result := &Response{
 		Content:  contentBuilder.String(),
 		Thinking: reasoning,
+		Usage:    usage,
 	}
 	for i := 0; i < len(toolCalls); i++ {
 		if tc, ok := toolCalls[i]; ok {
@@ -520,4 +560,23 @@ func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {
 	result.RawAssistant, _ = json.Marshal(rawMsg)
 
 	return result, nil
+}
+
+// openaiUsageToProvider folds an OpenAI-style usage block into the
+// provider-neutral Usage. Cached prompt tokens (if reported) are
+// surfaced as CacheReadTokens, and input_tokens is the *uncached*
+// remainder so input+cache_read still sums to total prompt size.
+func openaiUsageToProvider(u *sseUsage) Usage {
+	out := Usage{
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		out.CacheReadTokens = u.PromptTokensDetails.CachedTokens
+		out.InputTokens -= u.PromptTokensDetails.CachedTokens
+		if out.InputTokens < 0 {
+			out.InputTokens = 0
+		}
+	}
+	return out
 }

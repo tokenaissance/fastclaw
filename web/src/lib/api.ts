@@ -928,14 +928,29 @@ export interface ToolResultMetadata {
 }
 
 export interface ChatStreamEvent {
-  type: "content" | "tool_call" | "tool_result" | "error" | "done" | "subagent_progress";
+  type:
+    | "content"
+    | "content_delta"
+    | "tool_call"
+    | "tool_result"
+    | "error"
+    | "done"
+    | "subagent_progress";
   // Per-session monotonic sequence assigned by chat_events. Lets the
   // chat page dedupe events arriving on both the active POST stream
   // and the parallel /api/chat/subscribe SSE connection. -1 means
   // "not assigned" (legacy / pre-persist code path).
+  //
+  // content_delta is intentionally NOT persisted (would generate 100+
+  // rows per turn for no replay value — the trailing `content` event
+  // carries the full final text). So content_delta always arrives
+  // with seq=-1; the panel must accept it without dedup.
   seq?: number;
   data?: {
     content?: string;
+    // delta is the incremental text appended to the in-flight
+    // assistant bubble for content_delta events.
+    delta?: string;
     id?: string;
     name?: string;
     arguments?: string;
@@ -1617,6 +1632,60 @@ export async function disconnectAgentChannel(
   const res = await apiFetch(
     `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}`,
     { method: "DELETE" },
+  );
+  return res.json();
+}
+
+// ---------- Admin: token usage ----------
+
+export type TokenUsageRange = "24h" | "7d" | "30d";
+
+export interface TokenUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  requestCount: number;
+}
+
+export interface TokenUsageRank {
+  key: string;
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  requestCount: number;
+}
+
+export interface TokenUsageReport {
+  range: TokenUsageRange;
+  totals: TokenUsageTotals;
+  topAgents: TokenUsageRank[];
+  topUsers: TokenUsageRank[];
+}
+
+export async function adminGetTokenUsage(
+  range: TokenUsageRange = "7d",
+  limit = 10,
+): Promise<TokenUsageReport> {
+  const res = await apiFetch(`/api/usage?range=${range}&limit=${limit}`);
+  return res.json();
+}
+
+export interface AgentTokenUsage {
+  range: TokenUsageRange;
+  agentId: string;
+  sessions: TokenUsageRank[];
+}
+
+// Per-agent session-level usage, exposed in the agent settings dialog.
+// Owner-gated server-side; chat viewers of a public agent get a 403.
+export async function getAgentTokenUsage(
+  agentId: string,
+  range: TokenUsageRange = "7d",
+  limit = 50,
+): Promise<AgentTokenUsage> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/usage?range=${range}&limit=${limit}`,
   );
   return res.json();
 }

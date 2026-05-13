@@ -146,23 +146,60 @@ export default function ChatPage() {
     let curGroupId = "";
     let curCalls: { id: string; name: string; arguments: string; result?: string }[] = [];
     let curContent = "";
+    let streamingMsgId = "";
 
     const startNewGroup = () => {
       curGroupId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       curCalls = [];
       curContent = "";
+      streamingMsgId = "";
     };
     startNewGroup();
 
     try {
       await sendChatStream(selectedAgent, sessionId, text, (evt: ChatStreamEvent) => {
         switch (evt.type) {
+          case "content_delta": {
+            // Mirror chat-screen.tsx: accrete deltas into one
+            // in-flight assistant bubble per round. See that file's
+            // comment for the lifecycle (delta → tool_call resets →
+            // content seals).
+            const delta = evt.data?.delta || "";
+            if (!delta) break;
+            if (curCalls.length > 0 && !streamingMsgId) {
+              startNewGroup();
+            }
+            curContent += delta;
+            if (!streamingMsgId) {
+              const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              streamingMsgId = id;
+              setMessages((prev) => [
+                ...prev,
+                { id, role: "agent", content: delta, timestamp: Date.now() },
+              ]);
+            } else {
+              const id = streamingMsgId;
+              setMessages((prev) => {
+                const idx = prev.findIndex((m) => m.id === id);
+                if (idx < 0) return prev;
+                const updated = [...prev];
+                updated[idx] = { ...updated[idx], content: (updated[idx].content || "") + delta };
+                return updated;
+              });
+            }
+            break;
+          }
           case "content": {
             const content = evt.data?.content || "";
             if (content === "__NEW_SESSION__") {
               handleNewChat();
               loadSessions(selectedAgent);
               return;
+            }
+            if (streamingMsgId) {
+              streamingMsgId = "";
+              curContent = content;
+              break;
             }
             if (curCalls.length > 0) {
               // Content after tool calls = new round. Finalize current group, start fresh.
@@ -177,6 +214,7 @@ export default function ChatPage() {
             break;
           }
           case "tool_call": {
+            streamingMsgId = "";
             curCalls.push({
               id: evt.data?.id || "",
               name: evt.data?.name || "",

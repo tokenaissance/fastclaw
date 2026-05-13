@@ -48,7 +48,15 @@ func emitEvent(ctx context.Context, evt ChatEvent) {
 	stream := streamFromContext(ctx)
 
 	var seq int64 = -1
-	if stream != nil && stream.sink != nil && stream.userID != "" && stream.sessionKey != "" {
+	// Skip persistence for high-volume live-only events. content_delta
+	// streams ~one chunk per generated token (100+ rows per turn for a
+	// modest answer), which would dwarf the rest of session_events for
+	// no replay value: the trailing `content` event carries the full
+	// final text, so a refresh in the middle of a turn just rejoins
+	// the live hub and gets the final on completion.
+	persist := evt.Type != "content_delta"
+
+	if persist && stream != nil && stream.sink != nil && stream.userID != "" && stream.sessionKey != "" {
 		blob, _ := json.Marshal(evt.Data)
 		s, err := stream.sink.AppendSessionEvent(ctx, stream.userID, stream.agentID, stream.sessionKey, evt.Type, blob)
 		if err != nil {

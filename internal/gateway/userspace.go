@@ -20,6 +20,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
@@ -473,7 +474,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 // by the resulting UserSpace. Pass nil when sandbox is disabled at
 // system scope; agents will run with path-only file roots in that
 // case.
-func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, systemSandboxPool sandbox.ExecutorPool) (*UserSpace, error) {
+func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool) (*UserSpace, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("loadUserSpace: userID required")
 	}
@@ -601,6 +602,9 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 	if ws != nil {
 		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
 	}
+	if meter != nil {
+		managerOpts = append(managerOpts, agent.WithMeter(meter))
+	}
 	agentMgr, err := agent.NewManager(resolved, prov, mb, managerOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create agent manager for user %q: %w", userID, err)
@@ -673,6 +677,7 @@ type userSpaceRegistry struct {
 	bus               *bus.MessageBus
 	store             store.Store
 	workspace         workspace.Store
+	meter             usage.Meter
 	systemSandboxPool sandbox.ExecutorPool
 	idleTTL           time.Duration
 }
@@ -682,12 +687,13 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
-func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, systemSandboxPool sandbox.ExecutorPool) *userSpaceRegistry {
+func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool) *userSpaceRegistry {
 	return &userSpaceRegistry{
 		spaces:            make(map[string]*userSpaceEntry),
 		bus:               mb,
 		store:             st,
 		workspace:         ws,
+		meter:             meter,
 		systemSandboxPool: systemSandboxPool,
 		idleTTL:           30 * time.Minute,
 	}
@@ -716,7 +722,7 @@ func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*User
 		e.lastUsed = time.Now()
 		return e.space, nil
 	}
-	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.systemSandboxPool)
+	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.systemSandboxPool)
 	if err != nil {
 		return nil, err
 	}

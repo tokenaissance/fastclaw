@@ -531,6 +531,16 @@ export function ChatScreen() {
   // reload, which replaces the placeholder with the canonical message
   // pulled from session_messages.
   const transientBubbleIdRef = useRef<string | null>(null);
+  // streamingMsgIdRef holds the id of the assistant bubble currently
+  // accreting content_delta chunks via the active POST sendChatStream.
+  // Shared with the parallel /api/chat/subscribe SSE handler so that
+  // handler can detect "POST stream owns this turn" and skip its own
+  // bubble-creation path for the trailing `content` event — both
+  // handlers see the same content event from the hub, and if subscribe
+  // wins the race the dedup-by-seq guard won't fire on the POST side,
+  // producing a duplicate bubble. The ref is reset to null at startNewGroup
+  // and when a tool_call rolls the bubble into a tool-group.
+  const streamingMsgIdRef = useRef<string | null>(null);
   // AbortController for the in-flight chat stream so the Stop button can
   // cancel both the upload and the SSE connection. Reset on every new turn.
   const abortRef = useRef<AbortController | null>(null);
@@ -745,6 +755,21 @@ export function ChatScreen() {
             const content = data.data?.content || "";
             const meta = data.data?.metadata;
             if (!content && !meta) break;
+            // The active POST sendChatStream is rendering this turn
+            // via content_delta into streamingMsgIdRef. Both
+            // subscriptions sit on the same hub, so the `content`
+            // event reaches both handlers; if subscribe wins the
+            // race it would create a duplicate transient bubble
+            // before the POST callback can dedup. Bail when the
+            // POST handler is mid-stream — it will seal the bubble
+            // itself when it processes the event.
+            //
+            // Metadata-only events (no content) still go through so
+            // a forced-final-delivery retro-stamp lands.
+            if (streamingMsgIdRef.current && content) {
+              claim();
+              break;
+            }
             claim();
             setMessages((prev) => {
               if (transientBubbleIdRef.current) {
@@ -803,6 +828,12 @@ export function ChatScreen() {
           }
           case "done": {
             claim();
+            // Defensive clear — content events should already have
+            // sealed the streaming bubble, but a turn that errors out
+            // before the trailing `content` event lands would leave
+            // the ref dangling and cause the next turn's first
+            // content_delta to write into the stale id.
+            streamingMsgIdRef.current = null;
             // Only reload history when we actually built a transient
             // bubble from subscribe-replayed content events (i.e. the
             // user reloaded mid-turn and we need to swap the
@@ -1191,6 +1222,13 @@ export function ChatScreen() {
     let curGroupId = "";
     let curCalls: { id: string; name: string; arguments: string; result?: string; metadata?: ToolResultMetadata }[] = [];
     let curContent = "";
+    // streamingMsgIdRef tracks the in-flight assistant bubble for
+    // content_delta accretion. Stored on a ref (declared above) so
+    // the parallel /api/chat/subscribe SSE handler can observe it
+    // and skip duplicating the bubble when the trailing `content`
+    // event races through it ahead of the POST callback. Reset to
+    // null at startNewGroup, after the `content` seal, and on
+    // tool_call / done.
     const turnFiles: ProducedFile[] = [];
     const seenPaths = new Set<string>();
 
@@ -1198,6 +1236,7 @@ export function ChatScreen() {
       curGroupId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       curCalls = [];
       curContent = "";
+      streamingMsgIdRef.current = null;
     };
     startNewGroup();
 
@@ -1214,6 +1253,41 @@ export function ChatScreen() {
           maxSeqRef.current = evt.seq;
         }
         switch (evt.type) {
+          case "content_delta": {
+            // Incremental token chunk from the provider. Append to the
+            // in-flight assistant bubble — create one on the first
+            // delta of a round (and after a tool-group split). The
+            // final `content` event still arrives with the full text
+            // when the turn completes so refresh / replay paths stay
+            // intact even though deltas aren't persisted.
+            const delta = evt.data?.delta || "";
+            if (!delta) break;
+            if (curCalls.length > 0 && !streamingMsgIdRef.current) {
+              // Content after tool calls = new round; reset state so
+              // the new bubble is its own message, not appended onto
+              // the previous tool-group's thinking text.
+              startNewGroup();
+            }
+            curContent += delta;
+            if (!streamingMsgIdRef.current) {
+              const id = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+              streamingMsgIdRef.current = id;
+              setMessages((prev) => [
+                ...prev,
+                { id, role: "agent", content: delta, timestamp: Date.now() },
+              ]);
+            } else {
+              const id = streamingMsgIdRef.current;
+              setMessages((prev) => {
+                const idx = prev.findIndex((m) => m.id === id);
+                if (idx < 0) return prev;
+                const updated = [...prev];
+                updated[idx] = { ...updated[idx], content: (updated[idx].content || "") + delta };
+                return updated;
+              });
+            }
+            break;
+          }
           case "content": {
             const content = evt.data?.content || "";
             const meta = evt.data?.metadata;
@@ -1221,6 +1295,25 @@ export function ChatScreen() {
               handleNewChat();
               loadSessions(selectedAgent);
               return;
+            }
+            // If the bubble was already streamed in via content_delta,
+            // the final `content` carries the same text — just seal
+            // the in-flight ID, optionally attach metadata, and skip
+            // creating a duplicate bubble.
+            if (streamingMsgIdRef.current) {
+              const id = streamingMsgIdRef.current;
+              streamingMsgIdRef.current = null;
+              if (meta) {
+                setMessages((prev) => {
+                  const idx = prev.findIndex((m) => m.id === id);
+                  if (idx < 0) return prev;
+                  const updated = [...prev];
+                  updated[idx] = { ...updated[idx], metadata: { ...updated[idx].metadata, ...meta } };
+                  return updated;
+                });
+              }
+              curContent = content;
+              break;
             }
             // Metadata-only event with empty content: the backend uses
             // this to retro-stamp the previous bubble (e.g. for the
@@ -1254,6 +1347,13 @@ export function ChatScreen() {
             break;
           }
           case "tool_call": {
+            // The in-flight streamed bubble (if any) is about to be
+            // converted into a tool-group by the existing "replace
+            // last agent message" logic below. Clear the streaming
+            // ID so a subsequent content_delta on the next round
+            // spawns a fresh bubble instead of writing into the
+            // now-defunct ID.
+            streamingMsgIdRef.current = null;
             // New round starts if every tool in the current group has
             // already resolved. Without this, two assistant turns that
             // happen back-to-back with no intervening content event get

@@ -1149,6 +1149,17 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			// content_delta is the high-volume token-by-token stream
+			// that drives the active turn's bubble. It is intentionally
+			// NOT persisted (see emitEvent), arrives with seq=-1, and is
+			// already delivered to the initiating tab via the POST
+			// /api/chat/stream subscription on the same hub. Forwarding
+			// it here would double-render on the active tab; reloaders
+			// who join mid-turn miss the partial reveal but still get
+			// the trailing `content` event with the full text.
+			if env.Event.Type == "content_delta" {
+				continue
+			}
 			// Drop replay-overlap events: any event with seq <= the
 			// highest seq we already streamed during replay. Without
 			// this, a browser that reconnects at exactly the wrong

@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   BrainIcon,
   ClockIcon,
+  CoinsIcon,
   IdCardIcon,
   InfoIcon,
   Palette,
@@ -22,6 +23,7 @@ import AgentModelsPage from "@/app/agents/[id]/models/page";
 import AgentSkillsPage from "@/app/agents/[id]/skills/page";
 import AgentChannelsPage from "@/app/agents/[id]/channels/page";
 import AgentSchedulerPage from "@/app/agents/[id]/scheduler/page";
+import AgentUsagePage from "@/app/agents/[id]/usage/page";
 import AccountSettingsPage from "@/app/settings/account/page";
 import GeneralSettingsPage from "@/app/settings/general/page";
 import AboutSettingsPage from "@/app/settings/about/page";
@@ -33,6 +35,7 @@ export type AgentSettingsTab =
   | "skills"
   | "channels"
   | "scheduler"
+  | "usage"
   | "account"
   | "general"
   | "about";
@@ -46,6 +49,7 @@ const AGENT_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> 
   { id: "skills", label: "Skills", icon: SparklesIcon },
   { id: "channels", label: "Channels", icon: RadioIcon },
   { id: "scheduler", label: "Scheduler", icon: ClockIcon },
+  { id: "usage", label: "Token Usage", icon: CoinsIcon },
 ];
 
 // Runtime intentionally lives only on the standalone /settings/runtime
@@ -145,6 +149,7 @@ export function AgentSettingsDialog({
           {tab === "skills" && <AgentSkillsPage />}
           {tab === "channels" && <AgentChannelsPage />}
           {tab === "scheduler" && <AgentSchedulerPage />}
+          {tab === "usage" && <AgentUsagePage />}
           {tab === "account" && (
             <div className="p-6 max-w-3xl">
               <AccountSettingsPage />
