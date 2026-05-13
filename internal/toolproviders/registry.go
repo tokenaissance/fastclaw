@@ -27,6 +27,20 @@ type Provider interface {
 	Execute(ctx context.Context, req Request) (Response, error)
 }
 
+// CredentialFree is an optional Provider opt-in for backends that work
+// without any per-tenant config (the built-in web_fetch direct fetcher
+// is the canonical example: it just hits http.DefaultClient). Chain
+// availability/skip rules treat these providers as always usable so the
+// admin can pick them in the UI without typing a fake API key.
+type CredentialFree interface {
+	CredentialFree() bool
+}
+
+func providerCredentialFree(p Provider) bool {
+	cf, ok := p.(CredentialFree)
+	return ok && cf.CredentialFree()
+}
+
 // Request carries the LLM-provided args plus the resolved per-tenant config.
 type Request struct {
 	Args   map[string]any
@@ -122,11 +136,12 @@ func (c *Chain) Available() bool {
 		if c.Registry == nil {
 			continue
 		}
-		if c.Registry.Get(c.Category, name) == nil {
+		p := c.Registry.Get(c.Category, name)
+		if p == nil {
 			continue
 		}
 		cfg := c.GetConfig(name)
-		if cfg.APIKey != "" || cfg.Endpoint != "" {
+		if cfg.APIKey != "" || cfg.Endpoint != "" || providerCredentialFree(p) {
 			return true
 		}
 	}
@@ -160,7 +175,7 @@ func (c *Chain) Execute(ctx context.Context, args map[string]any) (Response, err
 		}
 		cfg := c.GetConfig(name)
 		cfg.Model = model
-		if cfg.APIKey == "" && cfg.Endpoint == "" {
+		if cfg.APIKey == "" && cfg.Endpoint == "" && !providerCredentialFree(p) {
 			errs = append(errs, fmt.Errorf("%s: no API key configured", ref))
 			if !c.AutoFallback {
 				break

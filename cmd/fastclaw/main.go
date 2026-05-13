@@ -41,6 +41,14 @@ func (a *apiResolver) LocalAgentManager() *agent.Manager { return a.gw.LocalAgen
 func (a *apiResolver) IsCloudMode() bool                 { return a.gw.IsCloudMode() }
 func (a *apiResolver) InvalidateUser(userID string)      { a.gw.InvalidateUser(userID) }
 
+// InvalidateAgent forwards to the gateway so agent-scope mutations
+// (PUT /api/agents/{id} model change, agent-scope provider/setting
+// writes) actually drop the cached UserSpace. Without this method on
+// the resolver, setup.invalidateAgent's type assertion silently fails
+// and chat keeps firing the pre-change model until the 30-min idle
+// eviction kicks in.
+func (a *apiResolver) InvalidateAgent(agentID string) { a.gw.InvalidateAgent(agentID) }
+
 func (a *apiResolver) EnsureAgent(ctx context.Context, userID, agentID string) error {
 	return a.gw.EnsureAgent(ctx, userID, agentID)
 }

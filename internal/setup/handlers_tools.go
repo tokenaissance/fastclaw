@@ -41,6 +41,20 @@ var builtinCatalog = []categoryCatalog{
 			{Name: "searxng", Label: "SearxNG (self-hosted)", NeedsURL: true, Models: []string{"default"}},
 		},
 	},
+	{
+		Name:  "web_fetch",
+		Label: "Web Fetch",
+		Providers: []providerCatalog{
+			// Direct uses Go's net/http directly — no key required.
+			// Jina's free tier works without a key (rate limited);
+			// the key field is shown so admins can paste one to raise
+			// quota, but the chain runtime treats blank as valid because
+			// the provider implements CredentialFree.
+			{Name: "direct", Label: "Direct (built-in)", Models: []string{"default"}},
+			{Name: "jina", Label: "Jina Reader", NeedsKey: true, Models: []string{"default"}},
+			{Name: "firecrawl", Label: "Firecrawl", NeedsKey: true, Models: []string{"default"}},
+		},
+	},
 }
 
 // handleGetTools returns the categories + provider catalog and the user's
