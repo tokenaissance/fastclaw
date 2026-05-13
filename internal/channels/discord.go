@@ -12,15 +12,19 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 )
 
-var discordMentionRe = regexp.MustCompile(`<@!?(\d+)>`)
+var (
+	discordMentionRe      = regexp.MustCompile(`<@!?(\d+)>`)
+	discordPlainMentionRe = regexp.MustCompile(`@(\w+)`)
+)
 
 // Discord implements the Channel interface for Discord bots.
 type Discord struct {
-	session     *discordgo.Session
-	bus         *bus.MessageBus
-	accountID   string
-	botUserID   string
-	botUsername string
+	session       *discordgo.Session
+	bus           *bus.MessageBus
+	accountID     string
+	botUserID     string
+	botUsername   string
+	botGlobalName string
 }
 
 // NewDiscord creates a new Discord channel instance.
@@ -65,9 +69,11 @@ func (d *Discord) Start(ctx context.Context) error {
 	// Cache bot user info
 	d.botUserID = d.session.State.User.ID
 	d.botUsername = d.session.State.User.Username
+	d.botGlobalName = d.session.State.User.GlobalName
 
 	slog.Info("discord bot connected",
 		"username", d.botUsername,
+		"global_name", d.botGlobalName,
 		"user_id", d.botUserID,
 		"account", d.accountID,
 	)
@@ -101,6 +107,16 @@ func (d *Discord) Send(chatID string, text string) error {
 // ChannelMessageSendComplex call carries both, but if there's a long
 // body that needs chunking we send the body chunked first and the
 // files on the last chunk.
+//
+// When msg.ReplyToMsgID is set the first outbound message attaches a
+// MessageReference so Discord renders our reply as a native "Replying
+// to @sender" quote bubble and pings them — without this, multi-user
+// channels turn into a guessing game of which question each bot reply
+// is answering. Subsequent chunks ship without the reference so a
+// chunked answer doesn't produce N quote bubbles + N pings.
+// FailIfNotExists stays at the zero value (false) so a stale / deleted
+// source message degrades to a plain send instead of dropping the
+// reply on the floor.
 func (d *Discord) SendMessage(msg bus.OutboundMessage) error {
 	if msg.Text != "" {
 		// Discord 2000-char per-message limit. Send N-1 chunks
@@ -108,25 +124,43 @@ func (d *Discord) SendMessage(msg bus.OutboundMessage) error {
 		// the embedded preview lands at the end of the conversation.
 		chunks := splitDiscordMessage(msg.Text)
 		for i, chunk := range chunks {
-			if i < len(chunks)-1 || len(msg.MediaItems) == 0 {
-				if _, err := d.session.ChannelMessageSend(msg.ChatID, chunk); err != nil {
+			var ref *discordgo.MessageReference
+			if i == 0 && msg.ReplyToMsgID != "" {
+				ref = &discordgo.MessageReference{
+					MessageID: msg.ReplyToMsgID,
+					ChannelID: msg.ChatID,
+				}
+			}
+			isLast := i == len(chunks)-1
+			if !isLast || len(msg.MediaItems) == 0 {
+				if _, err := d.session.ChannelMessageSendComplex(msg.ChatID, &discordgo.MessageSend{
+					Content:   chunk,
+					Reference: ref,
+				}); err != nil {
 					slog.Warn("discord chunk send failed", "i", i, "error", err)
 				}
 				continue
 			}
-			if err := d.sendWithFiles(msg.ChatID, chunk, msg.MediaItems); err != nil {
+			if err := d.sendWithFiles(msg.ChatID, chunk, msg.MediaItems, ref); err != nil {
 				slog.Warn("discord final chunk+files failed", "error", err)
 			}
 		}
 		return nil
 	}
 	if len(msg.MediaItems) > 0 {
-		return d.sendWithFiles(msg.ChatID, "", msg.MediaItems)
+		var ref *discordgo.MessageReference
+		if msg.ReplyToMsgID != "" {
+			ref = &discordgo.MessageReference{
+				MessageID: msg.ReplyToMsgID,
+				ChannelID: msg.ChatID,
+			}
+		}
+		return d.sendWithFiles(msg.ChatID, "", msg.MediaItems, ref)
 	}
 	return nil
 }
 
-func (d *Discord) sendWithFiles(chatID, text string, items []bus.MediaItem) error {
+func (d *Discord) sendWithFiles(chatID, text string, items []bus.MediaItem, ref *discordgo.MessageReference) error {
 	files := make([]*discordgo.File, 0, len(items))
 	for _, it := range items {
 		ct := it.ContentType
@@ -140,8 +174,9 @@ func (d *Discord) sendWithFiles(chatID, text string, items []bus.MediaItem) erro
 		})
 	}
 	_, err := d.session.ChannelMessageSendComplex(chatID, &discordgo.MessageSend{
-		Content: text,
-		Files:   files,
+		Content:   text,
+		Files:     files,
+		Reference: ref,
 	})
 	return err
 }
@@ -187,12 +222,6 @@ func (d *Discord) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 		peerKind = "group"
 	}
 
-	// Parse @mentions
-	var mentions []string
-	for _, u := range m.Mentions {
-		mentions = append(mentions, u.Username)
-	}
-
 	// Check if sender is a bot
 	isBot := m.Author.Bot
 
@@ -201,6 +230,39 @@ func (d *Discord) onMessageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	for _, u := range m.Mentions {
 		text = strings.ReplaceAll(text, "<@"+u.ID+">", "@"+u.Username)
 		text = strings.ReplaceAll(text, "<@!"+u.ID+">", "@"+u.Username)
+	}
+
+	// Collect @mentions. Discord only populates m.Mentions for the
+	// formal `<@USER_ID>` markup produced by the autocomplete picker;
+	// users on mobile or who skip the popup just type "@DisplayName"
+	// literally, which lands in m.Content untouched. Telegram/Slack
+	// already do a regex pass over text — match that here so the
+	// downstream gateway sees the bot mention either way.
+	var mentions []string
+	seen := make(map[string]struct{})
+	addMention := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		mentions = append(mentions, name)
+	}
+	for _, u := range m.Mentions {
+		addMention(u.Username)
+	}
+	for _, mm := range discordPlainMentionRe.FindAllStringSubmatch(text, -1) {
+		addMention(mm[1])
+	}
+	// If the bot was addressed by display name (GlobalName) rather than
+	// its lowercase Username, also inject the Username so the gateway's
+	// strict-equality match against BotUsername() resolves the bot.
+	if d.botGlobalName != "" {
+		if _, hit := seen[d.botGlobalName]; hit {
+			addMention(d.botUsername)
+		}
 	}
 
 	slog.Info("discord message received",

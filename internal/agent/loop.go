@@ -917,6 +917,30 @@ func renderClientParams(params map[string]any) string {
 		"```json\n" + string(blob) + "\n```"
 }
 
+// renderSender emits a per-turn system block naming who the message
+// came from on the originating IM channel. IM bridges (discord,
+// telegram, slack, ...) put the platform-side username in SenderName
+// and the platform user id in UserID — without this block the LLM only
+// sees the message text and can't tell idoubi from anyone else who
+// might be DMing the same bot. Returns "" for web chats and any other
+// caller that doesn't populate SenderName, so we don't waste tokens.
+func renderSender(msg bus.InboundMessage) string {
+	if msg.SenderName == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Current Sender\n\nThe latest user turn was sent by:\n")
+	fmt.Fprintf(&b, "- channel: %s\n", msg.Channel)
+	fmt.Fprintf(&b, "- username: %s\n", msg.SenderName)
+	if msg.UserID != "" {
+		fmt.Fprintf(&b, "- user_id: %s\n", msg.UserID)
+	}
+	if msg.PeerKind != "" {
+		fmt.Fprintf(&b, "- peer_kind: %s\n", msg.PeerKind)
+	}
+	return b.String()
+}
+
 // isPlanMode reports whether the inbound message asked for plan-only
 // output (no tool calls, just a numbered plan the user reviews before
 // authorizing real work). Truthy values: bool true, string "true"/"1",
@@ -1280,7 +1304,17 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// PhotoURL (single, used by IM bridges) or PhotoURLs (multi, used by
 	// the web chat upload path); flatten both into one content-parts
 	// slice so the provider sees `[text, image, image, …]`.
-	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	//
+	// IM senders get a `[SenderName]: text` prefix so future turns can
+	// tell whose message was whose from session history alone — matches
+	// what InjectGroupMessage does for group fan-out. routing.go's group
+	// mention path already pre-prefixes Text before queueing, so we skip
+	// when PeerKind=="group" to avoid double-wrapping.
+	userText := msg.Text
+	if msg.SenderName != "" && msg.PeerKind != "group" {
+		userText = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
+	}
+	userMsg := provider.Message{Role: "user", Content: userText}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
 		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
@@ -1291,8 +1325,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// produce `[{text: ""}, {image_url}, …]` which some upstreams
 		// reject as a content-less wire message.
 		var parts []provider.ContentPart
-		if msg.Text != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
+		if userText != "" {
+			parts = append(parts, provider.ContentPart{Type: "text", Text: userText})
 		}
 		for _, u := range imageURLs {
 			parts = append(parts, provider.ContentPart{
@@ -1316,8 +1350,11 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		slog.Info("context compacted", "agent", a.name, "log_file", compactResult.LogFile)
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+2)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+3)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if senderMsg := renderSender(msg); senderMsg != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
+	}
 	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
 	}
@@ -1829,8 +1866,14 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	systemPrompt := a.ctxBuilder.BuildSystemPrompt()
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
-	// Store raw user message — same multi-image flatten as HandleMessage.
-	userMsg := provider.Message{Role: "user", Content: msg.Text}
+	// Store raw user message — same multi-image flatten + IM sender
+	// prefixing as HandleMessage. See that copy for the rationale on
+	// why group PeerKind is skipped here.
+	userText := msg.Text
+	if msg.SenderName != "" && msg.PeerKind != "group" {
+		userText = fmt.Sprintf("[%s]: %s", msg.SenderName, msg.Text)
+	}
+	userMsg := provider.Message{Role: "user", Content: userText}
 	imageURLs := msg.PhotoURLs
 	if msg.PhotoURL != "" {
 		imageURLs = append([]string{msg.PhotoURL}, imageURLs...)
@@ -1841,8 +1884,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		// produce `[{text: ""}, {image_url}, …]` which some upstreams
 		// reject as a content-less wire message.
 		var parts []provider.ContentPart
-		if msg.Text != "" {
-			parts = append(parts, provider.ContentPart{Type: "text", Text: msg.Text})
+		if userText != "" {
+			parts = append(parts, provider.ContentPart{Type: "text", Text: userText})
 		}
 		for _, u := range imageURLs {
 			parts = append(parts, provider.ContentPart{
@@ -1863,8 +1906,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		sessionMsgs = compactResult.Messages
 	}
 
-	messages := make([]provider.Message, 0, len(sessionMsgs)+2)
+	messages := make([]provider.Message, 0, len(sessionMsgs)+3)
 	messages = append(messages, provider.Message{Role: "system", Content: systemPrompt})
+	if senderMsg := renderSender(msg); senderMsg != "" {
+		messages = append(messages, provider.Message{Role: "system", Content: senderMsg})
+	}
 	if paramsMsg := renderClientParams(msg.Params); paramsMsg != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: paramsMsg})
 	}
