@@ -136,8 +136,17 @@ func (e *E2BExecutor) recreate(ctx context.Context) error {
 	}
 	e.sandboxID = newEx.sandboxID
 	e.accessToken = newEx.accessToken
+	// Hydrate is mandatory for the same reason it is in Get() — it's
+	// the only step that makes /workspace writable to the exec user.
+	// If we just warn-log a failure here, the recreated sandbox is
+	// silently broken: agent calls succeed but every /workspace write
+	// fails with Permission denied, and the bytes get stranded in
+	// /tmp where they evaporate at the next eviction.
 	if err := e.Hydrate(ctx); err != nil {
-		slog.Warn("e2b hydrate after recreate failed", "sandboxID", e.sandboxID, "error", err)
+		return fmt.Errorf("hydrate after recreate (sandboxID=%s): %w", e.sandboxID, err)
+	}
+	if err := verifyWorkspaceWritable(ctx, e); err != nil {
+		return fmt.Errorf("recreated sandbox unusable (sandboxID=%s): %w", e.sandboxID, err)
 	}
 	return nil
 }
@@ -734,6 +743,29 @@ func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte,
 	return out2, nil
 }
 
+// verifyWorkspaceWritable runs a one-shot probe against /workspace as
+// the same `user` account agent exec runs under. It catches the
+// silent-failure mode where Hydrate appeared to succeed but the
+// underlying chown didn't actually take — empirically observed when
+// the e2b template ships /workspace owned by root and the chown step
+// is skipped or sudoless. The probe writes a single byte and removes
+// it; the touch+rm round-trip is the same operation pattern the agent
+// uses on its first /workspace write, so anything that would fail
+// there fails here too.
+func verifyWorkspaceWritable(ctx context.Context, ex *E2BExecutor) error {
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	const probeCmd = `touch /workspace/.fc-health && rm -f /workspace/.fc-health && echo ok`
+	out, err := ex.execOnce(probeCtx, probeCmd, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("/workspace probe: %w (out=%s)", err, strings.TrimSpace(out))
+	}
+	if !strings.Contains(out, "ok") {
+		return fmt.Errorf("/workspace not writable as exec user (out=%s)", strings.TrimSpace(out))
+	}
+	return nil
+}
+
 func (e *E2BExecutor) Close() error {
 	req, _ := http.NewRequest("DELETE",
 		fmt.Sprintf("%s/sandboxes/%s", e2bBaseURL, e.sandboxID), nil)
@@ -795,7 +827,20 @@ func (p *E2BExecutorPool) Get(ctx context.Context, agentID, projectID, sessionID
 	}
 	ex.SetHydrationSources(skillDirsForAgent(p.home, agentID), p.workspace, agentID, projectID, sessionID)
 	if err := ex.Hydrate(ctx); err != nil {
-		slog.Warn("e2b hydrate failed", "agent", agentID, "project", projectID, "session", sessionID, "error", err)
+		// Hydrate is what chowns /workspace to the non-root `user`
+		// account exec runs as; without it every agent write to
+		// /workspace gets Permission denied silently — see the
+		// reproducer in e2b_probe_diag_test.go. Used to be a WARN
+		// here; the sandbox would still get cached and every
+		// subsequent turn would surface as "agent wrote files but
+		// they vanished". Tear it down so the caller retries or
+		// fails loudly.
+		_ = ex.Close()
+		return nil, fmt.Errorf("e2b hydrate: %w", err)
+	}
+	if err := verifyWorkspaceWritable(ctx, ex); err != nil {
+		_ = ex.Close()
+		return nil, fmt.Errorf("e2b sandbox unusable: %w", err)
 	}
 	p.executors[key] = ex
 	return ex, nil
