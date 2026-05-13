@@ -280,6 +280,53 @@ file editor uses. Allowlisted filenames: `SOUL.md`, `IDENTITY.md`,
 | `agents files ls\|put\|get <name>` | Read / write the agent's system files |
 | `agents rm <name>` | Delete the agent record and its system files |
 
+### Manage API keys from the CLI (`fastclaw apikey …`)
+
+Issue and manage programmatic credentials for external integrations.
+
+#### Key types
+
+| type | Scope | Use case |
+|------|-------|----------|
+| `admin` | Full platform access, all agents | Admin automation, CI/CD |
+| `user` | Owner's agents; supports `X-Fastclaw-End-User` for app_user provisioning | SaaS proxy layer, multi-tenant apps |
+| `agent` | Explicit agent list only; cannot create agents | Bots, single-purpose integrations |
+
+#### Commands
+
+```bash
+# Create a key (token shown once — save immediately)
+fastclaw apikey create --name "my-key" --type user [--owner <user-id>]
+
+# List keys for a user (defaults to first super_admin)
+fastclaw apikey list [--owner <user-id>]
+
+# Delete a key
+fastclaw apikey delete --id <apikey-id>
+
+# Rotate a key (old token invalidated, new token shown once)
+fastclaw apikey rotate --id <apikey-id>
+```
+
+**Flags:**
+- `--name` (required): human-readable key name
+- `--type` (default `user`): `admin`, `user`, or `agent`
+- `--owner` (optional): owner user ID; defaults to first super_admin
+
+#### Multi-tenant app_user flow
+
+A `type=user` key combined with the `X-Fastclaw-End-User` header enables
+per-end-user data isolation without pre-registering users in FastClaw:
+
+```
+Authorization: Bearer <user-key-token>
+X-Fastclaw-End-User: <your-app-user-id>
+```
+
+FastClaw lazily mints a stable internal user for each unique
+`(api_key_id, external_id)` pair. Sessions, memory, and files are fully
+isolated per end-user.
+
 ### Docker
 ```bash
 cd deploy/docker && ./start.sh
