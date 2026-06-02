@@ -305,7 +305,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/line/webhook/{accountId}", s.handleLINEWebhook)
 
 	// Skills
-	mux.HandleFunc("GET /api/skills", s.handleListSkills)
+	mux.HandleFunc("GET /api/skills", auth(s.handleListSkills))
 	mux.HandleFunc("GET /api/skills/search", auth(s.handleSearchSkills))
 	mux.HandleFunc("GET /api/skills/{name}/readme", s.handleSkillReadme)
 	mux.HandleFunc("POST /api/skills/install", auth(s.handleInstallSkill))
