@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
 )
@@ -52,13 +53,8 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Agent != "" {
-		// Owner-only — Identity.CanAccessAgent is a deferred-true for
-		// session callers, so without an explicit owner check anyone
-		// could push a skill into anyone else's agent home dir.
-		if s.requireAgentOwner(w, r, req.Agent) == nil {
-			return
-		}
+	if !s.authorizeSkillInstallTarget(w, r, req.Agent) {
+		return
 	}
 	targetDir, err := resolveInstallTarget(r, req.Agent)
 	if err != nil {
@@ -110,8 +106,33 @@ func (s *Server) handleInstallSkill(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, resp)
 }
 
-// resolveInstallTarget picks the target directory for an install and enforces
-// the admin-only rule for global installs.
+// authorizeSkillInstallTarget enforces the mutation and target-scope rules
+// shared by registry installs and zip uploads.
+func (s *Server) authorizeSkillInstallTarget(w http.ResponseWriter, r *http.Request, agentID string) bool {
+	if !s.requireWritable(w, r) {
+		return false
+	}
+	if agentID != "" {
+		// Owner-only — Identity.CanAccessAgent is a deferred-true for
+		// session callers, so without an explicit owner check anyone
+		// could push a skill into anyone else's agent home dir.
+		return s.requireAgentOwner(w, r, agentID) != nil
+	}
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
+		return false
+	}
+	if !ident.CanAdminPlatform() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "platform admin required"})
+		return false
+	}
+	return true
+}
+
+// resolveInstallTarget picks the target directory for an install. Authorization
+// happens before this helper is called: agent installs are owner-only; global
+// installs are platform-admin-only.
 func resolveInstallTarget(r *http.Request, agentID string) (string, error) {
 	if agentID != "" {
 		// agents.id is globally unique, so the home dir doesn't need a
@@ -126,9 +147,6 @@ func resolveInstallTarget(r *http.Request, agentID string) (string, error) {
 		}
 		return dir, nil
 	}
-	// Global install — super_admin only. Caller has already been
-	// validated by the route's RequireSuperAdmin middleware when this
-	// path is reached for global installs.
 	home, err := config.HomeDir()
 	if err != nil {
 		return "", err
@@ -203,6 +221,11 @@ func runInstall(source, name, repo, targetDir string) (*skills.Result, error) {
 // doesn't auto-follow them but we also refuse to recreate them on disk.
 func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 	const maxUploadSize = 64 << 20 // 64 MiB
+	agentID := r.URL.Query().Get("agent")
+	if !s.authorizeSkillInstallTarget(w, r, agentID) {
+		return
+	}
+
 	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -219,13 +242,6 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID := r.URL.Query().Get("agent")
-	if agentID != "" {
-		// Owner-only — see comment on the JSON-install path above.
-		if s.requireAgentOwner(w, r, agentID) == nil {
-			return
-		}
-	}
 	targetDir, err := resolveInstallTarget(r, agentID)
 	if err != nil {
 		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": err.Error()})
