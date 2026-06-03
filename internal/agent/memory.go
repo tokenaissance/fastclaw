@@ -48,11 +48,13 @@ func NewMemory(workspace string) *Memory {
 	return &Memory{workspace: workspace}
 }
 
-// NewMemoryWithStoreForUser is the user-scoped constructor. userID must be
-// a real users.id resolved from auth.
+// NewMemoryWithStoreForUser is the user-scoped constructor. userID should be
+// a real users.id resolved from auth. We keep the Memory alive on empty input
+// so a bad request cannot crash the gateway; per-user store reads/writes then
+// fail closed until a caller rebinds via WithUserID.
 func NewMemoryWithStoreForUser(workspace string, st MemoryStore, userID, agentID string) *Memory {
 	if userID == "" {
-		panic("agent.NewMemoryWithStoreForUser: userID is required")
+		slog.Error("agent.NewMemoryWithStoreForUser: empty userID", "agent", agentID)
 	}
 	return &Memory{workspace: workspace, store: st, userID: userID, agentID: agentID}
 }
@@ -78,9 +80,8 @@ func (m *Memory) WithUserID(uid string) *Memory {
 }
 
 // ctx returns a context tagged with this Memory's user so SQL queries in
-// the store layer scope correctly. The store falls back to DefaultUserID
-// when no user is on the context, but going through here is explicit and
-// keeps callers from accidentally writing under "".
+// the store layer scope correctly. Empty userID yields an unscoped ctx;
+// store-backed methods guard that case separately and fail closed.
 func (m *Memory) ctx() context.Context {
 	if m.userID == "" {
 		return context.Background()
@@ -105,6 +106,9 @@ func (m *Memory) historyPath() string {
 // only fires on legacy single-user installs without a store.
 func (m *Memory) LoadMemory() string {
 	if m.store != nil {
+		if m.userID == "" {
+			return ""
+		}
 		content, err := m.store.GetMemory(m.ctx(), m.agentID, m.userID)
 		if err == nil {
 			return content
@@ -121,6 +125,9 @@ func (m *Memory) LoadMemory() string {
 // SaveMemory overwrites the long-term memory.
 func (m *Memory) SaveMemory(content string) error {
 	if m.store != nil {
+		if m.userID == "" {
+			return fmt.Errorf("agent.Memory.SaveMemory: userID required")
+		}
 		return m.store.SaveMemory(m.ctx(), m.agentID, m.userID, content)
 	}
 	os.MkdirAll(m.workspace, 0o755)
@@ -248,6 +255,9 @@ func (m *Memory) SaveUserFile(content string) error {
 		}
 	}
 	if m.store != nil {
+		if m.userID == "" {
+			return fmt.Errorf("agent.Memory.SaveUserFile: userID required")
+		}
 		return m.store.SaveWorkspaceFile(m.ctx(), m.agentID, m.userID, "USER.md", []byte(content))
 	}
 	os.MkdirAll(m.workspace, 0o755)
@@ -262,6 +272,9 @@ func (m *Memory) SaveUserFile(content string) error {
 // workspace copy to a chatter without their own row.
 func (m *Memory) LoadUserFile() string {
 	if m.store != nil {
+		if m.userID == "" {
+			return ""
+		}
 		data, err := m.store.GetWorkspaceFileExact(m.ctx(), m.agentID, m.userID, "USER.md")
 		if err == nil {
 			return string(data)
