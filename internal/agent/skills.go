@@ -20,14 +20,14 @@ import (
 
 // Skill represents a discovered skill.
 type Skill struct {
-	Name        string            // directory name
-	Layer       string            // "agent", "user", "managed", "bundled", "extra"
-	Content     string            // contents of SKILL.md (with {baseDir} replaced)
-	BaseDir     string            // absolute path to the skill directory
-	Description string            // from frontmatter
-	Metadata    *SkillMetadata    // parsed OpenClaw metadata
-	Gated       bool              // true if gating requirements not met
-	GateReason  string            // reason gating failed
+	Name        string         // directory name
+	Layer       string         // "agent", "user", "managed", "bundled", "extra"
+	Content     string         // optional inline SKILL.md content for always-loaded skills
+	BaseDir     string         // absolute path to the skill directory
+	Description string         // from frontmatter
+	Metadata    *SkillMetadata // parsed OpenClaw metadata
+	Gated       bool           // true if gating requirements not met
+	GateReason  string         // reason gating failed
 }
 
 // SkillFrontmatter represents the YAML frontmatter of a SKILL.md file.
@@ -68,12 +68,12 @@ func (m *SkillMetadata) Meta() *OpenClawMeta {
 
 // OpenClawMeta holds OpenClaw-specific metadata.
 type OpenClawMeta struct {
-	Emoji      string           `json:"emoji"`
-	Homepage   string           `json:"homepage"`
-	Always     bool             `json:"always"`
-	OS         []string         `json:"os"`
-	Requires   *SkillRequires   `json:"requires"`
-	PrimaryEnv string           `json:"primaryEnv"`
+	Emoji      string         `json:"emoji"`
+	Homepage   string         `json:"homepage"`
+	Always     bool           `json:"always"`
+	OS         []string       `json:"os"`
+	Requires   *SkillRequires `json:"requires"`
+	PrimaryEnv string         `json:"primaryEnv"`
 	// Env declares configurable environment variables this skill reads.
 	// Surfaced to the admin UI so operators get labeled inputs (with
 	// help text + secret masking) instead of having to grep main.py for
@@ -299,40 +299,64 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 }
 
 // BuildSkillsSummary returns the skill section of the system prompt.
-// All discovered skills are inlined in full — operators install exactly
-// the skill set they want for their product agent (no marketplace, no
-// lazy load), so the LLM gets the complete SKILL.md content and can
-// invoke each skill directly via exec.
+// Skills use progressive disclosure by default: keep the prompt's always-on
+// context to the small name + description catalog, and let the model call
+// load_skill when it needs the full SKILL.md instructions. Explicit
+// always-load skills remain inline for compatibility with skills that must be
+// present before the first tool call.
 func (sl *SkillsLoader) BuildSkillsSummary(skills []Skill) string {
 	if len(skills) == 0 {
 		return ""
 	}
 	var sb strings.Builder
 	sb.WriteString(skillsDirective)
-	// Quick-reference catalog (name + first-line description) BEFORE
-	// the inline `<skills>` block. The full SKILL.md content can be
-	// 100+ KB total; a tiny name-only index up front lets the model
-	// match "the user said 'use skill X'" against the catalog in one
-	// pass instead of scanning the whole inline section. Catches the
-	// "我手头没有 X" hallucination that showed up in group chats where
-	// attention got diluted by the group_chat block — by the time the
-	// model reached `<skill name="X">`, it had already decided X
-	// didn't exist. Sorted (same order as the inline blocks below)
-	// for diff-friendly logs.
-	sb.WriteString("\n\n<skill_catalog>\nPre-installed skills available to this agent (full SKILL.md content follows below). Treat any user mention of one of these names as a request to invoke that skill via exec:\n")
+	alwaysLoad := sl.alwaysLoadSet()
+	inline := make([]Skill, 0)
+
+	sb.WriteString("\n\n<skill_catalog>\nPre-installed skills available to this agent. Treat any user mention of one of these names as a request to use that skill. Call `load_skill` with the skill name before following its detailed instructions:\n")
 	for _, skill := range skills {
 		desc := firstSentence(skill.Description)
 		if desc == "" {
 			desc = "(no description)"
 		}
 		fmt.Fprintf(&sb, "- %s — %s\n", skill.Name, desc)
+		if alwaysLoad[skill.Name] || skillAlwaysLoads(skill) {
+			inline = append(inline, skill)
+		}
 	}
-	sb.WriteString("</skill_catalog>\n\n<skills>\n")
-	for _, skill := range skills {
-		fmt.Fprintf(&sb, "<skill name=%q layer=%q>\n%s\n</skill>\n", skill.Name, skill.Layer, skill.Content)
+	sb.WriteString("</skill_catalog>")
+
+	if len(inline) > 0 {
+		sb.WriteString("\n\n<always_loaded_skills>\n")
+		for _, skill := range inline {
+			content := skill.Content
+			if content == "" {
+				content = loadSkillContent(skill.BaseDir)
+			}
+			fmt.Fprintf(&sb, "<skill name=%q layer=%q>\n%s\n</skill>\n", skill.Name, skill.Layer, content)
+		}
+		sb.WriteString("</always_loaded_skills>")
 	}
-	sb.WriteString("</skills>")
 	return sb.String()
+}
+
+func (sl *SkillsLoader) alwaysLoadSet() map[string]bool {
+	out := make(map[string]bool, len(sl.skillsCfg.AlwaysLoad)+len(sl.globalCfg.AlwaysLoad))
+	for _, name := range sl.skillsCfg.AlwaysLoad {
+		if name != "" {
+			out[name] = true
+		}
+	}
+	for _, name := range sl.globalCfg.AlwaysLoad {
+		if name != "" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+func skillAlwaysLoads(skill Skill) bool {
+	return skill.Metadata != nil && skill.Metadata.Meta() != nil && skill.Metadata.Meta().Always
 }
 
 // firstSentence returns the first sentence-ish chunk of s — used for
@@ -366,13 +390,13 @@ func firstSentence(s string) string {
 // rationalization ("this is one-shot, skip the ladder") that produced
 // reflexive `pip install` calls for tasks a published skill would handle.
 const skillsDirective = `<skill_usage_rules>
-The skills listed below are pre-installed for this agent. Each skill's full SKILL.md is included inline. To invoke one, run its main script via the exec tool and pass arguments on stdin as JSON; the SKILL.md describes args and return shape.
+The skills listed below are pre-installed for this agent. Only the catalog is always in context. Before using a skill, call the "load_skill" tool with its name to load the full SKILL.md instructions, then follow those instructions exactly. If an always-loaded skill is included inline below, you may use those inline instructions directly.
 
 The sandbox image already has: python3 + pip, uv + uvx, node + npm + npx, the camoufox-cli anti-detect browser (run as ` + "`camoufox-cli open <url>`" + ` then ` + "`camoufox-cli snapshot -i`" + ` for refs; Camoufox/Firefox is pre-downloaded), git, curl, requests / pillow / beautifulsoup4 / lxml. DO NOT reinstall any of these — wasted tool calls and timeouts. If you see "command not found", check the spelling before reaching for npm/pip.
 
 HTML preview: when the user asks to see / preview a web artifact, write the final HTML into the workspace and tell them the filename — the chat UI auto-renders .html files in a sandboxed iframe (CSS, JS, images, fonts work; cross-origin fetch from null origin does not). For source projects with a package.json (React, Vue, Vite, Next, …), run the project's build first (` + "`pnpm i && pnpm build`" + ` or the documented command) and point at the resulting ` + "`dist/index.html`" + ` (or equivalent). Live dev servers (` + "`vite dev`" + `, ` + "`next dev`" + `, ` + "`npm run dev`" + `) are NOT reachable from the browser — do not start them; they will hang and waste turns.
 
-When the inline skills don't cover what the user asked for, follow this order BEFORE running any package install (pip / npm / apt / brew / cargo / gem / go install / …) via exec:
+When the listed skills don't cover what the user asked for, follow this order BEFORE running any package install (pip / npm / apt / brew / cargo / gem / go install / …) via exec:
 
 1. If a "find-skills" skill is listed above, run it FIRST to search the open skill ecosystem. If a credible match exists, surface it and offer to install it instead of installing the package yourself.
 2. If no published skill fits, use "skill-creator" (if listed) to scaffold a new skill under skills/<name>/, then invoke it. Prefer this over inline scripts whenever the user might ask the same kind of thing again.
@@ -485,7 +509,9 @@ func userSkillsRootDir(userID string) string {
 }
 
 // discoverSkillsEnhanced scans a directory for skill subdirectories with SKILL.md,
-// parses frontmatter, applies gating, and replaces {baseDir}.
+// parses frontmatter, and applies gating. It deliberately does not keep the
+// full SKILL.md body in memory for default skills; the model loads that body
+// on demand through load_skill.
 func discoverSkillsEnhanced(dir string, layer string) map[string]Skill {
 	result := make(map[string]Skill)
 
@@ -505,7 +531,6 @@ func discoverSkillsEnhanced(dir string, layer string) map[string]Skill {
 			continue
 		}
 
-		content := strings.TrimSpace(string(data))
 		absDir, _ := filepath.Abs(skillDir)
 
 		// Parse frontmatter
@@ -519,9 +544,6 @@ func discoverSkillsEnhanced(dir string, layer string) map[string]Skill {
 			}
 		}
 
-		// Replace {baseDir} with the skill's absolute directory path
-		content = strings.ReplaceAll(content, "{baseDir}", absDir)
-
 		// Apply gating
 		gated, gateReason := checkGating(meta)
 
@@ -534,7 +556,6 @@ func discoverSkillsEnhanced(dir string, layer string) map[string]Skill {
 		result[name] = Skill{
 			Name:        name,
 			Layer:       layer,
-			Content:     content,
 			BaseDir:     absDir,
 			Description: desc,
 			Metadata:    meta,
@@ -544,6 +565,15 @@ func discoverSkillsEnhanced(dir string, layer string) map[string]Skill {
 	}
 
 	return result
+}
+
+func loadSkillContent(skillDir string) string {
+	data, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	if err != nil {
+		return ""
+	}
+	content := strings.TrimSpace(string(data))
+	return strings.ReplaceAll(content, "{baseDir}", skillDir)
 }
 
 func mapKeys(m map[string]map[string]config.SkillEntryCfg) []string {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type loadSkillArgs struct {
@@ -13,7 +14,7 @@ type loadSkillArgs struct {
 }
 
 // RegisterLoadSkill registers the load_skill tool that reads full SKILL.md content.
-func RegisterLoadSkill(r *Registry, homeDir, agentDir, teamDir string) {
+func RegisterLoadSkill(r *Registry, skillDirs []string) {
 	r.Register("load_skill", "Load the full content of a skill by name. Use this when you need detailed instructions for a specific skill.", map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -23,19 +24,10 @@ func RegisterLoadSkill(r *Registry, homeDir, agentDir, teamDir string) {
 			},
 		},
 		"required": []string{"name"},
-	}, makeLoadSkill(homeDir, agentDir, teamDir))
+	}, makeLoadSkill(skillDirs))
 }
 
-func makeLoadSkill(homeDir, agentDir, teamDir string) ToolFunc {
-	// Directories to search in priority order (agent > team > global)
-	searchDirs := []string{
-		filepath.Join(agentDir, "skills"),
-	}
-	if teamDir != "" {
-		searchDirs = append(searchDirs, filepath.Join(teamDir, "skills"))
-	}
-	searchDirs = append(searchDirs, filepath.Join(homeDir, "skills"))
-
+func makeLoadSkill(skillDirs []string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args loadSkillArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -47,11 +39,16 @@ func makeLoadSkill(homeDir, agentDir, teamDir string) ToolFunc {
 		}
 
 		// Search through directories in priority order
-		for _, dir := range searchDirs {
+		for _, dir := range skillDirs {
+			if dir == "" {
+				continue
+			}
 			skillPath := filepath.Join(dir, args.Name, "SKILL.md")
 			data, err := os.ReadFile(skillPath)
 			if err == nil {
-				return wrapSkillContentInternal(args.Name, string(data)), nil
+				skillDir, _ := filepath.Abs(filepath.Join(dir, args.Name))
+				content := strings.ReplaceAll(string(data), "{baseDir}", skillDir)
+				return wrapSkillContentInternal(args.Name, content), nil
 			}
 		}
 
