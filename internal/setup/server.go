@@ -353,7 +353,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("PUT /api/agents/{id}/cron/{jobId}", auth(s.handleToggleAgentCronJob))
 
 	// Tasks
-	mux.HandleFunc("GET /api/tasks", auth(s.handleListTasks))
+	mux.HandleFunc("GET /api/tasks", admin(s.handleListTasks))
 
 	// Apikeys (per-user, with agent multi-select).
 	mux.HandleFunc("GET /api/apikeys", auth(s.handleListAPIKeys))
