@@ -6,9 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { getStatus, getChatHistory, getChatSessions, sendChatStream, type AgentInfo, type ChatHistoryMessage, type ChatStreamEvent } from "@/lib/api";
 import { useAgentName } from "@/hooks/use-agent-name";
 import { Bot, Send, Copy, Check, SquarePen, MessageSquare, Wrench, ChevronDown, ChevronRight } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { ExternalAnchor } from "@/components/markdown-link";
+import { ChatMarkdown } from "@/components/chat-markdown";
 
 interface ChatMessage {
   id: string;
@@ -452,11 +450,7 @@ export default function ChatPage() {
                           : "bg-muted rounded-bl-md"
                       }`}
                     >
-                      <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>
-                          {msg.content}
-                        </ReactMarkdown>
-                      </div>
+                      <ChatMarkdown text={msg.content} />
                     </div>
                     <div
                       className={`flex items-center gap-1.5 mt-1 ${
@@ -559,11 +553,7 @@ function ToolCallGroup({ msg }: { msg: ChatMessage }) {
         {/* Content before tools */}
         {msg.content && (
           <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
-            <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none prose-p:my-1">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>
-                {msg.content}
-              </ReactMarkdown>
-            </div>
+            <ChatMarkdown text={msg.content} />
           </div>
         )}
         {/* Collapsed tool group summary */}

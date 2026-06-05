@@ -5,46 +5,10 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { fileUrl, getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
 import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal } from "lucide-react";
 import Link from "next/link";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkBreaks from "remark-breaks";
-import { ExternalAnchor } from "@/components/markdown-link";
-
-// react-markdown's default urlTransform strips any protocol not in the
-// safe-list (http, https, mailto, ircs, xmpp) — including `data:`. We want
-// inline base64 images to render, so fall through to the default for
-// everything else.
-function urlTransform(url: string, key: string): string {
-  if (key === "src" && url.startsWith("data:image/")) return url;
-  return defaultUrlTransform(url);
-}
-
-// makeUrlTransform builds a urlTransform that also remaps sandbox
-// `/workspace/<name>` paths to the authenticated file API URL for the
-// active agent. Skills that produce a file return a sandbox path like
-// /workspace/img_xxx.png; the LLM puts that in `![](/workspace/...)`.
-// The docker bind-mount is session-scoped (host:
-// ~/.fastagent/workspaces/<agent>/sessions/<sid>/ ↔ container:/workspace),
-// so the workspace.Store sees the file at sessions/<sid>/<name>. We
-// must prepend that prefix or the file API resolves against the agent
-// root and 404s.
-function makeUrlTransform(agentId: string, sessionId: string) {
-  return (url: string, key: string): string => {
-    if (key === "src" && url.startsWith("data:image/")) return url;
-    // Remap sandbox `/workspace/<name>` for both image embeds (`src`) and
-    // hyperlinks (`href`). Without href handling the model's "点击预览"
-    // link points at the app origin instead of the file API and 404s.
-    if ((key === "src" || key === "href") && url.startsWith("/workspace/")) {
-      const rel = url.slice("/workspace/".length);
-      const scoped = sessionId ? `sessions/${sessionId}/${rel}` : rel;
-      return fileUrl(agentId, scoped, false);
-    }
-    return defaultUrlTransform(url);
-  };
-}
+import { ChatMarkdown } from "@/components/chat-markdown";
 
 // Split a string on `![alt](data:image/...;base64,...)` markdown.
 //
@@ -87,9 +51,9 @@ function splitDataImages(s: string): Array<{ type: "text"; text: string } | { ty
 // `(`, or with very long base64 destinations that some commonmark parsers
 // give up on. Rather than fight the markdown parser, extract
 // `![alt](data:image/...)` (tolerating whitespace/newlines between `]`
-// and `(`) and render those as native <img>, letting ReactMarkdown
+// and `(`) and render those as native <img>, letting ChatMarkdown
 // handle everything else. Returns null if no data-URL images are present
-// so the caller can fall through to a plain ReactMarkdown render.
+// so the caller can fall through to a plain ChatMarkdown render.
 // When `suppressAllInlineImages` is true, every data-URL image inside
 // the content is dropped (used when the bubble has tool-output images
 // already attached at the top — the model often re-embeds an image in
@@ -102,7 +66,8 @@ function renderContentWithDataImages(
   content: string,
   surfacedSrcs?: ReadonlySet<string>,
   suppressAllInlineImages?: boolean,
-  urlTransformFn?: (url: string, key: string) => string,
+  agentId?: string,
+  sessionId?: string,
 ): React.ReactNode | null {
   const parts = splitDataImages(content);
   if (!parts.some((p) => p.type === "image")) return null;
@@ -116,11 +81,7 @@ function renderContentWithDataImages(
             <img key={i} src={p.src} alt={p.alt} className="rounded-lg max-w-full h-auto my-2" />
           );
         }
-        return (
-          <ReactMarkdown key={i} remarkPlugins={[remarkGfm, remarkBreaks]} urlTransform={urlTransformFn} components={{ a: ExternalAnchor }}>
-            {p.text}
-          </ReactMarkdown>
-        );
+        return <ChatMarkdown key={i} text={p.text} agentId={agentId} sessionId={sessionId} />;
       })}
     </>
   );
@@ -193,25 +154,6 @@ interface ChatMessage {
     channel?: string;
   };
 }
-
-// Tailwind class string applied to every chat-bubble markdown wrapper
-// (assistant + user). The unmodified `prose prose-sm` defaults render
-// markdown like a long-form article — H1/H2 are huge, headings have
-// big top/bottom margins, and tables / code blocks introduce extra
-// vertical padding. In a conversational bubble those defaults make a
-// reply with `## Section` look out of proportion next to surrounding
-// plain text. This override clamps headings to slightly-larger-than-
-// body sizes, tightens table cell padding, and shrinks the gap above
-// each block element so the bubble reads as one coherent message.
-const CHAT_PROSE_CLASS =
-  "text-[15px] leading-relaxed prose prose-sm max-w-none dark:prose-invert " +
-  "prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 " +
-  "prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1 " +
-  "prose-h1:text-[16px] prose-h2:text-[15.5px] prose-h3:text-[15px] " +
-  "prose-h4:text-[15px] prose-h5:text-[15px] prose-h6:text-[15px] " +
-  "prose-table:my-2 prose-table:text-[14px] " +
-  "prose-th:py-1 prose-th:px-2 prose-td:py-1 prose-td:px-2 " +
-  "prose-hr:my-3";
 
 // Wire token the agent emits to request a multi-bubble reply — must
 // match channels.SplitMessageMarker in internal/channels/base.go. On
@@ -2156,18 +2098,15 @@ export function ChatScreen() {
                         </div>
                       )}
                       {msg.content && (
-                        <div className={CHAT_PROSE_CLASS}>
-                          {renderContentWithDataImages(
-                            msg.content,
-                            surfacedSrcs,
-                            (attachedImages.get(msg.id)?.length ?? 0) > 0,
-                            makeUrlTransform(selectedAgent, sessionId),
-                          ) ?? (
-                            <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} urlTransform={makeUrlTransform(selectedAgent, sessionId)} components={{ a: ExternalAnchor }}>
-                              {msg.content}
-                            </ReactMarkdown>
-                          )}
-                        </div>
+                        renderContentWithDataImages(
+                          msg.content,
+                          surfacedSrcs,
+                          (attachedImages.get(msg.id)?.length ?? 0) > 0,
+                          selectedAgent,
+                          sessionId,
+                        ) ?? (
+                          <ChatMarkdown text={msg.content} agentId={selectedAgent} sessionId={sessionId} />
+                        )
                       )}
                       {msg.role === "agent" && msg.metadata?.iterationCapReached && (
                         <div className="mt-2 flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200">
@@ -2714,13 +2653,9 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
       {/* Content before tools */}
       {msg.content && (
         <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
-          <div className={CHAT_PROSE_CLASS}>
-            {renderContentWithDataImages(msg.content, surfacedSrcs, false, makeUrlTransform(agentId, sessionId)) ?? (
-              <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} urlTransform={makeUrlTransform(agentId, sessionId)} components={{ a: ExternalAnchor }}>
-                {msg.content}
-              </ReactMarkdown>
-            )}
-          </div>
+          {renderContentWithDataImages(msg.content, surfacedSrcs, false, agentId, sessionId) ?? (
+            <ChatMarkdown text={msg.content} agentId={agentId} sessionId={sessionId} />
+          )}
         </div>
       )}
       {/* Collapsed tool group summary */}
@@ -2962,25 +2897,9 @@ function formatBytes(n?: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-// fileUrl / zipUrl deliberately do NOT carry the bearer token in the
-// query string anymore. The web UI runs same-origin and the auth
-// middleware reads the session cookie set at login, so <img src>,
-// <a href>, and direct downloads authenticate via cookie just like
-// every other API call. Pre-fix we appended `?token=<bearer>` so
-// programmatic-bearer-only clients could render images, but that
-// token is a full API credential — putting it in URLs leaked it
-// via Referer (when a workspace HTML file linked to a 3rd-party
-// site), browser history, and reverse-proxy access logs. The
-// server still accepts `?token=` for back-compat with CLI scripts
-// that build their own URLs; the frontend just stops feeding it.
-function fileUrl(agentId: string, path: string, download: boolean): string {
-  const encoded = path.split("/").map(encodeURIComponent).join("/");
-  const params = new URLSearchParams();
-  if (download) params.set("download", "1");
-  const qs = params.toString();
-  return `/api/agents/${agentId}/files/${encoded}${qs ? "?" + qs : ""}`;
-}
-
+// zipUrl carries NO bearer token — same cookie-auth rationale as fileUrl
+// (see lib/api): a token in the URL leaks a full API credential via Referer,
+// history, and proxy logs.
 function zipUrl(agentId: string, sessionId: string, projectId?: string): string {
   const params = new URLSearchParams();
   // projectId wins when both are present — same precedence as the
@@ -3395,9 +3314,7 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
             error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
             : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
             : (
-              <div className="prose prose-sm dark:prose-invert max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ExternalAnchor }}>{text}</ReactMarkdown>
-              </div>
+              <ChatMarkdown text={text} />
             )
           )}
           {preview === "text" && (

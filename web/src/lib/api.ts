@@ -1852,3 +1852,16 @@ export async function getAgentTokenUsage(
   );
   return res.json();
 }
+
+// Build a same-origin URL to a workspace file. Deliberately carries NO bearer
+// token: the web UI is same-origin and the auth middleware reads the session
+// cookie, so <img src>, <a href>, and direct downloads authenticate by cookie
+// like every other API call. (Putting `?token=<bearer>` in a URL leaked a full
+// API credential via Referer, browser history, and reverse-proxy access logs.)
+export function fileUrl(agentId: string, path: string, download = false): string {
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  const params = new URLSearchParams();
+  if (download) params.set("download", "1");
+  const qs = params.toString();
+  return `/api/agents/${agentId}/files/${encoded}${qs ? "?" + qs : ""}`;
+}
