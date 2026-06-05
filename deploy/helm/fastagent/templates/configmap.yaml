@@ -9,6 +9,11 @@ data:
   FASTAGENT_BIND: "all"
   FASTAGENT_STORAGE_TYPE: "postgres"
   FASTAGENT_STORAGE_AUTO_MIGRATE: "true"
+  {{- with .Values.timezone }}
+  ## Server default timezone — last fallback after chatter / agent /
+  ## system prefs.
+  TZ: {{ . | quote }}
+  {{- end }}
 
   ## Object store
   FASTAGENT_OBJECT_STORE_TYPE: {{ .Values.objectStore.type | quote }}

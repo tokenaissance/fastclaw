@@ -68,10 +68,14 @@ func (hb *Heartbeat) tick(ctx context.Context) {
 	// 1. Check HEARTBEAT.md for tasks
 	tasks := hb.loadHeartbeatTasks()
 	if tasks != "" {
-		now := time.Now()
+		// Agent-default timezone (chatterUID="" → agent/system prefs,
+		// else server local): heartbeat has no chatter, but HEARTBEAT.md
+		// conditions are written in the operator's wall clock, not the
+		// pod's (UTC on hosted deployments).
+		now := time.Now().In(hb.agent.chatterLocation(""))
 		heartbeatMsg := fmt.Sprintf(
 			"[Heartbeat — %s]\nCurrent tasks from HEARTBEAT.md:\n%s\n\nReview these tasks and take action on any that need attention based on the current date/time.",
-			now.Format("2006-01-02 15:04:05"),
+			now.Format("2006-01-02 15:04:05 -0700"),
 			tasks,
 		)
 

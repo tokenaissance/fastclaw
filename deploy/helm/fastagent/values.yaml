@@ -12,6 +12,12 @@ image:
   # imagePullSecrets:
   #   - name: regcred
 
+## Server default timezone (IANA name) — the LAST fallback in the chain
+## chatter pref → agent default → system default → TZ. Empty = container
+## default (UTC): agents whose chatters never set a timezone then see UTC
+## wall clocks and get UTC-fired schedules.
+timezone: "Asia/Shanghai"
+
 ## Gateway
 gateway:
   replicas: 2

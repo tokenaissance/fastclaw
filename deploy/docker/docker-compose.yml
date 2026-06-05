@@ -26,6 +26,11 @@ services:
     volumes:
       - fastagent-data:/data/.fastagent
     environment:
+      # Server default timezone (IANA name). This is the LAST fallback in
+      # the chain chatter pref → agent default → system default → TZ —
+      # without it the container runs UTC and agents whose chatters never
+      # set a timezone get UTC wall clocks and UTC-fired schedules.
+      TZ: "${TZ:-Asia/Shanghai}"
       # FASTAGENT_HOME — sqlite db path + sandbox root + skill cache live here
       FASTAGENT_HOME: /data/.fastagent
       # Bind to all interfaces so the host port mapping works

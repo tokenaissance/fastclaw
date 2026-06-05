@@ -222,6 +222,11 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// at execute time (bindSession stamps them per-turn) so the
 		// fired message routes back to the originating chat.
 		tools.RegisterCronTools(ag.registry, m.opts.dataStore, m.uid, rc.ID)
+		// set_timezone persists the chatter's IANA timezone into scope
+		// prefs — the same rows the system-prompt date line and cron
+		// scheduling resolve through. Needs the relational store, so it
+		// rides the same guard as cron.
+		tools.RegisterTimezoneTool(ag.registry, m.opts.dataStore)
 		// /goal feature: token-accounting hook + update_goal tool, all
 		// keyed on the agent's owner (set above by SetOwnerUserID).
 		// Same dataStore guard as cron because both features need the
@@ -232,6 +237,10 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// on an in-memory counter that restart-clears) can hit the
 		// store directly without re-plumbing through Manager.
 		ag.dataStore = m.opts.dataStore
+		// Date line in the chatter's timezone — needs dataStore for the
+		// scope-prefs lookup, hence wired here and re-applied by
+		// ReloadWorkspaceFiles after every ctxBuilder rebuild.
+		ag.ctxBuilder.SetTimezoneResolver(ag.chatterLocation)
 	}
 	// Stamp agentID even when no workspaceStore is wired (single-user
 	// local mode), so usage metering can record per-agent rollups.

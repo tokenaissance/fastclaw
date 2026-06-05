@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
@@ -42,7 +43,7 @@ func RegisterCronTools(r *Registry, st store.Store, userID, agentID string) {
 				},
 				"schedule": map[string]interface{}{
 					"type":        "string",
-					"description": "When to fire. For type='cron': a 5-field cron expression like '0 9 * * *'. For type='interval': a duration like '5m' / '30m' / '2h'. For type='once': an ISO-8601 datetime in UTC like '2026-05-02T15:56:52'.",
+					"description": "When to fire, in the CHATTER'S local timezone (the timezone shown on the 'Current date/time' line of your system prompt) — write '每天早上 9 点' as '0 9 * * *' directly, do NOT convert to UTC. For type='cron': a 5-field cron expression like '0 9 * * *'. For type='interval': a duration like '5m' / '30m' / '2h'. For type='once': an ISO-8601 datetime like '2026-05-02T15:56:52' (no offset = chatter's local time; an explicit offset like '+08:00' or 'Z' is honored as written).",
 				},
 				"message": map[string]interface{}{
 					"type":        "string",
@@ -104,6 +105,15 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 		channel := r.MessageChannel()
 		chatID := r.MessageChatID()
 
+		// The chatter's effective timezone governs how the schedule is
+		// read: zone-less 'once' datetimes and cron wall-clock fields
+		// both mean "their local time" (the same zone the system
+		// prompt's date line is rendered in), not the server's. The
+		// resolved name is frozen onto the row so the scheduler keeps
+		// evaluating recurrences in it even if the chatter later moves.
+		tzName := scope.Timezone(ctx, st, r.ChatterUserID(), agentID)
+		loc := scope.LoadLocationOrLocal(tzName)
+
 		id := generateUUID()
 		now := time.Now()
 
@@ -113,9 +123,10 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 		case "once":
 			t, err := time.Parse(time.RFC3339, args.Schedule)
 			if err != nil {
-				t, err = time.Parse("2006-01-02T15:04:05", args.Schedule)
+				// No explicit offset — interpret in the chatter's zone.
+				t, err = time.ParseInLocation("2006-01-02T15:04:05", args.Schedule, loc)
 				if err != nil {
-					return "", fmt.Errorf("once schedule must be ISO datetime (e.g. 2026-05-06T15:30:00Z), got: %q", args.Schedule)
+					return "", fmt.Errorf("once schedule must be ISO datetime (e.g. 2026-05-06T15:30:00), got: %q", args.Schedule)
 				}
 			}
 			if t.Before(now) {
@@ -130,8 +141,10 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 			}
 			nextRun = now.Add(dur)
 		default:
-			// cron expression — fire on next scheduler tick
-			nextRun = now
+			// cron expression — first occurrence in the chatter's zone.
+			// (Previously nextRun=now, which fired the job once
+			// immediately on creation — a spurious reminder.)
+			nextRun = cron.NextOccurrenceIn(args.Schedule, now, loc)
 		}
 
 		job := &store.CronJobRecord{
@@ -143,7 +156,10 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 			Message:   args.Message,
 			Channel:   channel,
 			ChatID:    chatID,
-			Timezone:  "UTC",
+			// "" = server-local; the scheduler's LocationOf maps it
+			// the same way LoadLocationOrLocal did above, so creation
+			// and recurrence agree.
+			Timezone:  tzName,
 			Enabled:   true,
 			NextRun:   &nextRun,
 			CreatedAt: now,
@@ -156,7 +172,15 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 		// Wake the scheduler to pick up this new job
 		cron.NotifyJobCreated()
 
-		return fmt.Sprintf("Cron job created successfully.\nID: %s\nName: %s\nSchedule: %s\nType: %s", id, args.Name, args.Schedule, jobType), nil
+		// Echo the effective timezone + first fire so the model can
+		// confirm the local-time interpretation to the user ("好的，
+		// 北京时间每天 9 点") instead of guessing.
+		tzShown := tzName
+		if tzShown == "" {
+			tzShown = loc.String() + " (server default)"
+		}
+		return fmt.Sprintf("Cron job created successfully.\nID: %s\nName: %s\nSchedule: %s\nType: %s\nTimezone: %s\nFirst fire: %s",
+			id, args.Name, args.Schedule, jobType, tzShown, nextRun.In(loc).Format("2006-01-02 15:04:05 -0700")), nil
 	}
 }
 

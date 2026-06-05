@@ -302,6 +302,18 @@ func (r *Registry) SetChatterUserID(uid string) {
 	r.chatterUserID = uid
 }
 
+// ChatterUserID returns the per-turn chatter set by SetChatterUserID,
+// falling back to the UserSpace owner when no per-turn override is in
+// effect (single-user / legacy case). Tools that persist per-person
+// state (set_timezone, cron jobs) use this so the row keys on the
+// actual participant, not the channel binder.
+func (r *Registry) ChatterUserID() string {
+	if r.chatterUserID != "" {
+		return r.chatterUserID
+	}
+	return r.userID
+}
+
 // SetAgentOwnerUserID records the agent's owning user_id (agent.user_id
 // in the DB). Identity-file writes (SOUL.md / IDENTITY.md / BOOTSTRAP.md
 // / AGENTS.md / TOOLS.md / HEARTBEAT.md / agent.json) route here, so

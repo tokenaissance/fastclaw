@@ -43,6 +43,7 @@ func (a *cronStoreAdapter) GetDueCronJobs(ctx context.Context, now time.Time) ([
 			Channel:     r.Channel,
 			ChatID:      r.ChatID,
 			AccountID:   r.AccountID,
+			Timezone:    r.Timezone,
 		})
 	}
 	return out, nil

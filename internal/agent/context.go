@@ -189,6 +189,12 @@ type ContextBuilder struct {
 	store   MemoryStore
 	userID  string
 	agentID string
+	// tzResolver maps a chatterUID to their effective *time.Location
+	// (chatter pref → agent default → system default, resolved through
+	// scope prefs). Wired by the manager when a relational store is
+	// available; nil (or a nil return) falls back to server-local time,
+	// which preserves the legacy single-tenant behavior.
+	tzResolver func(chatterUID string) *time.Location
 }
 
 // ctx returns a context tagged with this builder's user, used when reading
@@ -233,6 +239,26 @@ func (cb *ContextBuilder) SetDisplayName(n string) { cb.displayName = n }
 
 // resolvedPromptMode returns the active mode with empty/unknown values
 // normalized to PromptModeAgent so callers can switch on the result.
+// SetTimezoneResolver wires the chatterUID → *time.Location lookup used
+// to render the prompt's date line (and runtime context) in the
+// chatter's local time. Re-apply after rebuilding the ContextBuilder
+// (ReloadWorkspaceFiles), like the other Set* state.
+func (cb *ContextBuilder) SetTimezoneResolver(f func(chatterUID string) *time.Location) {
+	cb.tzResolver = f
+}
+
+// chatterLocation resolves the timezone to render times in for a given
+// chatter. Falls back to server-local when no resolver is wired or it
+// has nothing for this chatter.
+func (cb *ContextBuilder) chatterLocation(chatterUID string) *time.Location {
+	if cb.tzResolver != nil {
+		if loc := cb.tzResolver(chatterUID); loc != nil {
+			return loc
+		}
+	}
+	return time.Local
+}
+
 func (cb *ContextBuilder) resolvedPromptMode() string {
 	switch cb.promptMode {
 	case config.PromptModeChatbot, config.PromptModeCustomize:
@@ -285,9 +311,17 @@ func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Mem
 	// which then often runs in parallel with a web_search whose
 	// query was built from the model's stale year. Putting now() in
 	// the prompt removes the dependency at the root.
-	now := time.Now()
+	//
+	// Rendered in the CHATTER's timezone (tzResolver), not the
+	// server's: a hosted pod runs UTC while the person typing is in
+	// 东八区, and a SOUL.md instruction to "use UTC+8" reliably loses
+	// to a clock value labeled "Use this". Pre-converting here means
+	// the model never does timezone arithmetic — different chatters of
+	// the same agent each see their own wall clock.
+	loc := cb.chatterLocation(chatterUID)
+	now := time.Now().In(loc)
 	wd := now.Weekday().String()
-	dateLine := fmt.Sprintf("Current date/time: %s (%s, %s). Use this — do NOT call `date` to learn what day it is.",
+	dateLine := fmt.Sprintf("Current date/time: %s (%s, %s — the chatter's local timezone). Use this — do NOT call `date` to learn what day it is.",
 		now.Format("2006-01-02 15:04:05 -0700"), wd, now.Location().String())
 
 	switch mode {
@@ -357,7 +391,9 @@ MEMORY.md — pick the right file):
 - Chatter tells you their **name** / nickname / what to call them → ` + bt + `USER.md` + bt + `
 - Chatter tells you their **role / job / background** → ` + bt + `USER.md` + bt + `
 - Chatter tells you their **preferences** (language, tone, style) → ` + bt + `USER.md` + bt + `
-- Chatter tells you their **location / timezone** → ` + bt + `USER.md` + bt + `
+- Chatter tells you their **location / timezone** → call ` + bt + `set_timezone` + bt + `
+  (if available — it switches your clock and their scheduled tasks to
+  their local time; a USER.md note alone does NOT), then note it in ` + bt + `USER.md` + bt + ` too
 - A decision you made together that matters next time → ` + bt + `MEMORY.md` + bt + `
 - A recurring topic / ongoing project / shared context → ` + bt + `MEMORY.md` + bt + `
 - Chatter explicitly says "remember that X" (not about who they are) → ` + bt + `MEMORY.md` + bt + `
@@ -840,7 +876,9 @@ You have the ability to update workspace files to maintain knowledge over time:
 Use the write_file tool to update these files when appropriate. Keep entries concise and useful.
 
 # Scheduling Time-Bound Tasks
-When the user asks you to do something at a specific moment, after a delay, or on a recurring schedule (e.g. "5 分钟后提醒我", "每天 9 点", "every Monday morning"), call the create_cron_job tool. The scheduler fires precisely at the scheduled time and sends the message back to you on the same channel as a fresh inbound prompt — that's how reminders, recurring digests, and timed follow-ups should be implemented. NEVER write timed reminders into HEARTBEAT.md: that file is reviewed only on a coarse heartbeat tick and is wrong for any short-fuse or precise-timing request.`)
+When the user asks you to do something at a specific moment, after a delay, or on a recurring schedule (e.g. "5 分钟后提醒我", "每天 9 点", "every Monday morning"), call the create_cron_job tool. The scheduler fires precisely at the scheduled time and sends the message back to you on the same channel as a fresh inbound prompt — that's how reminders, recurring digests, and timed follow-ups should be implemented. NEVER write timed reminders into HEARTBEAT.md: that file is reviewed only on a coarse heartbeat tick and is wrong for any short-fuse or precise-timing request.
+
+Schedules are interpreted in the CHATTER'S local timezone — the same one your "Current date/time" line above is rendered in. Write "每天 9 点" as '0 9 * * *' directly; do NOT convert to UTC. If the chatter mentions being in a different timezone or city, call set_timezone first so both your clock and their schedules follow it.`)
 	}
 
 	return strings.Join(parts, "\n\n---\n\n")

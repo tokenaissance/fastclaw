@@ -83,6 +83,10 @@ type StoreJob struct {
 	Channel     string
 	ChatID      string
 	AccountID   string
+	// Timezone is the IANA zone the schedule is interpreted in —
+	// captured from the chatter at creation time. Legacy rows carry
+	// "UTC" (the old hardcoded value); empty means server-local.
+	Timezone string
 }
 
 // globalNotify wakes the DB-mode scheduler when a cron tool creates or
@@ -306,7 +310,7 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 				_ = s.store.UpdateCronJobRun(ctx, j.ID, now, now.Add(dur))
 			}
 		case "cron":
-			_ = s.store.UpdateCronJobRun(ctx, j.ID, now, nextCronOccurrence(j.Schedule, now))
+			_ = s.store.UpdateCronJobRun(ctx, j.ID, now, NextOccurrenceIn(j.Schedule, now, LocationOf(j.Timezone)))
 		default:
 			_ = s.store.UpdateCronJobRun(ctx, j.ID, now, now.Add(time.Hour))
 		}
@@ -491,13 +495,42 @@ func (s *Scheduler) startJobGoroutines() {
 }
 
 // nextCronOccurrence finds the next time matching a 5-field cron
-// expression after the given time. Scans up to 48 hours ahead.
+// expression after the given time, evaluated in server-local time.
+// Kept for callers/tests that predate per-job timezones.
 func nextCronOccurrence(schedule string, after time.Time) time.Time {
+	return NextOccurrenceIn(schedule, after, time.Local)
+}
+
+// LocationOf resolves a job's stored timezone name to a *time.Location.
+// Empty (pre-timezone rows / no chatter preference) and unknown names
+// fall back to server-local — for legacy "UTC" rows that loads UTC,
+// matching the behavior they were created under. Never returns nil.
+func LocationOf(name string) *time.Location {
+	if name == "" {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		slog.Warn("cron: unknown timezone on job, using server-local", "timezone", name)
+		return time.Local
+	}
+	return loc
+}
+
+// NextOccurrenceIn finds the next instant matching a 5-field cron
+// expression after the given time, with the expression's wall-clock
+// fields (minute/hour/day/month/weekday) read in loc — "0 9 * * *"
+// stored with Asia/Shanghai fires at 09:00 Beijing time regardless of
+// the server's TZ. Scans up to 48 hours ahead.
+func NextOccurrenceIn(schedule string, after time.Time, loc *time.Location) time.Time {
 	fields := strings.Fields(schedule)
 	if len(fields) != 5 {
 		return after.Add(time.Hour)
 	}
-	t := after.Truncate(time.Minute).Add(time.Minute)
+	if loc == nil {
+		loc = time.Local
+	}
+	t := after.In(loc).Truncate(time.Minute).Add(time.Minute)
 	limit := after.Add(48 * time.Hour)
 	for t.Before(limit) {
 		if cronMatch(fields, t) {

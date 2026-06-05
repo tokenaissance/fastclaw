@@ -21,6 +21,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/privacy"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
@@ -2997,6 +2998,9 @@ var chatbotBuiltinAllowlist = []string{
 	"tts",
 	"write_file",
 	"edit_file",
+	// set_timezone keeps "their local time" right for chat (greetings,
+	// "晚安" timing) — chatbots need it as much as full agents do.
+	"set_timezone",
 }
 
 // builtinAllowForMode returns the built-in tool name allowlist for the
@@ -3017,6 +3021,21 @@ func builtinAllowForMode(mode string) []string {
 // WorkspacePath returns the agent's working directory for user-facing files.
 func (a *Agent) WorkspacePath() string {
 	return a.workspacePath
+}
+
+// chatterLocation resolves the effective timezone for a chatter via
+// scope prefs (chatter pref → agent default → system default). Server-
+// local when no relational store is wired or nothing is configured —
+// the legacy single-tenant behavior. Passed to the ContextBuilder as
+// the tzResolver so the system prompt's date line renders in the
+// chatter's wall clock; the cron tool runs the same resolution at
+// job-creation time.
+func (a *Agent) chatterLocation(chatterUID string) *time.Location {
+	if a.dataStore == nil {
+		return time.Local
+	}
+	tz := scope.Timezone(context.Background(), a.dataStore, chatterUID, a.agentID)
+	return scope.LoadLocationOrLocal(tz)
 }
 
 // UpdateConfig updates the agent's runtime config (model, temperature, etc.)
@@ -3142,6 +3161,12 @@ func (a *Agent) ReloadWorkspaceFiles() {
 		a.ctxBuilder.store = a.memoryStore
 		a.ctxBuilder.agentID = a.name
 		a.ctxBuilder.userID = a.ownerUserID
+	}
+	// Chatter-timezone date line — same re-apply rule as the Store
+	// wiring above: the rebuilt ContextBuilder starts with a nil
+	// resolver and would silently fall back to server-local time.
+	if a.dataStore != nil {
+		a.ctxBuilder.SetTimezoneResolver(a.chatterLocation)
 	}
 }
 

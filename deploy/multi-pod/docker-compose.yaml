@@ -79,6 +79,9 @@ services:
       dockerfile: Dockerfile
     environment:
       # Same config on both pods — that's the whole point of "stateless".
+      # TZ included so cross-pod runs exercise the server-default
+      # timezone fallback the same way single-pod deploys do.
+      TZ: Asia/Shanghai
       FASTAGENT_STORAGE_TYPE: postgres
       FASTAGENT_STORAGE_DSN: postgres://fastagent:fastagent@db:5432/fastagent?sslmode=disable
       FASTAGENT_MODE: cloud
@@ -104,6 +107,7 @@ services:
       context: ../..
       dockerfile: Dockerfile
     environment:
+      TZ: Asia/Shanghai
       FASTAGENT_STORAGE_TYPE: postgres
       FASTAGENT_STORAGE_DSN: postgres://fastagent:fastagent@db:5432/fastagent?sslmode=disable
       FASTAGENT_MODE: cloud
