@@ -3,9 +3,12 @@ package gateway
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
 // readUserScopeAgentDefaults must distinguish "user has no row" from
@@ -64,5 +67,75 @@ func TestReadUserScopeAgentDefaults(t *testing.T) {
 	}
 	if got.MaxTokens != 8192 {
 		t.Fatalf("other fields should still parse, got MaxTokens=%d", got.MaxTokens)
+	}
+}
+
+func TestResolveChatterSeparatesIMSendersForRegularOwner(t *testing.T) {
+	db, err := store.NewDBStore("sqlite", "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	ctx := context.Background()
+
+	owner := &store.UserRecord{
+		ID:           "u_owner",
+		Username:     "owner",
+		Email:        "owner@example.com",
+		PasswordHash: "x",
+		Role:         users.RoleUser,
+		Status:       users.StatusActive,
+		AgentQuota:   -1,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := db.CreateUser(ctx, owner); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	accts, err := users.NewAccounts(db)
+	if err != nil {
+		t.Fatalf("accounts: %v", err)
+	}
+	g := &Gateway{store: db, accounts: accts}
+
+	alice := bus.InboundMessage{
+		Channel:    "telegram",
+		AccountID:  "bot-a",
+		UserID:     "111",
+		SenderName: "Alice",
+	}
+	bob := bus.InboundMessage{
+		Channel:    "telegram",
+		AccountID:  "bot-a",
+		UserID:     "222",
+		SenderName: "Bob",
+	}
+	aliceID := g.resolveChatter(ctx, owner.ID, alice)
+	if aliceID == "" || aliceID == owner.ID {
+		t.Fatalf("alice should resolve to app_user, got %q", aliceID)
+	}
+	bobID := g.resolveChatter(ctx, owner.ID, bob)
+	if bobID == "" || bobID == owner.ID {
+		t.Fatalf("bob should resolve to app_user, got %q", bobID)
+	}
+	if aliceID == bobID {
+		t.Fatalf("different Telegram senders resolved to same user: %s", aliceID)
+	}
+	if again := g.resolveChatter(ctx, owner.ID, alice); again != aliceID {
+		t.Fatalf("same sender should resolve stably: got %q want %q", again, aliceID)
+	}
+
+	aliceAccount, err := db.GetUser(ctx, aliceID)
+	if err != nil {
+		t.Fatalf("get alice app_user: %v", err)
+	}
+	if aliceAccount.APIKeyID != "owner:"+owner.ID {
+		t.Fatalf("unexpected namespace: %q", aliceAccount.APIKeyID)
+	}
+	if aliceAccount.ExternalID != "telegram:bot-a:111" {
+		t.Fatalf("unexpected external id: %q", aliceAccount.ExternalID)
 	}
 }

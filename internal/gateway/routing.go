@@ -26,9 +26,10 @@ func chatKey(channel, accountID, chatID string) string {
 
 // processInbound consumes the message bus and routes each message to the
 // correct user's agent. Identity resolution order:
-//   1. msg.OwnerUserID set explicitly (cron, webhook with user_id)
-//   2. lookup the receiving channel's row in the channels table — its
-//      (scope, scope_id) tells us which user owns this conversation
+//  1. msg.OwnerUserID set explicitly (cron, webhook with user_id)
+//  2. lookup the receiving channel's row in the channels table — its
+//     (scope, scope_id) tells us which user owns this conversation
+//
 // If neither yields a user_id the message is dropped, never silently
 // routed to a default identity.
 func (g *Gateway) processInbound(ctx context.Context) {
@@ -135,16 +136,11 @@ func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessag
 //   - empty UserID → "" (caller leaves the slot empty; chatterUserID will
 //     fall back to the agent owner).
 //   - already `u_`-prefixed → assume it's already canonical, leave alone.
-//   - channel owner is an app_user (has apikey_id) → lazy-mint an
-//     app_user keyed by (apikey_id, "<channel>:<msg.UserID>") so every
-//     distinct IM sender gets a stable u_xxx of their own. Channel name
-//     is prefixed so a numeric id colliding across two channel types
-//     (telegram chat 123, line user 123) can't merge into one row.
-//   - channel owner is a regular user (no apikey_id) → treat as a single-
-//     user dogfood/personal bot and pin the chatter to the owner. This
-//     preserves the simple "I registered my own wechat to my own agent"
-//     flow without forcing the owner to start over with a fresh empty
-//     USER.md every conversation.
+//   - lazy-mint an app_user keyed by the owner namespace plus
+//     "<channel>:<accountID>:<msg.UserID>" so every distinct IM sender gets
+//     a stable u_xxx of their own. Channel and account are prefixed so the
+//     same numeric id on two platforms or two bots cannot merge into one
+//     USER.md / MEMORY.md row.
 //
 // Returns "" when the original msg.UserID should be kept unchanged
 // (empty input, already canonical, or any error path) — the caller treats
@@ -165,16 +161,15 @@ func (g *Gateway) resolveChatter(ctx context.Context, ownerID string, msg bus.In
 			"owner", ownerID, "channel", msg.Channel, "error", err)
 		return ""
 	}
-	if owner.APIKeyID == "" {
-		// Personal / dogfood install — every IM sender is treated as the
-		// channel owner so the operator's own USER.md applies.
-		return ownerID
+	namespace := owner.APIKeyID
+	if namespace == "" {
+		namespace = "owner:" + ownerID
 	}
-	extID := msg.Channel + ":" + msg.UserID
-	acc, err := g.accounts.EnsureAppUser(ctx, owner.APIKeyID, extID, "")
+	extID := msg.Channel + ":" + msg.AccountID + ":" + msg.UserID
+	acc, err := g.accounts.EnsureAppUser(ctx, namespace, extID, msg.SenderName)
 	if err != nil {
 		slog.Warn("resolveChatter: EnsureAppUser failed",
-			"apikey", owner.APIKeyID, "ext", extID, "error", err)
+			"owner", ownerID, "namespace", namespace, "ext", extID, "error", err)
 		return ""
 	}
 	return acc.ID
