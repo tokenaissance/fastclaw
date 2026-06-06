@@ -68,11 +68,11 @@ type Feishu struct {
 
 	httpClient *http.Client
 
-	mu          sync.Mutex
-	accessTok   string
+	mu           sync.Mutex
+	accessTok    string
 	accessTokExp time.Time
-	botName     string // populated on Start via /bot/v3/info; best-effort
-	botOpenID   string
+	botName      string // populated on Start via /bot/v3/info; best-effort
+	botOpenID    string
 }
 
 // NewFeishu creates a Feishu adapter. verificationToken matches the value
@@ -214,9 +214,9 @@ func (l *Feishu) SendTyping(_ string) error { return nil }
 // FeishuEventEnvelope is the v2 schema Feishu uses for event subscriptions.
 // We match on header.event_type == "im.message.receive_v1".
 type FeishuEventEnvelope struct {
-	Schema string         `json:"schema"`
+	Schema string            `json:"schema"`
 	Header FeishuEventHeader `json:"header"`
-	Event  json.RawMessage `json:"event"`
+	Event  json.RawMessage   `json:"event"`
 
 	// v1 url_verification challenge fields (also surfaced here for the
 	// initial subscribe-time handshake; Feishu's v2 events use
@@ -246,14 +246,18 @@ type feishuMessageEvent struct {
 		SenderType string `json:"sender_type"`
 	} `json:"sender"`
 	Message struct {
-		MessageID    string `json:"message_id"`
-		RootID       string `json:"root_id,omitempty"`
-		ParentID     string `json:"parent_id,omitempty"`
-		CreateTime   string `json:"create_time"`
-		ChatID       string `json:"chat_id"`
-		ChatType     string `json:"chat_type"` // "p2p" | "group"
-		MessageType  string `json:"message_type"`
-		Content      string `json:"content"`
+		MessageID   string `json:"message_id"`
+		RootID      string `json:"root_id,omitempty"`
+		ParentID    string `json:"parent_id,omitempty"`
+		CreateTime  string `json:"create_time"`
+		ChatID      string `json:"chat_id"`
+		ChatType    string `json:"chat_type"` // "p2p" | "group"
+		MessageType string `json:"message_type"`
+		Content     string `json:"content"`
+		Mentions    []struct {
+			Key  string `json:"key,omitempty"`
+			Name string `json:"name,omitempty"`
+		} `json:"mentions,omitempty"`
 	} `json:"message"`
 }
 
@@ -403,7 +407,8 @@ func (l *Feishu) dispatchInbound(ev feishuMessageEvent) {
 		"account", l.accountID,
 		"from", ev.Sender.SenderID.OpenID,
 		"chat", ev.Message.ChatID,
-		"len", len(content.Text))
+		"len", len(content.Text),
+		"mentions", feishuMentionNames(ev))
 
 	l.bus.Inbound <- bus.InboundMessage{
 		Channel:   "feishu",
@@ -413,7 +418,31 @@ func (l *Feishu) dispatchInbound(ev feishuMessageEvent) {
 		MessageID: msgID,
 		Text:      content.Text,
 		PeerKind:  peerKind,
+		Mentions:  feishuMentionNames(ev),
 	}
+}
+
+func feishuMentionNames(ev feishuMessageEvent) []string {
+	if len(ev.Message.Mentions) == 0 {
+		return nil
+	}
+	mentions := make([]string, 0, len(ev.Message.Mentions))
+	seen := make(map[string]struct{}, len(ev.Message.Mentions))
+	for _, m := range ev.Message.Mentions {
+		name := m.Name
+		if name == "" {
+			name = m.Key
+		}
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		mentions = append(mentions, name)
+	}
+	return mentions
 }
 
 // --- HTTP plumbing ---

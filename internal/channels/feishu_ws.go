@@ -65,6 +65,18 @@ func sdkEventToInternal(ev *larkim.P2MessageReceiveV1) feishuMessageEvent {
 		out.Message.ChatType = derefStr(m.ChatType)
 		out.Message.MessageType = derefStr(m.MessageType)
 		out.Message.Content = derefStr(m.Content)
+		for _, mention := range m.Mentions {
+			if mention == nil {
+				continue
+			}
+			out.Message.Mentions = append(out.Message.Mentions, struct {
+				Key  string `json:"key,omitempty"`
+				Name string `json:"name,omitempty"`
+			}{
+				Key:  derefStr(mention.Key),
+				Name: derefStr(mention.Name),
+			})
+		}
 	}
 	return out
 }
