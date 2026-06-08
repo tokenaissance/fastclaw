@@ -135,19 +135,17 @@ func (l *Feishu) Send(chatID, text string) error {
 	return l.SendMessage(bus.OutboundMessage{ChatID: chatID, Text: text})
 }
 
-// SendMessage delivers Text + (optionally) MediaItems. Feishu's text
-// shape is `{"text":"..."}` JSON-stringified inside the `content`
-// field. MediaItems are deferred — sending images requires uploading
-// to Feishu's CDN first via /im/v1/images, which is a separate dance
-// we don't need until users complain.
+// SendMessage delivers Text + (optionally) MediaItems. Text is always sent
+// as a JSON 2.0 interactive card so Feishu can render standard Markdown
+// directly. Plain text is kept only as an error fallback when the card API
+// fails. MediaItems are deferred — sending images requires uploading to
+// Feishu's CDN first via /im/v1/images, which is a separate dance we don't
+// need until users complain.
 func (l *Feishu) SendMessage(msg bus.OutboundMessage) error {
 	if msg.Text == "" && len(msg.MediaItems) == 0 {
 		return nil
 	}
 	if msg.Text == "" {
-		// MediaItems-only without an upload path — skip rather than
-		// posting an empty bubble. Logged so it's debuggable if it
-		// ever happens in practice.
 		slog.Debug("feishu send: media-only message dropped (image upload not implemented)",
 			"account", l.accountID, "chat", msg.ChatID)
 		return nil
@@ -156,19 +154,64 @@ func (l *Feishu) SendMessage(msg bus.OutboundMessage) error {
 	if err != nil {
 		return fmt.Errorf("feishu token: %w", err)
 	}
-	// Feishu's `msg_type:"text"` path renders no markdown — GFM tables
-	// would arrive as literal `|cell|cell|` rows. Collapse them to
-	// label:value or middle-dot lines first.
-	text := FlattenMarkdownTables(msg.Text)
+	if err := l.sendMarkdownCard(tok, msg.ChatID, msg.Text); err != nil {
+		slog.Warn("feishu card send failed, falling back to plain text",
+			"account", l.accountID, "chat", msg.ChatID, "error", err)
+		return l.sendPlainTextMessage(tok, msg.ChatID, msg.Text)
+	}
+	return nil
+}
+
+// sendMarkdownCard sends a JSON 2.0 interactive card with one markdown body.
+func (l *Feishu) sendMarkdownCard(tok, chatID, text string) error {
+	cardJSON, err := buildFeishuMarkdownCardJSON(text)
+	if err != nil {
+		return err
+	}
+	payload := map[string]string{
+		"receive_id": chatID,
+		"content":    string(cardJSON),
+		"msg_type":   "interactive",
+	}
+	return l.doSend(tok, payload)
+}
+
+func buildFeishuMarkdownCardJSON(text string) ([]byte, error) {
+	card := map[string]any{
+		"schema": "2.0",
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{
+					"tag":     "markdown",
+					"content": text,
+				},
+			},
+		},
+	}
+	cardJSON, err := json.Marshal(card)
+	if err != nil {
+		return nil, fmt.Errorf("feishu marshal card: %w", err)
+	}
+	return cardJSON, nil
+}
+
+// sendPlainTextMessage sends a plain text message. Used only as a fallback
+// if the card API fails.
+func (l *Feishu) sendPlainTextMessage(tok, chatID, text string) error {
 	contentJSON, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return fmt.Errorf("feishu marshal content: %w", err)
 	}
 	payload := map[string]string{
-		"receive_id": msg.ChatID,
+		"receive_id": chatID,
 		"content":    string(contentJSON),
 		"msg_type":   "text",
 	}
+	return l.doSend(tok, payload)
+}
+
+// doSend posts a message payload to Feishu's send API.
+func (l *Feishu) doSend(tok string, payload map[string]string) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("feishu marshal: %w", err)

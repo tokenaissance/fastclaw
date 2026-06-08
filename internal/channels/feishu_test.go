@@ -58,3 +58,42 @@ func TestFeishuWebhookPreservesMentions(t *testing.T) {
 		t.Fatal("timed out waiting for inbound message")
 	}
 }
+
+func TestBuildFeishuMarkdownCardJSON(t *testing.T) {
+	in := "**hello**\n\n| A | B |\n|---|---|\n| 1 | 2 |"
+	got, err := buildFeishuMarkdownCardJSON(in)
+	if err != nil {
+		t.Fatalf("buildFeishuMarkdownCardJSON: %v", err)
+	}
+
+	var card map[string]any
+	if err := json.Unmarshal(got, &card); err != nil {
+		t.Fatalf("unmarshal card json: %v", err)
+	}
+	if card["schema"] != "2.0" {
+		t.Fatalf("schema = %v, want 2.0", card["schema"])
+	}
+
+	body, ok := card["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("body = %#v, want object", card["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok {
+		t.Fatalf("body.elements = %#v, want array", body["elements"])
+	}
+	if len(elements) != 1 {
+		t.Fatalf("len(body.elements) = %d, want 1", len(elements))
+	}
+
+	element, ok := elements[0].(map[string]any)
+	if !ok {
+		t.Fatalf("element = %#v, want object", elements[0])
+	}
+	if element["tag"] != "markdown" {
+		t.Fatalf("element.tag = %v, want markdown", element["tag"])
+	}
+	if element["content"] != in {
+		t.Fatalf("element.content = %q, want %q", element["content"], in)
+	}
+}
