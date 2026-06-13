@@ -5,8 +5,8 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { fileUrl, getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal } from "lucide-react";
+import { fileUrl, getAgent, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
 
@@ -956,6 +956,17 @@ export function ChatScreen() {
       setMessages([]);
     }
   }, [urlSessionId, sessionId]);
+
+  // Clicking "New chat" lands on the bare /chat/ route (no session, no
+  // project) — close the workspace panel so the previous chat's file
+  // tree doesn't linger over a fresh, empty conversation. Keyed on the
+  // URL ids, not on every render, so the user can still re-open the
+  // panel manually within the new chat without it snapping shut.
+  useEffect(() => {
+    if (!urlSessionId && !urlProjectId) {
+      setFilesSheetOpen(false);
+    }
+  }, [urlSessionId, urlProjectId]);
 
   // Keep the local sessionTitle in sync with the session list. Unknown
   // sessions (brand-new, not saved yet) fall back to empty so the header
@@ -1957,8 +1968,8 @@ export function ChatScreen() {
                     .map((r) => (
                       <FilesPanel
                         key={`files-${r.id}`}
-                        agentId={selectedAgent}
                         files={r.files!}
+                        onOpen={() => setFilesSheetOpen(true)}
                       />
                     ));
                   if (rounds.length === 1) {
@@ -2161,7 +2172,7 @@ export function ChatScreen() {
                       )}
                     </div>
                     {msg.files && msg.files.length > 0 && (
-                      <FilesPanel agentId={selectedAgent} files={msg.files} />
+                      <FilesPanel files={msg.files} onOpen={() => setFilesSheetOpen(true)} />
                     )}
                     <div
                       className={`flex items-center gap-1.5 mt-1 ${
@@ -2911,55 +2922,27 @@ function zipUrl(agentId: string, sessionId: string, projectId?: string): string 
   return `/api/agents/${agentId}/files.zip${qs ? "?" + qs : ""}`;
 }
 
-function FilesPanel({ agentId, files }: { agentId: string; files: ProducedFile[] }) {
-  const [previewing, setPreviewing] = useState<ProducedFile | null>(null);
+// FilesPanel no longer inlines the produced-file list into the message
+// bubble — a long workspace (skills/, .DS_Store, lockfiles, …) buried the
+// reply. Instead it surfaces a single "Open files" affordance that opens
+// the WorkspacePanel side sheet, which already handles the tree, preview,
+// and download. onOpen is wired to setFilesSheetOpen(true) at the call site.
+function FilesPanel({ files, onOpen }: { files: ProducedFile[]; onOpen: () => void }) {
   return (
-    <>
-      <div className="mt-2 space-y-1.5 max-w-[85%]">
-        <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70">
-          Your files
-        </p>
-        <div className="flex flex-col gap-1.5">
-          {files.map((f) => {
-            const { icon: Icon } = fileKind(f.path);
-            const basename = f.path.split("/").pop() || f.path;
-            const downloadUrl = fileUrl(agentId, f.path, true);
-            return (
-              <div
-                key={f.path}
-                className="group flex items-center gap-2.5 rounded-lg border border-border bg-card/50 px-3 py-2 hover:bg-card/80 transition-colors"
-              >
-                <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                <button
-                  onClick={() => setPreviewing(f)}
-                  className="flex-1 min-w-0 text-left"
-                  title="Open preview"
-                >
-                  <div className="text-sm font-medium text-foreground truncate">{basename}</div>
-                  {f.size !== undefined && (
-                    <div className="text-[11px] text-muted-foreground/70">{formatBytes(f.size)}</div>
-                  )}
-                </button>
-                <a
-                  href={downloadUrl}
-                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
-                  title="Download"
-                >
-                  <Download className="h-4 w-4" />
-                </a>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      {previewing && (
-        <FilePreview
-          agentId={agentId}
-          file={previewing}
-          onClose={() => setPreviewing(null)}
-        />
-      )}
-    </>
+    <div className="mt-2 max-w-[85%]">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="group inline-flex items-center gap-2 rounded-lg border border-border bg-card/50 px-3 py-2 hover:bg-card/80 transition-colors"
+        title="Open workspace files"
+      >
+        <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0 group-hover:text-foreground transition-colors" />
+        <span className="text-sm font-medium text-foreground">Open files</span>
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground/80 tabular-nums">
+          {files.length}
+        </span>
+      </button>
+    </div>
   );
 }
 
@@ -2980,6 +2963,175 @@ const FILES_PANEL_KEY = "chat:filesPanelWidth";
 // The agent's shared files (SKILL.md / main.py / templates) are
 // excluded by the backend's scope filter so they can't leak into
 // either view and confuse "what did this conversation produce".
+// --- Workspace directory tree ---
+
+type FileTreeNode = {
+  name: string;
+  path: string; // full workspace-relative path (files) or the folder path (dirs)
+  isDir: boolean;
+  size?: number;
+  children: FileTreeNode[];
+};
+
+// buildFileTree turns the flat file list into a nested tree. stripPrefix (e.g.
+// "sessions/<sid>/") is removed for the tree STRUCTURE so the session/project
+// folder is the implicit root — but file leaves keep their FULL path, which the
+// preview/download URLs need. Folders are synthesized from the remaining
+// segments; their `path` is the relative path (a stable, unique toggle key).
+function buildFileTree(files: WorkspaceFile[], stripPrefix: string): FileTreeNode[] {
+  const root: FileTreeNode = { name: "", path: "", isDir: true, children: [] };
+  for (const f of files) {
+    const rel = stripPrefix && f.path.startsWith(stripPrefix)
+      ? f.path.slice(stripPrefix.length)
+      : f.path;
+    const parts = rel.split("/").filter(Boolean);
+    if (parts.length === 0) continue;
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const isLeaf = i === parts.length - 1;
+      const name = parts[i];
+      let child = node.children.find((c) => c.name === name && c.isDir === !isLeaf);
+      if (!child) {
+        child = isLeaf
+          ? { name, path: f.path, isDir: false, size: f.size, children: [] }
+          : { name, path: parts.slice(0, i + 1).join("/"), isDir: true, children: [] };
+        node.children.push(child);
+      }
+      node = child;
+    }
+  }
+  sortFileTree(root.children);
+  return root.children;
+}
+
+function sortFileTree(nodes: FileTreeNode[]) {
+  nodes.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1; // folders before files
+    return a.name.localeCompare(b.name);
+  });
+  for (const n of nodes) if (n.isDir) sortFileTree(n.children);
+}
+
+function FileTreeView({
+  files,
+  rootPrefix,
+  selectedPath,
+  onSelect,
+}: {
+  files: WorkspaceFile[];
+  rootPrefix: string;
+  selectedPath?: string;
+  onSelect: (f: ProducedFile) => void;
+}) {
+  const tree = useMemo(() => buildFileTree(files, rootPrefix), [files, rootPrefix]);
+  // Default collapsed: only the top level shows; the user expands folders as
+  // needed. Expansion state keys on stable relative paths, so it survives
+  // refreshes.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const toggle = useCallback((path: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+  return (
+    <div className="text-sm">
+      {tree.map((n) => (
+        <FileTreeRow
+          key={n.path}
+          node={n}
+          depth={0}
+          expanded={expanded}
+          toggle={toggle}
+          selectedPath={selectedPath}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
+function FileTreeRow({
+  node,
+  depth,
+  expanded,
+  toggle,
+  selectedPath,
+  onSelect,
+}: {
+  node: FileTreeNode;
+  depth: number;
+  expanded: Set<string>;
+  toggle: (p: string) => void;
+  selectedPath?: string;
+  onSelect: (f: ProducedFile) => void;
+}) {
+  const pad = { paddingLeft: 8 + depth * 14 };
+  if (node.isDir) {
+    const open = expanded.has(node.path);
+    return (
+      <>
+        <button
+          onClick={() => toggle(node.path)}
+          style={pad}
+          className="flex w-full items-center gap-1.5 py-1 pr-2 rounded-md text-left hover:bg-muted/40"
+        >
+          {open ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="truncate text-foreground">{node.name}</span>
+        </button>
+        {open &&
+          node.children.map((c) => (
+            <FileTreeRow
+              key={c.path}
+              node={c}
+              depth={depth + 1}
+              expanded={expanded}
+              toggle={toggle}
+              selectedPath={selectedPath}
+              onSelect={onSelect}
+            />
+          ))}
+      </>
+    );
+  }
+  const { icon: Icon } = fileKind(node.path);
+  const active = selectedPath === node.path;
+  return (
+    <button
+      onClick={() => onSelect({ path: node.path, size: node.size })}
+      style={pad}
+      className={`flex w-full items-center gap-1.5 py-1 pr-2 rounded-md text-left ${active ? "bg-muted" : "hover:bg-muted/40"}`}
+      title={node.path}
+    >
+      <span className="w-3.5 shrink-0" />
+      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <span className="truncate text-foreground">{node.name}</span>
+    </button>
+  );
+}
+
+// langForPath maps a file extension to a Shiki language id so the code
+// preview can syntax-highlight via the markdown code-fence renderer.
+function langForPath(path: string): string {
+  const ext = path.toLowerCase().split(".").pop() || "";
+  const map: Record<string, string> = {
+    ts: "ts", tsx: "tsx", js: "js", jsx: "jsx", mjs: "js", cjs: "js",
+    json: "json", css: "css", scss: "scss", html: "html", htm: "html",
+    py: "python", go: "go", rs: "rust", rb: "ruby", java: "java",
+    c: "c", cpp: "cpp", h: "c", sh: "bash", bash: "bash", zsh: "bash",
+    yaml: "yaml", yml: "yaml", toml: "toml", xml: "xml", sql: "sql",
+    md: "markdown", markdown: "markdown",
+  };
+  return map[ext] || "text";
+}
+
 function WorkspacePanel({
   agentId,
   sessionId,
@@ -2994,6 +3146,8 @@ function WorkspacePanel({
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState<ProducedFile | null>(null);
+  // Live dev-server preview for this chat scope (from start_app_preview).
+  const [appPreview, setAppPreview] = useState<ScopePreview>({ status: "none" });
   // Self-hosted-only "open in Finder" affordance. We learn the deploy
   // mode from /api/me on mount; it doesn't change at runtime, so one
   // fetch per panel instance is enough. Hosted deployments leave this
@@ -3085,6 +3239,10 @@ function WorkspacePanel({
         .filter((f) => !isSystemFile(f.path))
         .sort((a, b) => (b.modTime || 0) - (a.modTime || 0));
       setFiles(cleaned);
+      // Best-effort: is there a live app preview for this scope?
+      getScopePreview(agentId, projectId ? undefined : sessionId, projectId)
+        .then(setAppPreview)
+        .catch(() => setAppPreview({ status: "none" }));
     } finally {
       setLoading(false);
     }
@@ -3117,6 +3275,30 @@ function WorkspacePanel({
             Workspace
           </div>
           <div className="flex items-center gap-1">
+            {/* Live app preview entry — opens the running dev server from
+                start_app_preview in a new tab. Only shown when there's a
+                runtime for this chat scope. */}
+            {appPreview.status === "running" && appPreview.previewUrl && (
+              <a
+                href={appPreview.previewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                title={`Open live preview: ${appPreview.previewUrl}`}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                Preview
+              </a>
+            )}
+            {(appPreview.status === "starting" || appPreview.status === "scaffolding") && (
+              <span
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground"
+                title="Preview is starting…"
+              >
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                Starting…
+              </span>
+            )}
             <a
               href={
                 files.length > 0
@@ -3173,43 +3355,12 @@ function WorkspacePanel({
                 : "No files in this session yet."}
             </p>
           ) : (
-            <div className="flex flex-col">
-              <div className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70 border-b">
-                <span>Name</span>
-                <span>Modified</span>
-                <span>Size</span>
-              </div>
-              {files.map((f) => {
-                const { icon: Icon } = fileKind(f.path);
-                const basename = f.path.split("/").pop() || f.path;
-                const downloadUrl = fileUrl(agentId, f.path, true);
-                return (
-                  <div
-                    key={f.path}
-                    className="group grid grid-cols-[1fr_auto_auto] items-center gap-3 px-3 py-2 hover:bg-muted/40 rounded-md transition-colors"
-                  >
-                    <button
-                      onClick={() => setPreviewing({ path: f.path, size: f.size })}
-                      className="flex items-center gap-2 min-w-0 text-left"
-                      title="Open preview"
-                    >
-                      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <span className="text-sm text-foreground truncate">{basename}</span>
-                    </button>
-                    <span className="text-[11px] text-muted-foreground/70 whitespace-nowrap">
-                      {formatRelativeTime(f.modTime)}
-                    </span>
-                    <a
-                      href={downloadUrl}
-                      className="text-[11px] text-muted-foreground/70 whitespace-nowrap hover:text-foreground"
-                      title="Download"
-                    >
-                      {formatBytes(f.size)}
-                    </a>
-                  </div>
-                );
-              })}
-            </div>
+            <FileTreeView
+              files={files}
+              rootPrefix={projectId ? `projects/${projectId}/` : `sessions/${sessionId}/`}
+              selectedPath={previewing?.path}
+              onSelect={(f) => setPreviewing(f)}
+            />
           )}
         </div>
       </aside>
@@ -3320,8 +3471,14 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
           {preview === "text" && (
             error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
             : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
-            : (
+            : text.includes("```") ? (
+              // Content with its own fences would break the wrapper — fall back
+              // to a plain (unhighlighted) block.
               <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-muted/30 rounded p-3">{text}</pre>
+            ) : (
+              // Reuse the chat markdown renderer's Shiki code plugin for
+              // highlighting by wrapping the file in a fenced block.
+              <ChatMarkdown text={"```" + langForPath(file.path) + "\n" + text + "\n```"} />
             )
           )}
           {preview === "html" && (

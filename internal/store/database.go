@@ -1420,6 +1420,29 @@ func (d *DBStore) migrationSQL() []string {
 			PRIMARY KEY (user_id, agent_id, project_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_projects_listing ON projects (user_id, agent_id, updated_at DESC)`,
+		// project_runtimes is the live-app layer on top of a project: at
+		// most one running instance (long-lived sandbox + dev server +
+		// preview URL) per project. Same PK as projects — a runtime is
+		// 1:1 with its project and shares its ownership. Kept in a
+		// separate table so the existing project feature is untouched;
+		// dropping every row here degrades gracefully to "no previews",
+		// it never affects chat grouping or workspace files.
+		`CREATE TABLE IF NOT EXISTS project_runtimes (
+			user_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			project_id TEXT NOT NULL,
+			template_ref TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'none',
+			dev_port INTEGER NOT NULL DEFAULT 0,
+			host_port INTEGER NOT NULL DEFAULT 0,
+			preview_url TEXT NOT NULL DEFAULT '',
+			container_id TEXT NOT NULL DEFAULT '',
+			git_ref TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, agent_id, project_id)
+		)`,
 		// agent_goals backs the /goal feature: one persistent objective
 		// per (agent, session). The UNIQUE (agent_id, session_key)
 		// constraint is the source of truth for "this session already
@@ -3204,6 +3227,93 @@ func (d *DBStore) CountProjectSessions(ctx context.Context, userID, agentID, pro
 		return 0, err
 	}
 	return n, nil
+}
+
+// --- Project runtimes (live-app layer) ---
+
+const projectRuntimeCols = `template_ref, status, dev_port, host_port, preview_url, container_id, git_ref, last_error, created_at, updated_at`
+
+func scanProjectRuntime(r *ProjectRuntimeRecord, sc func(...any) error) error {
+	return sc(&r.TemplateRef, &r.Status, &r.DevPort, &r.HostPort, &r.PreviewURL,
+		&r.ContainerID, &r.GitRef, &r.LastError, &r.CreatedAt, &r.UpdatedAt)
+}
+
+func (d *DBStore) GetProjectRuntime(ctx context.Context, userID, agentID, projectID string) (*ProjectRuntimeRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+projectRuntimeCols+` FROM project_runtimes
+			WHERE user_id = %s AND agent_id = %s AND project_id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, projectID)
+	rec := ProjectRuntimeRecord{UserID: userID, AgentID: agentID, ProjectID: projectID}
+	if err := scanProjectRuntime(&rec, row.Scan); err != nil {
+		return nil, scanErr(err)
+	}
+	return &rec, nil
+}
+
+// SaveProjectRuntime upserts. created_at is preserved on update;
+// updated_at is bumped every write. Status defaults to 'none' at the
+// row level if the caller left it empty.
+func (d *DBStore) SaveProjectRuntime(ctx context.Context, r *ProjectRuntimeRecord) error {
+	if r.UserID == "" || r.AgentID == "" || r.ProjectID == "" {
+		return errors.New("store: SaveProjectRuntime requires user_id, agent_id, project_id")
+	}
+	if r.Status == "" {
+		r.Status = "none"
+	}
+	now := time.Now().UTC()
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO project_runtimes (user_id, agent_id, project_id, template_ref, status, dev_port, host_port, preview_url, container_id, git_ref, last_error, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+				ON CONFLICT (user_id, agent_id, project_id) DO UPDATE SET
+				  template_ref=$4, status=$5, dev_port=$6, host_port=$7, preview_url=$8,
+				  container_id=$9, git_ref=$10, last_error=$11, updated_at=$12`,
+			r.UserID, r.AgentID, r.ProjectID, r.TemplateRef, r.Status, r.DevPort, r.HostPort,
+			r.PreviewURL, r.ContainerID, r.GitRef, r.LastError, now)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO project_runtimes (user_id, agent_id, project_id, template_ref, status, dev_port, host_port, preview_url, container_id, git_ref, last_error, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (user_id, agent_id, project_id) DO UPDATE SET
+			  template_ref=excluded.template_ref, status=excluded.status, dev_port=excluded.dev_port,
+			  host_port=excluded.host_port, preview_url=excluded.preview_url, container_id=excluded.container_id,
+			  git_ref=excluded.git_ref, last_error=excluded.last_error, updated_at=excluded.updated_at`,
+		r.UserID, r.AgentID, r.ProjectID, r.TemplateRef, r.Status, r.DevPort, r.HostPort,
+		r.PreviewURL, r.ContainerID, r.GitRef, r.LastError, now, now)
+	return err
+}
+
+func (d *DBStore) DeleteProjectRuntime(ctx context.Context, userID, agentID, projectID string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM project_runtimes WHERE user_id = %s AND agent_id = %s AND project_id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, projectID)
+	return err
+}
+
+// ListAllProjectRuntimes returns every runtime row across all owners.
+// Used by the idle sweeper to evict stale containers; deliberately not
+// user-scoped.
+func (d *DBStore) ListAllProjectRuntimes(ctx context.Context) ([]ProjectRuntimeRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT user_id, agent_id, project_id, `+projectRuntimeCols+` FROM project_runtimes`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProjectRuntimeRecord
+	for rows.Next() {
+		var rec ProjectRuntimeRecord
+		if err := rows.Scan(&rec.UserID, &rec.AgentID, &rec.ProjectID,
+			&rec.TemplateRef, &rec.Status, &rec.DevPort, &rec.HostPort, &rec.PreviewURL,
+			&rec.ContainerID, &rec.GitRef, &rec.LastError, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 // parseTimeString tries common time formats that modernc.org/sqlite may

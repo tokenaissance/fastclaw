@@ -732,6 +732,31 @@ export async function listAgentFiles(
   return (data.files || []) as WorkspaceFile[];
 }
 
+// getScopePreview returns the live dev-server preview for the current chat
+// scope (sessionId for a loose chat, projectId for a project), or status
+// "none" when nothing is running. Backs the workspace panel's "open
+// preview" entry.
+export interface ScopePreview {
+  previewUrl?: string;
+  status: string; // none|scaffolding|starting|running|sleeping|crashed
+}
+export async function getScopePreview(
+  agentId: string,
+  sessionId?: string,
+  projectId?: string,
+): Promise<ScopePreview> {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (projectId) params.set("projectId", projectId);
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/preview${qs ? "?" + qs : ""}`,
+  );
+  if (!res.ok) return { status: "none" };
+  const data = await res.json().catch(() => ({ status: "none" }));
+  return { previewUrl: data.previewUrl as string | undefined, status: (data.status as string) || "none" };
+}
+
 // Chat
 export interface ChatHistoryMessage {
   role: "user" | "assistant" | "tool";

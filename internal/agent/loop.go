@@ -20,6 +20,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/mcp"
 	"github.com/fastclaw-ai/fastclaw/internal/privacy"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
+	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
@@ -119,6 +120,14 @@ type Agent struct {
 	// and hook are simply not registered, so a missing store silently
 	// degrades to "feature off" rather than crashing.
 	goalStore goal.Store
+
+	// projectRuntime, when non-nil, turns this agent into a coding agent:
+	// it can scaffold a project from a template, boot a dev server, and
+	// hand back a preview URL via the start_app_preview / app_preview_logs
+	// tools. Wired by attachProjectRuntimeToAgents at boot. Nil for
+	// ordinary agents, which then never see those tools and keep their
+	// per-chat file isolation. See SetProjectRuntime.
+	projectRuntime *coderuntime.Manager
 }
 
 // SetSandboxPool wires the per-(agent,session) executor pool. Called by
@@ -164,6 +173,24 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 func (a *Agent) bindSession(ctx context.Context, channel, sessionID, projectID string) {
 	a.registry.SetSessionID(sessionID)
 	a.registry.SetProjectID(projectID)
+	// Coding agents (those with a project runtime wired) treat a project
+	// as ONE shared app tree: file tools address the project root so the
+	// agent's edits land where the dev server serves. Only when actually
+	// inside a project; loose chats and non-coding agents are unaffected.
+	a.registry.SetCodingRootScope(a.projectRuntime != nil && projectID != "")
+	// If this scope already has a running app (a runtime record exists),
+	// redirect file tools into its app subfolder so edits keep landing
+	// where the dev server serves — across turns, not just the turn that
+	// called start_app_preview. EffectiveUserID is the owner here
+	// (chatter is bound later), which is correct for the web-direct case.
+	a.registry.SetCodingSubdir("")
+	if a.projectRuntime != nil {
+		if uid := a.registry.EffectiveUserID(); uid != "" {
+			if _, err := a.projectRuntime.Get(ctx, uid, a.name, projectID, sessionID); err == nil {
+				a.registry.SetCodingSubdir(coderuntime.AppSubdir)
+			}
+		}
+	}
 	a.registry.SetMessageContext(channel, sessionID)
 	if a.sandboxPool == nil {
 		return
@@ -3001,6 +3028,12 @@ var chatbotBuiltinAllowlist = []string{
 	// set_timezone keeps "their local time" right for chat (greetings,
 	// "晚安" timing) — chatbots need it as much as full agents do.
 	"set_timezone",
+	// Coding-agent preview tools. Only ever REGISTERED when a project
+	// runtime is wired (SetProjectRuntime), so listing them here is a
+	// harmless no-op for ordinary chat personas and makes the preview
+	// usable regardless of the agent's prompt mode.
+	"start_app_preview",
+	"app_preview_logs",
 }
 
 // builtinAllowForMode returns the built-in tool name allowlist for the

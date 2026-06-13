@@ -145,6 +145,28 @@ func (f *LocalFS) Stat(ctx context.Context, agentID, projectID, sessionID, path 
 // subtrees show up with prefixes like "sessions/<id>/file.png" or
 // "projects/<id>/notes.md", which is what the admin file browser wants.
 // With either set we walk only that subtree.
+// buildArtifactDirs are directory names pruned from workspace walks —
+// build artifacts and dependency trees the agent's file machinery must
+// never enumerate. Keyed by base name; matched at any depth.
+var buildArtifactDirs = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+	".output":      true,
+	".vite":        true,
+	".next":        true,
+	".turbo":       true,
+	".cache":       true,
+	".pnpm-store":  true,
+	".wrangler":    true,
+}
+
+// IsBuildArtifactDir reports whether a directory of this base name should
+// be pruned from workspace enumeration (List here, snapshot-on-evict in
+// the sandbox package). Exported so both share one definition — a
+// scaffolded node project's node_modules alone is tens of thousands of
+// files and would swamp every consumer.
+func IsBuildArtifactDir(name string) bool { return buildArtifactDirs[name] }
+
 func (f *LocalFS) List(ctx context.Context, agentID, projectID, sessionID string) ([]ObjectInfo, error) {
 	dir := f.scopeDir(agentID, projectID, sessionID)
 	var out []ObjectInfo
@@ -156,6 +178,16 @@ func (f *LocalFS) List(ctx context.Context, agentID, projectID, sessionID string
 			return walkErr
 		}
 		if d.IsDir() {
+			// Prune build-artifact / dependency trees. A scaffolded node
+			// project's node_modules alone is tens of thousands of files;
+			// enumerating it swamps every List consumer (sandbox hydrate
+			// does one write per file, list_dir floods the model, sync
+			// copies it all to the durable store). The running dev server
+			// reads these straight off the bind mount, so pruning them
+			// here is invisible to the app. Never prune the scope root.
+			if p != dir && buildArtifactDirs[d.Name()] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(dir, p)

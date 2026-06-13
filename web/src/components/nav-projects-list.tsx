@@ -105,6 +105,10 @@ export function NavProjectsList({
   // Open project IDs: clicking a project toggles its expand state. We
   // keep this as a Set so multiple projects can be expanded at once.
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
+  // Whole-section collapse: clicking the "Projects" header hides the
+  // list. Separate from per-project `expanded` above. AppSidebar stays
+  // mounted across navigation so this in-memory state persists.
+  const [sectionCollapsed, setSectionCollapsed] = React.useState(false);
 
   // useMemo must run before the early-return below or hook order
   // changes between renders when the active agent comes / goes.
@@ -237,7 +241,18 @@ export function NavProjectsList({
   return (
     <>
       <SidebarGroup className="group-data-[collapsible=icon]:hidden">
-        <SidebarGroupLabel>Projects</SidebarGroupLabel>
+        <SidebarGroupLabel
+          onClick={() => setSectionCollapsed((c) => !c)}
+          className="cursor-pointer select-none hover:text-sidebar-foreground"
+        >
+          <ChevronRightIcon
+            className={
+              "mr-1 transition-transform " +
+              (sectionCollapsed ? "rotate-0" : "rotate-90")
+            }
+          />
+          Projects
+        </SidebarGroupLabel>
         <SidebarGroupAction
           aria-label="New project"
           onClick={() => setCreateOpen(true)}
@@ -247,6 +262,7 @@ export function NavProjectsList({
             </button>
           }
         />
+        {!sectionCollapsed && (
         <SidebarMenu>
           {projects.length === 0 && (
             <SidebarMenuItem>
@@ -292,6 +308,7 @@ export function NavProjectsList({
             );
           })}
         </SidebarMenu>
+        )}
       </SidebarGroup>
 
       <CreateProjectDialog

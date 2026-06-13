@@ -284,7 +284,21 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         {activeAgentId ? (
           <NavMain
             label="Agent"
-            items={AGENT_NAV(activeAgentId, pathname, hasOpenSession)}
+            items={[
+              ...AGENT_NAV(activeAgentId, pathname, hasOpenSession),
+              // Settings sits directly under New chat on agent routes
+              // (moved out of the footer) so the agent's own config is
+              // the first thing below the chat entry. Click-only: opens
+              // the dialog with the full agent tabs (userOnly=false).
+              {
+                title: "Settings",
+                icon: SettingsIcon,
+                onClick: () => {
+                  setSettingsUserOnly(false);
+                  setSettingsOpen(true);
+                },
+              },
+            ]}
           />
         ) : (
           <>
@@ -316,26 +330,25 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         <NavSessions agentId={activeAgentId} sessions={sessions} />
       </SidebarContent>
       <SidebarFooter>
-        {/* Settings is pinned to the footer regardless of route so the
-            entry point stays in one place. Mode keys off activeAgentId:
-            on an agent route the dialog opens with full agent tabs
-            (Profile / Customize / Models / Skills / Channels / Scheduler)
-            — viewers get a filtered subset; on platform routes it opens
-            in user-only mode (Account / General). */}
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              tooltip="Settings"
-              onClick={() => {
-                setSettingsUserOnly(!activeAgentId);
-                setSettingsOpen(true);
-              }}
-            >
-              <SettingsIcon />
-              <span>Settings</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+        {/* On agent routes Settings now lives under New chat (above), so
+            the footer entry only shows on platform routes — there it
+            opens in user-only mode (Account / General). */}
+        {!activeAgentId && (
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                tooltip="Settings"
+                onClick={() => {
+                  setSettingsUserOnly(true);
+                  setSettingsOpen(true);
+                }}
+              >
+                <SettingsIcon />
+                <span>Settings</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        )}
         <NavUser
           name={
             me?.user?.displayName ||

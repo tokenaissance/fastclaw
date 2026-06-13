@@ -16,6 +16,8 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/daemon"
 	"github.com/fastclaw-ai/fastclaw/internal/gateway"
+	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/setup"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
@@ -185,6 +187,51 @@ func runGateway(port int) error {
 	apiSrv := api.NewServer(&apiResolver{gw: gw}, authResolver, gwCfg)
 	webSrv.SetAPIServer(apiSrv)
 
+	// Coding-agent project runtime: long-lived dev-server sandbox +
+	// preview URL, layered on top of the existing project feature. Wired
+	// for the docker sandbox backend; other backends leave it nil and the
+	// /runtime endpoints return 503. Template scaffold/dev commands are
+	// env-overridable so fastclaw stays template-agnostic — the default
+	// targets a ShipAny image with the template baked at /template.
+	if home, herr := config.HomeDir(); herr == nil {
+		rtMgr := coderuntime.NewManager(
+			gw.Store(), home, env.Sandbox.Image,
+			&sandbox.Policy{}, os.Getenv("FASTCLAW_PREVIEW_BASE"))
+		rtMgr.RegisterTemplate("shipany-tanstack", coderuntime.TemplateSpec{
+			DevPort: 3000,
+			// Default scaffold, validated end-to-end against
+			// thinkany/fastclaw-sandbox (node+npm, no pnpm):
+			//   1. copy the template EXCLUDING node_modules — the host
+			//      checkout's are platform-specific + huge; a fresh
+			//      in-container install is correct.
+			//   2. ensure pnpm (base image ships node+npm only).
+			//   3. verify-deps-before-run=false — pnpm 11 otherwise re-runs
+			//      `install` before every `dev`, which keeps failing on the
+			//      ignored-builds gate and aborts the dev server.
+			//   4. `install || true` — the ignored-builds gate exits non-zero
+			//      AFTER deps are on disk, so tolerate it.
+			//   5. `pnpm rebuild` — actually build esbuild/sharp so Vite runs.
+			// Override wholesale with FASTCLAW_SHIPANY_SCAFFOLD.
+			ScaffoldCmd: envOr("FASTCLAW_SHIPANY_SCAFFOLD",
+				"set -e; if [ -d /template ]; then tar -C /template "+
+					"--exclude=node_modules --exclude=.git --exclude=.output --exclude=dist "+
+					"-cf - . | tar -C /workspace -xf -; fi; cd /workspace; "+
+					"command -v pnpm >/dev/null 2>&1 || npm i -g pnpm; "+
+					"pnpm config set verify-deps-before-run false; "+
+					"pnpm install || true; pnpm rebuild"),
+			DevCmd: envOr("FASTCLAW_SHIPANY_DEV", "pnpm dev --host 0.0.0.0 --port 3000"),
+			// Local template checkout bind-mounted at /template (option C):
+			// set FASTCLAW_SHIPANY_TEMPLATE_DIR=~/code/shipany-tanstack to
+			// scaffold from disk without baking the image or cloning.
+			TemplateMount: os.Getenv("FASTCLAW_SHIPANY_TEMPLATE_DIR"),
+		})
+		webSrv.SetRuntimeManager(rtMgr) // HTTP /runtime endpoints
+		gw.SetProjectRuntime(rtMgr)     // agent preview tools
+		slog.Info("project runtime enabled",
+			"previewBase", os.Getenv("FASTCLAW_PREVIEW_BASE"),
+			"templateDir", os.Getenv("FASTCLAW_SHIPANY_TEMPLATE_DIR"))
+	}
+
 	bindMode := gwCfg.Bind
 	if bindMode == "" {
 		bindMode = "loopback"
@@ -207,6 +254,14 @@ func runGateway(port int) error {
 	}
 
 	return gw.Run()
+}
+
+// envOr returns the value of env var key, or def when it's unset/empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func countUsersSafe(gw *gateway.Gateway) (int, error) {

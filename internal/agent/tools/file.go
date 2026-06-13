@@ -492,7 +492,7 @@ func makeReadFile(r *Registry) ToolFunc {
 		// Mirror makeWriteFile's routing: userRoot-destined paths go to the
 		// workspace store when one is configured.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, args.Path)
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
 			if err != nil {
 				return "", fmt.Errorf("workspace get: %w", err)
 			}
@@ -585,7 +585,7 @@ func makeWriteFile(r *Registry) ToolFunc {
 		// filesystem because the memory store already covers their
 		// durability via a separate path.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
+			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
 				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
 				if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
 					return "", friendly
@@ -674,7 +674,7 @@ func makeEditFile(r *Registry) ToolFunc {
 		// the same backend or an edit could silently land in a different
 		// store than the one the agent later reads from.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, args.Path)
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
 			if err != nil {
 				return "", fmt.Errorf("workspace get: %w", err)
 			}
@@ -690,7 +690,7 @@ func makeEditFile(r *Registry) ToolFunc {
 			if err != nil {
 				return "", err
 			}
-			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
+			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
 				strings.NewReader(updated), int64(len(updated)), ""); err != nil {
 				if friendly := asIsDirToolError("edit_file", args.Path, err); friendly != nil {
 					return "", friendly
@@ -792,7 +792,7 @@ func makeListDir(r *Registry) ToolFunc {
 		// listing" by filtering List output to entries whose agent-relative
 		// path sits under args.Path's prefix.
 		if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(args.Path) {
-			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID, r.sessionID)
+			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID, r.scopeSessionID())
 			if err != nil {
 				return "", fmt.Errorf("workspace list: %w", err)
 			}
@@ -898,7 +898,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 		switch r.routeFor(args.Path, OpRead) {
 		case RouteWorkspaceStore:
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, args.Path)
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
 			if err == nil {
 				defer rc.Close()
 				data, readErr := io.ReadAll(rc)
@@ -988,7 +988,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			}
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
 		case RouteWorkspaceStore:
-			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
+			if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
 				strings.NewReader(args.Content), int64(len(args.Content)), ""); err != nil {
 				if friendly := asIsDirToolError("write_file", args.Path, err); friendly != nil {
 					return "", friendly
@@ -1041,7 +1041,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 		switch r.routeFor(args.Path, OpList) {
 		case RouteWorkspaceStore:
-			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID, r.sessionID)
+			objs, err := r.workspaceStore.List(ctx, r.agentID, r.projectID, r.scopeSessionID())
 			if err == nil {
 				prefix := strings.Trim(filepath.ToSlash(filepath.Clean(args.Path)), "/")
 				if prefix == "." {
@@ -1156,7 +1156,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 			}
 			return fmt.Sprintf("Edited %s (%d replacement(s))", name, count), nil
 		case RouteWorkspaceStore:
-			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, args.Path)
+			rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path))
 			if err == nil {
 				data, readErr := io.ReadAll(rc)
 				rc.Close()
@@ -1168,7 +1168,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 					if err != nil {
 						return "", err
 					}
-					if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, args.Path,
+					if err := r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.scopeSessionID(), r.wsPath(args.Path),
 						strings.NewReader(updated), int64(len(updated)), ""); err != nil {
 						if friendly := asIsDirToolError("edit_file", args.Path, err); friendly != nil {
 							return "", friendly

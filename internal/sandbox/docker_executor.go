@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // DockerExecutor wraps DockerSandbox to implement Executor. The container
@@ -156,6 +158,13 @@ func (d *DockerExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]by
 			return walkErr
 		}
 		if entry.IsDir() {
+			// Don't snapshot dependency / build trees back to the durable
+			// store on evict — a scaffolded node project's node_modules is
+			// tens of thousands of files. The dev server rebuilds them from
+			// the bind mount, so they never need durable persistence.
+			if p != root && workspace.IsBuildArtifactDir(entry.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(root, p)

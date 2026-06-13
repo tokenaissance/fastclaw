@@ -9,7 +9,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { MoreHorizontal } from "lucide-react";
+import { ChevronRightIcon, MoreHorizontal } from "lucide-react";
 import { moveChatSessionToProject } from "@/lib/api";
 import { ChannelIcon, channelLabel } from "@/components/channel-icon";
 import { ChatRowActions } from "@/components/chat-row-actions";
@@ -57,6 +57,8 @@ export function NavSessions({
   // self-evident). Hook must run before the early-return below to
   // keep call order stable across renders.
   const [chatsDropActive, setChatsDropActive] = React.useState(false);
+  // Whole-section collapse: clicking the "Chats" header hides the list.
+  const [sectionCollapsed, setSectionCollapsed] = React.useState(false);
 
   // Dedupe rapid double-clicks on the same chat row — see the matching
   // block in nav-projects-list.tsx for the connection-pool starvation
@@ -129,7 +131,19 @@ export function NavSessions({
         onDragLeave={onChatsDragLeave}
         onDrop={onChatsDrop}
       >
-        <SidebarGroupLabel>Chats</SidebarGroupLabel>
+        <SidebarGroupLabel
+          onClick={() => setSectionCollapsed((c) => !c)}
+          className="cursor-pointer select-none hover:text-sidebar-foreground"
+        >
+          <ChevronRightIcon
+            className={
+              "mr-1 transition-transform " +
+              (sectionCollapsed ? "rotate-0" : "rotate-90")
+            }
+          />
+          Chats
+        </SidebarGroupLabel>
+        {!sectionCollapsed && (
         <SidebarMenu
           className={
             chatsDropActive
@@ -177,6 +191,7 @@ export function NavSessions({
             </SidebarMenuItem>
           )}
         </SidebarMenu>
+        )}
       </SidebarGroup>
     </>
   );

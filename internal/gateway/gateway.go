@@ -29,6 +29,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
+	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -174,6 +175,12 @@ type Gateway struct {
 	sandboxPool sandbox.ExecutorPool
 	usage       usage.Meter
 	envCfg      *config.EnvConfig
+	// projectRuntime is the coding-agent runtime manager (live dev server
+	// + preview). Set by SetProjectRuntime after construction; nil keeps
+	// agents as plain assistants. Exposed to the setup server via
+	// ProjectRuntime() so the HTTP /runtime endpoints share the instance
+	// with the agent tools.
+	projectRuntime *coderuntime.Manager
 	// chatEvents, when set, lets bus-fired web turns (cron / goal
 	// continuation / heartbeat / sub-agent) stream through the same
 	// SSE hub a user-typed POST /api/chat turn uses. Nil-safe: unset
@@ -182,6 +189,22 @@ type Gateway struct {
 	mu         sync.RWMutex
 	dedup      sync.Map
 }
+
+// SetProjectRuntime wires the coding-agent runtime manager. Call once at
+// boot before Run(); it propagates to the user-space registry so every
+// agent loaded afterwards gains the preview tools. Safe to leave unset
+// (agents stay plain assistants; the HTTP /runtime endpoints 503).
+func (g *Gateway) SetProjectRuntime(m *coderuntime.Manager) {
+	g.projectRuntime = m
+	if g.users != nil {
+		g.users.setProjectRuntime(m)
+	}
+}
+
+// ProjectRuntime returns the coding-agent runtime manager, or nil when
+// none is configured. The setup server uses it to back the HTTP
+// /runtime endpoints with the same instance the agent tools use.
+func (g *Gateway) ProjectRuntime() *coderuntime.Manager { return g.projectRuntime }
 
 // SetChatEvents wires the agent event hub the setup server lazy-inits.
 // Must be called before Run() so the very first bus-fired web turn

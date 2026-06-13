@@ -129,6 +129,18 @@ type Store interface {
 	DeleteProject(ctx context.Context, userID, agentID, projectID string) error
 	CountProjectSessions(ctx context.Context, userID, agentID, projectID string) (int, error)
 
+	// --- Project runtimes (the live-app layer on top of a project) ---
+	//
+	// At most one row per (user, agent, project). Get returns
+	// ErrNotFound when a project has no runtime yet. Save upserts.
+	// ListAllProjectRuntimes is for the idle sweeper, which needs to
+	// enumerate every live runtime regardless of owner to evict stale
+	// containers — it is NOT user-scoped on purpose.
+	GetProjectRuntime(ctx context.Context, userID, agentID, projectID string) (*ProjectRuntimeRecord, error)
+	SaveProjectRuntime(ctx context.Context, r *ProjectRuntimeRecord) error
+	DeleteProjectRuntime(ctx context.Context, userID, agentID, projectID string) error
+	ListAllProjectRuntimes(ctx context.Context) ([]ProjectRuntimeRecord, error)
+
 	// --- Session messages (append-only per-turn archive) ---
 	//
 	// Mirrors every Append into session_messages, separate from the
@@ -463,6 +475,49 @@ type ProjectRecord struct {
 	Description string    `json:"description,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+// ProjectRuntimeRecord is the live-app layer that sits ON TOP of a
+// ProjectRecord — at most one per (user, agent, project). The
+// ProjectRecord owns the source tree (the shared workspace folder);
+// this record owns the *running instance* of that source: a long-lived
+// sandbox container, a dev server, and a preview URL. The two are
+// deliberately separate tables so the existing project feature (chat
+// grouping + shared files) keeps its exact semantics and the coding-
+// agent runtime is purely additive.
+//
+// Lifecycle of Status:
+//
+//	none        — record exists but nothing is provisioned yet
+//	scaffolding — template is being copied into the workspace
+//	starting    — sandbox is up, dev server is booting
+//	running     — dev server is serving; PreviewURL is live
+//	sleeping    — container evicted to save compute; Wake re-creates it
+//	crashed     — dev server exited non-zero; LastError has the detail
+type ProjectRuntimeRecord struct {
+	UserID      string `json:"-"`
+	AgentID     string `json:"-"`
+	ProjectID   string `json:"projectId"`
+	TemplateRef string `json:"templateRef,omitempty"`
+	Status      string `json:"status"`
+	// DevPort is the container-internal port the dev server listens on
+	// (e.g. 3000 for ShipAny). HostPort is the host-published port the
+	// preview gateway reverse-proxies to; 0 means not currently
+	// published (sleeping / never started). PreviewURL is the
+	// user-facing URL the gateway resolves to HostPort.
+	DevPort    int    `json:"devPort,omitempty"`
+	HostPort   int    `json:"hostPort,omitempty"`
+	PreviewURL string `json:"previewUrl,omitempty"`
+	// ContainerID is the long-lived sandbox container backing this
+	// runtime. Empty when sleeping/none. Stored so a process restart can
+	// re-adopt or clean up orphaned containers.
+	ContainerID string `json:"-"`
+	// GitRef is the commit the agent snapshotted after the last turn, so
+	// Revert can roll the workspace back a step.
+	GitRef    string    `json:"gitRef,omitempty"`
+	LastError string    `json:"lastError,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // Kinds for ConfigRecord.
