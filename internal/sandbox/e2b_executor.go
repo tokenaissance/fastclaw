@@ -372,6 +372,13 @@ func (b *tarBundle) addLocalDir(localRoot, sandboxPrefix string) (int, error) {
 		if err != nil {
 			return err
 		}
+		// Never ship a skill's top-level SKILL.md into the sandbox — it's
+		// the agent's IP, the model already has it via load_skill, and the
+		// sandbox only needs the skill's scripts/resources to run. Keeping
+		// it out closes the `cat /skills/<name>/SKILL.md` exfil path.
+		if rel == "SKILL.md" {
+			return nil
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return err

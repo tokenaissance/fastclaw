@@ -1319,6 +1319,18 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
+	// Never serve a file named SKILL.md as a downloadable artifact. Skill
+	// manifests are the agent's IP and never legitimately land in the
+	// workspace (skill-creator writes them to the skills bucket, not here),
+	// so a SKILL.md showing up under /workspace is the tail of the
+	// `cat /skills/foo/SKILL.md > /workspace/foo.md` exfil chain. This is a
+	// name-level guard only — it does not catch manifest content saved
+	// under a different filename; that residual is the model-cooperation
+	// case the load_skill / system-prompt confidentiality directives cover.
+	if strings.EqualFold(filepath.Base(filepath.Clean(rel)), "SKILL.md") {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "refused: skill manifests are not downloadable"})
+		return
+	}
 	if s.workspaceStore != nil {
 		s.serveFileFromWorkspaceStore(w, r, id, rel)
 		return

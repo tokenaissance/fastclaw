@@ -488,6 +488,11 @@ func makeReadFile(r *Registry) ToolFunc {
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
 		}
+		// Skill-manifest gate. Same rationale for a bundled SKILL.md —
+		// the agent's IP, not for a chatter to pull verbatim.
+		if r.skillManifestBlocked(args.Path) {
+			return SkillManifestRefusal, nil
+		}
 
 		// Mirror makeWriteFile's routing: userRoot-destined paths go to the
 		// workspace store when one is configured.
@@ -666,6 +671,12 @@ func makeEditFile(r *Registry) ToolFunc {
 		// Identity-file confidentiality gate.
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
+		}
+		// Skill-manifest gate — block edits to a bundled SKILL.md for
+		// non-admin chatters (editing returns surrounding content + lets
+		// them tamper with the agent's IP). Owner edits skills via the UI.
+		if r.skillManifestBlocked(args.Path) {
+			return SkillManifestRefusal, nil
 		}
 
 		// Mirror makeWriteFile's routing precedence: workspace store first
@@ -907,6 +918,11 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
 		}
+		// Skill-manifest gate — refuse before any routing so a chatter
+		// can't read a bundled `/skills/<name>/SKILL.md` off the mount.
+		if r.skillManifestBlocked(args.Path) {
+			return SkillManifestRefusal, nil
+		}
 		// Identity files (SOUL.md, IDENTITY.md, …) are routed by basename
 		// (lenient) instead of the strict isSingleSegmentSystemFile that
 		// routeFor uses. Need to be checked separately for reads so an
@@ -1140,6 +1156,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		}
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
+		}
+		if r.skillManifestBlocked(args.Path) {
+			return SkillManifestRefusal, nil
 		}
 
 		// editSandboxRMW is the read-modify-write fallback through the

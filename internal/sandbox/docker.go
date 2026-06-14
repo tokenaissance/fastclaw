@@ -291,7 +291,7 @@ func (s *DockerSandbox) Create() error {
 			}
 			mounted[e.Name()] = true
 			host := filepath.Join(dir, e.Name())
-			args = append(args, "-v", fmt.Sprintf("%s:/skills/%s:ro", host, e.Name()))
+			args = appendSkillMounts(args, host, "/skills/"+e.Name())
 		}
 	}
 
@@ -373,6 +373,34 @@ func (s *DockerSandbox) Create() error {
 	}
 
 	return nil
+}
+
+// appendSkillMounts binds a host skill directory into the container at
+// containerDir, EXCLUDING the top-level SKILL.md. The manifest is the
+// agent's IP — the model already gets its contents via the load_skill
+// tool, and the sandbox only needs the skill's executable scripts /
+// resources to run `python /skills/<name>/main.py`. Leaving SKILL.md out
+// of the mount closes the `cat /skills/<name>/SKILL.md` exfil path that a
+// whole-directory `:ro` bind would otherwise expose.
+//
+// It mounts each top-level entry individually rather than the whole dir
+// so the exclusion is a true physical absence (no nested over-mount
+// tricks). If the directory can't be enumerated, it falls back to a
+// whole-dir mount so the skill still works — a rare path where the
+// manifest isn't hidden, but a broken skill is worse than a hidden one.
+func appendSkillMounts(args []string, hostSkillDir, containerDir string) []string {
+	entries, err := os.ReadDir(hostSkillDir)
+	if err != nil {
+		return append(args, "-v", fmt.Sprintf("%s:%s:ro", hostSkillDir, containerDir))
+	}
+	for _, e := range entries {
+		if e.Name() == "SKILL.md" {
+			continue
+		}
+		src := filepath.Join(hostSkillDir, e.Name())
+		args = append(args, "-v", fmt.Sprintf("%s:%s/%s:ro", src, containerDir, e.Name()))
+	}
+	return args
 }
 
 // Exec runs a command inside the container.

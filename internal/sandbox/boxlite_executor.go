@@ -420,6 +420,12 @@ func (b *plainTarBundle) addLocalDir(localRoot, prefix string) (int, error) {
 		if err != nil {
 			return err
 		}
+		// Skip a skill's top-level SKILL.md — see e2b_executor.addLocalDir:
+		// it's the agent's IP, the model already has it via load_skill, and
+		// shipping it would reopen the `cat /skills/<name>/SKILL.md` leak.
+		if rel == "SKILL.md" {
+			return nil
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return err
