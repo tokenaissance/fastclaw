@@ -145,7 +145,57 @@ Template commands are env-overridable so fastclaw stays template-agnostic:
 
 To add another template (e.g. a Next.js starter), call
 `rtMgr.RegisterTemplate("my-template", coderuntime.TemplateSpec{…})` —
-nothing in the runtime is ShipAny-specific.
+nothing in the runtime is ShipAny-specific. The **first** registered ref is
+the default the preview tool uses when the agent omits one, so registering
+more templates never changes an existing deployment's default. A second
+template ships out of the box — `vite-react`, a plain Vite + React + TS
+starter that self-scaffolds with `npm create vite` (no baked `/template`, no
+source fetch) — as a worked example of multi-template support.
+
+## Sandbox backends (docker vs e2b/boxlite)
+
+The preview path depends on `FASTCLAW_SANDBOX_BACKEND`:
+
+- **docker (default)** — the runtime owns a dedicated long-lived container
+  per project, publishes the dev port to a host port, and the agent's edits
+  reach the dev server through a shared host bind mount. Unchanged.
+- **e2b / boxlite (cloud, no host mount)** — the runtime runs the dev server
+  inside the **same pooled sandbox the agent writes files to** (so HMR works
+  with no bind mount) and exposes the port via the backend's own URL scheme
+  (e2b: `https://<port>-<sandboxID>.e2b.app`). Coding writes route to
+  `workspace.Store`; for a remote-workspace backend they're additionally
+  mirrored into the live sandbox so the dev server sees them.
+
+### Cloud template provisioning (where `/template` comes from)
+
+The scaffold needs the template source at `/template` in the sandbox. On a
+cloud backend there is no host bind mount, so pick one of:
+
+1. **Bake into the sandbox image / e2b template (recommended).** Build the
+   e2b template (or docker image) with the toolchain (node/pnpm + camoufox
+   for copyweb) **and** the template at `/template` — ideally with a warm
+   pnpm store so scaffold installs offline and fast. Rebuild only when deps
+   change. Set the e2b template id via the `e2bTemplate` setting (falls back
+   to `FASTCLAW_SANDBOX_IMAGE`).
+2. **Pull source at scaffold time (image stays stable).** Override
+   `FASTCLAW_SHIPANY_SCAFFOLD` to `curl` a pinned tarball from object storage
+   (R2/S3, via a short-lived presigned URL — no long-lived creds in a sandbox
+   that runs LLM code) into `/workspace`, then `pnpm install --offline`
+   against a warm store baked in the image. Decouples template content from
+   the image; only dep changes need an image rebuild. Prefer this over
+   `git clone` for private templates (no token to exfiltrate, pinned snapshot).
+3. **Upload from the fastclaw host.** When `FASTCLAW_SHIPANY_TEMPLATE_DIR`
+   points at a checkout on the fastclaw server, the e2b path uploads it into
+   the sandbox `/template` (`TemplateProvisioner.ProvisionDir`). Convenient
+   for local e2b testing; costs a per-cold-sandbox upload.
+
+**Multi-template, one image:** same-stack templates (e.g. several ShipAny
+variants) share ONE backend image and differ only by `ScaffoldCmd` / source —
+you do **not** need an e2b image per template. A genuinely different stack
+(Python vs Node) is the only reason to vary the image; `TemplateSpec.Image`
+pins a per-template image on the **docker** path (the e2b path uses the one
+pool image, so per-template e2b images would need a pool per-project override
+— not wired yet).
 
 ### Sandbox image requirements
 

@@ -303,6 +303,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// lets the chat workspace panel surface an "open preview" entry for the
 	// current chat, including loose chats that have no project.
 	mux.HandleFunc("GET /api/agents/{id}/preview", auth(s.handleScopePreview))
+	// Scope-flexible build/dev log tail — the preview panel polls this while
+	// the app scaffolds so the user sees the live pnpm-install output.
+	mux.HandleFunc("GET /api/agents/{id}/preview/logs", auth(s.handleScopePreviewLogs))
+	// Files the agent changed vs the template baseline (git diff in the
+	// running app) — lets the workspace tree show only this task's output.
+	mux.HandleFunc("GET /api/agents/{id}/changed-files", auth(s.handleChangedFiles))
 	mux.HandleFunc("GET /api/agents/{id}/projects/{pid}/runtime/logs", auth(s.handleRuntimeLogs))
 
 	// Per-agent channels (IM bot bindings)

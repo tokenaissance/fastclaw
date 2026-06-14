@@ -29,6 +29,15 @@ func (a *Agent) SetProjectRuntime(m *coderuntime.Manager) {
 func (a *Agent) registerProjectRuntimeTools() {
 	reg := a.registry
 
+	// Surface the registered templates so the model can pick one by name
+	// (and knows the default). Built at registration time — the manager has
+	// every RegisterTemplate applied before SetProjectRuntime runs.
+	tmplDesc := "Template ref to scaffold from on first boot (e.g. \"shipany-tanstack\"). Optional once a runtime already exists; the deployment's default is used when omitted."
+	if refs := a.projectRuntime.Templates(); len(refs) > 0 {
+		tmplDesc = fmt.Sprintf("Template ref to scaffold from on first boot. Available: %s — the first is the default, used when omitted. Optional once a runtime already exists.",
+			strings.Join(refs, ", "))
+	}
+
 	reg.Register(
 		"start_app_preview",
 		"PRIMARY tool for building a web app / website / landing page / dashboard — INCLUDING requests like 'use template X to make Y' or '用某模板做个…'. "+
@@ -40,7 +49,7 @@ func (a *Agent) registerProjectRuntimeTools() {
 			"properties": map[string]any{
 				"template": map[string]any{
 					"type":        "string",
-					"description": "Template ref to scaffold from on first boot (e.g. \"shipany-tanstack\"). Optional once a runtime already exists; the deployment's default is used when omitted.",
+					"description": tmplDesc,
 				},
 			},
 		},

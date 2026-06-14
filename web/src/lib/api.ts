@@ -757,6 +757,49 @@ export async function getScopePreview(
   return { previewUrl: data.previewUrl as string | undefined, status: (data.status as string) || "none" };
 }
 
+// getScopePreviewLogs tails the build/dev log for the current chat scope.
+// The preview panel polls it while the app is scaffolding so the user sees
+// the live pnpm-install output instead of an opaque spinner. Returns "" when
+// there's nothing yet (no runtime, or the scaffold hasn't written a line).
+export async function getScopePreviewLogs(
+  agentId: string,
+  sessionId?: string,
+  projectId?: string,
+  tail = 400,
+): Promise<string> {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (projectId) params.set("projectId", projectId);
+  if (tail > 0) params.set("tail", String(tail));
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/preview/logs${qs ? "?" + qs : ""}`,
+  );
+  if (!res.ok) return "";
+  const data = await res.json().catch(() => ({ logs: "" }));
+  return (data.logs as string) || "";
+}
+
+// getChangedFiles returns only the files the agent created/modified vs the
+// template baseline (git diff in the running app). `available` is false when
+// there's no live runtime/baseline — the caller then lists all files.
+export async function getChangedFiles(
+  agentId: string,
+  sessionId?: string,
+  projectId?: string,
+): Promise<{ files: WorkspaceFile[]; available: boolean }> {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (projectId) params.set("projectId", projectId);
+  const qs = params.toString();
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/changed-files${qs ? "?" + qs : ""}`,
+  );
+  if (!res.ok) return { files: [], available: false };
+  const data = await res.json().catch(() => ({ files: [], available: false }));
+  return { files: (data.files || []) as WorkspaceFile[], available: !!data.available };
+}
+
 // Chat
 export interface ChatHistoryMessage {
   role: "user" | "assistant" | "tool";

@@ -53,6 +53,14 @@ function useSidebar() {
   return context
 }
 
+// useSidebarOptional returns the sidebar context, or null when there is no
+// provider (e.g. the act-as read-only view renders without one). Lets a
+// page collapse the platform sidebar when it can, without crashing where
+// the sidebar isn't mounted.
+function useSidebarOptional() {
+  return React.useContext(SidebarContext)
+}
+
 function SidebarProvider({
   defaultOpen = true,
   open: openProp,
@@ -720,4 +728,5 @@ export {
   SidebarSeparator,
   SidebarTrigger,
   useSidebar,
+  useSidebarOptional,
 }

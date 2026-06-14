@@ -1676,7 +1676,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	if catalog != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: catalog})
 	}
-	messages = append(messages, sess.GetMessages()...)
+	messages = append(messages, a.withMessageTimestamps(sess.GetMessages())...)
 	if a.piiScrubEnabled {
 		messages = privacy.ScrubMessages(messages)
 	}
@@ -1913,7 +1913,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, sessionMsgs...)
+	messages = append(messages, a.withMessageTimestamps(sessionMsgs)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -2609,7 +2609,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, sessionMsgs...)
+	messages = append(messages, a.withMessageTimestamps(sessionMsgs)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -3069,6 +3069,30 @@ func (a *Agent) chatterLocation(chatterUID string) *time.Location {
 	}
 	tz := scope.Timezone(context.Background(), a.dataStore, chatterUID, a.agentID)
 	return scope.LoadLocationOrLocal(tz)
+}
+
+// withMessageTimestamps returns a COPY of msgs where each user message is
+// prefixed with its send time in the chatter's timezone, e.g.
+// "[2026-06-13 22:15 Fri] …". This is what lets the model reason about
+// time across a conversation — tell today from earlier days, and not say
+// "good night" at midday. The originals are never mutated (the prefix is
+// a read-time view for the LLM, not stored history), so the session store
+// stays clean and the next turn doesn't double-prefix. The system prompt
+// (context.go dateLine) tells the model what the bracketed prefix means.
+func (a *Agent) withMessageTimestamps(msgs []provider.Message) []provider.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+	loc := a.chatterLocation(a.registry.ChatterUserID())
+	out := make([]provider.Message, len(msgs))
+	for i, m := range msgs {
+		if m.Role == "user" && m.Timestamp > 0 && m.Content != "" {
+			t := time.UnixMilli(m.Timestamp).In(loc)
+			m.Content = "[" + t.Format("2006-01-02 15:04 Mon") + "] " + m.Content
+		}
+		out[i] = m
+	}
+	return out
 }
 
 // UpdateConfig updates the agent's runtime config (model, temperature, etc.)

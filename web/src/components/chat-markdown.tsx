@@ -45,13 +45,17 @@ const components: Components = {
 // mirroring the former CHAT_PROSE_CLASS. The bulky overrides that flatten
 // Streamdown's card chrome live in globals.css under the `.chat-md` class.
 const PROSE_CLASS =
-  "chat-md text-[15px] leading-relaxed prose prose-sm max-w-none dark:prose-invert min-w-0 wrap-anywhere " +
-  "prose-p:my-1 prose-ul:my-1 prose-ol:my-1 " +
-  "prose-headings:font-semibold prose-headings:mt-3 prose-headings:mb-1 " +
-  "prose-h1:text-[16px] prose-h2:text-[15.5px] prose-h3:text-[15px] prose-h4:text-[15px] prose-h5:text-[15px] prose-h6:text-[15px] " +
+  "chat-md text-[13.5px] leading-normal prose prose-sm max-w-none dark:prose-invert min-w-0 wrap-anywhere " +
+  "prose-p:my-1.5 " +
+  // Tighter, shallower lists: smaller indent (pl-5 ≈ 20px vs prose's ~26px),
+  // less gap between the marker and text, and snug item spacing.
+  "prose-ul:my-1.5 prose-ol:my-1.5 prose-ul:pl-4 prose-ol:pl-4 " +
+  "prose-li:my-0.5 prose-li:pl-0 prose-li:marker:text-muted-foreground/60 " +
+  "prose-headings:font-semibold prose-headings:mt-2.5 prose-headings:mb-1 " +
+  "prose-h1:text-[15px] prose-h2:text-[14px] prose-h3:text-[13.5px] prose-h4:text-[13.5px] prose-h5:text-[13.5px] prose-h6:text-[13.5px] " +
   "prose-blockquote:border-l-primary/60 prose-blockquote:bg-muted/20 prose-blockquote:px-3 prose-blockquote:not-italic " +
   "prose-a:text-primary prose-a:underline-offset-2 hover:prose-a:opacity-80 " +
-  "prose-table:my-2 prose-table:text-[14px] prose-th:bg-muted/40 prose-th:font-medium prose-th:border-border prose-td:border-border " +
+  "prose-table:my-2 prose-table:text-[13px] prose-th:bg-muted/40 prose-th:font-medium prose-th:border-border prose-td:border-border " +
   "prose-th:py-1 prose-th:px-2 prose-td:py-1 prose-td:px-2 prose-td:leading-snug " +
   "prose-hr:my-3";
 

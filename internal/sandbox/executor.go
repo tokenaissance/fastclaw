@@ -76,6 +76,25 @@ type RemoteWorkspace interface {
 	IsRemoteWorkspace()
 }
 
+// PortExposer is an optional Executor capability: given a port a process
+// inside the sandbox is listening on, return an externally reachable URL.
+// Docker publishes the port to a host port; E2B serves it at
+// <port>-<sandboxID>.e2b.app with no extra step. The project runtime
+// type-asserts this to build a live-preview URL; a backend that doesn't
+// implement it can't host a preview (the runtime returns a clear error).
+type PortExposer interface {
+	ExposePort(ctx context.Context, port int) (string, error)
+}
+
+// TemplateProvisioner is an optional Executor capability: copy a local
+// directory tree into the sandbox at destDir. Used to seed a coding
+// template (e.g. shipany-tanstack) when the backend has no host bind
+// mount to share it through. Docker doesn't implement it (it bind-mounts
+// the template); remote backends (E2B) upload a tarball and extract it.
+type TemplateProvisioner interface {
+	ProvisionDir(ctx context.Context, localDir, destDir string) error
+}
+
 // PoolConfig holds configuration for creating sandbox pools.
 type PoolConfig struct {
 	Backend   string // "docker", "e2b" (future)

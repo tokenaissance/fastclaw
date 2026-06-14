@@ -863,6 +863,29 @@ func makeListDir(r *Registry) ToolFunc {
 // the path (absolute paths, `skills/...`, ad-hoc scripts, etc.). The
 // sandbox badge is emitted only for the executor-fallback path — store
 // hits intentionally don't badge, since they didn't run in the sandbox.
+// mirrorCodingWriteToSandbox pushes a coding-agent workspace write into the
+// live preview sandbox. Coding writes route to workspace.Store (host), which
+// docker bind-mounts into the dev-server container — but a remote backend
+// (E2B) shares no host mount, so without this the dev server never sees the
+// edit and HMR looks dead. Guarded on RemoteWorkspace, so it's a no-op for
+// docker (whose executor isn't remote). Best-effort: the user-visible write
+// already hit the store, so a mirror failure only degrades live-reload — we
+// log and move on. Destination is ABSOLUTE /workspace/<path> because the
+// dev server serves the sandbox /workspace root and envd resolves a bare
+// path against $HOME, not /workspace.
+func (r *Registry) mirrorCodingWriteToSandbox(ctx context.Context, path, content string) {
+	if r.codingSubdir == "" || r.executor == nil {
+		return
+	}
+	if _, ok := r.executor.(sandbox.RemoteWorkspace); !ok {
+		return
+	}
+	dest := "/workspace/" + strings.TrimPrefix(filepath.ToSlash(filepath.Clean(path)), "/")
+	if _, err := r.executor.WriteFile(ctx, dest, content); err != nil {
+		slog.Warn("coding preview mirror to sandbox failed", "path", dest, "err", err)
+	}
+}
+
 func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 	r.Register("read_file", "Read the contents of a file", map[string]interface{}{
 		"type": "object",
@@ -995,6 +1018,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 				}
 				return "", fmt.Errorf("workspace put: %w", err)
 			}
+			r.mirrorCodingWriteToSandbox(ctx, args.Path, args.Content)
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), args.Path), nil
 		case RouteSkillStore:
 			// Skill scaffolding (skill-creator's `skills/<name>/...`) lands
@@ -1175,6 +1199,7 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 						}
 						return "", fmt.Errorf("workspace put: %w", err)
 					}
+					r.mirrorCodingWriteToSandbox(ctx, args.Path, updated)
 					return fmt.Sprintf("Edited %s (%d replacement(s))", args.Path, count), nil
 				}
 			}

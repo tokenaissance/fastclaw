@@ -6,7 +6,7 @@ import (
 )
 
 func TestScopeFor(t *testing.T) {
-	m := NewManager(nil, "/home", "img", nil, "")
+	m := NewManager(nil, "/home", "img", nil, "", "", nil)
 	const agent = "agt_1"
 
 	t.Run("project wins", func(t *testing.T) {
@@ -44,12 +44,12 @@ func TestScopeFor(t *testing.T) {
 
 func TestPreviewURLHostSanitizesSessionScope(t *testing.T) {
 	// Local mode: scope id never appears in the URL.
-	local := NewManager(nil, "/home", "img", nil, "")
+	local := NewManager(nil, "/home", "img", nil, "", "", nil)
 	if got := local.previewURL("sess:abc", 4321); got != "http://127.0.0.1:4321" {
 		t.Fatalf("local previewURL: got %q", got)
 	}
 	// Gateway mode: the "sess:" colon must not leak into a hostname.
-	gw := NewManager(nil, "/home", "img", nil, "https://{project}.preview.example.com")
+	gw := NewManager(nil, "/home", "img", nil, "https://{project}.preview.example.com", "", nil)
 	if got := gw.previewURL("sess:abc", 0); got != "https://sess-abc.preview.example.com" {
 		t.Fatalf("gateway previewURL: want colon sanitized to dash, got %q", got)
 	}

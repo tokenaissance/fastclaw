@@ -705,6 +705,92 @@ func (e *E2BExecutor) ListDir(ctx context.Context, path string) (string, error) 
 // idle eviction. See sandbox.RemoteWorkspace.
 func (e *E2BExecutor) IsRemoteWorkspace() {}
 
+// ExposePort implements PortExposer. E2B serves every sandbox port at
+// https://<port>-<sandboxID>.e2b.app with no publish step (same scheme
+// envdURL uses for the control port), so the dev server bound to 0.0.0.0
+// is reachable the moment it listens.
+func (e *E2BExecutor) ExposePort(_ context.Context, port int) (string, error) {
+	if e.sandboxID == "" {
+		return "", fmt.Errorf("e2b: sandbox not created")
+	}
+	return fmt.Sprintf("https://%d-%s.e2b.app", port, e.sandboxID), nil
+}
+
+// ProvisionDir implements TemplateProvisioner: tar localDir (skipping the
+// heavy, host-specific trees the scaffold reinstalls anyway), upload it
+// over the same /files channel Hydrate uses, and extract it into destDir
+// inside the sandbox. This seeds a coding template into an E2B sandbox
+// that has no host bind mount to share it through.
+func (e *E2BExecutor) ProvisionDir(ctx context.Context, localDir, destDir string) error {
+	root := filepath.Clean(localDir)
+	skip := map[string]bool{"node_modules": true, ".git": true, ".output": true, "dist": true, ".next": true}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	walkErr := filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			return rerr
+		}
+		if rel == "." {
+			return nil
+		}
+		top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+		if skip[top] {
+			if fi.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Symlinks (and other irregular files) can't be faithfully tarred
+		// without resolving targets; skip them — templates are plain trees.
+		if !fi.IsDir() && !fi.Mode().IsRegular() {
+			return nil
+		}
+		hdr, herr := tar.FileInfoHeader(fi, "")
+		if herr != nil {
+			return herr
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if fi.Mode().IsRegular() {
+			f, oerr := os.Open(p)
+			if oerr != nil {
+				return oerr
+			}
+			_, cerr := io.Copy(tw, f)
+			f.Close()
+			if cerr != nil {
+				return cerr
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		return err
+	}
+	const tmp = "/tmp/fc-template.tar.gz"
+	if err := e.uploadBytes(ctx, tmp, buf.Bytes()); err != nil {
+		return fmt.Errorf("upload template: %w", err)
+	}
+	cmd := fmt.Sprintf("mkdir -p %q && tar -C %q -xzf %s && rm -f %s", destDir, destDir, tmp, tmp)
+	if out, err := e.Exec(ctx, cmd, 3*time.Minute); err != nil {
+		return fmt.Errorf("extract template: %w: %s", err, out)
+	}
+	return nil
+}
+
 // SnapshotWorkspace tars /workspace and ships the bytes back as base64 over
 // stdout. This is the inverse of Hydrate's tar+base64 push — used by the
 // LifecyclePool to flush sandbox-side files back to the durable

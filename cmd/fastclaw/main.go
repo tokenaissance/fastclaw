@@ -194,9 +194,14 @@ func runGateway(port int) error {
 	// env-overridable so fastclaw stays template-agnostic — the default
 	// targets a ShipAny image with the template baked at /template.
 	if home, herr := config.HomeDir(); herr == nil {
+		// backend + shared pool let the runtime host previews through the
+		// agent's pooled executor on non-docker backends (e2b/boxlite);
+		// docker keeps its dedicated-container path. Pool is nil when
+		// sandboxing is disabled, which keeps the docker path.
 		rtMgr := coderuntime.NewManager(
 			gw.Store(), home, env.Sandbox.Image,
-			&sandbox.Policy{}, os.Getenv("FASTCLAW_PREVIEW_BASE"))
+			&sandbox.Policy{}, os.Getenv("FASTCLAW_PREVIEW_BASE"),
+			env.Sandbox.Backend, gw.SandboxPool())
 		rtMgr.RegisterTemplate("shipany-tanstack", coderuntime.TemplateSpec{
 			DevPort: 3000,
 			// Default scaffold, validated end-to-end against
@@ -217,13 +222,75 @@ func runGateway(port int) error {
 					"--exclude=node_modules --exclude=.git --exclude=.output --exclude=dist "+
 					"-cf - . | tar -C /workspace -xf -; fi; cd /workspace; "+
 					"command -v pnpm >/dev/null 2>&1 || npm i -g pnpm; "+
+					// Point pnpm at the shared store volume so installs after the
+					// first reuse downloaded packages instead of re-fetching.
+					"pnpm config set store-dir /pnpm-store 2>/dev/null || true; "+
 					"pnpm config set verify-deps-before-run false; "+
-					"pnpm install || true; pnpm rebuild"),
-			DevCmd: envOr("FASTCLAW_SHIPANY_DEV", "pnpm dev --host 0.0.0.0 --port 3000"),
+					"pnpm install || true; pnpm rebuild; "+
+					// Snapshot the pristine template as a git baseline so the UI
+					// can later show ONLY the files the agent changed (git status
+					// vs this commit). .gitignore already excludes node_modules /
+					// build output, so the diff stays clean.
+					"git config --global --add safe.directory '*' 2>/dev/null || true; "+
+					"git init -q 2>/dev/null || true; git add -A 2>/dev/null || true; "+
+					"git -c user.email=bot@fastclaw -c user.name=fastclaw commit -q -m baseline 2>/dev/null || true"),
+			// Self-heal pnpm before running: the base image ships node+npm
+			// only, and pnpm is installed globally (container FS, NOT the
+			// bind-mounted /workspace). On a wake/re-up the container is
+			// recreated but the workspace already has files, so scaffold is
+			// skipped and the global pnpm is gone — `pnpm dev` would then
+			// fail "pnpm: not found". Ensuring it here makes DevCmd robust
+			// across container recreation without re-running the scaffold.
+			// Self-heal pnpm + its run-time config before starting dev. Both
+			// live in the container FS (global pnpm install + ~/.pnpmrc), NOT
+			// the bind-mounted /workspace, so a wake/re-up that recreates the
+			// container loses them while scaffold is skipped (workspace
+			// non-empty). Without `verify-deps-before-run false`, pnpm 11
+			// re-runs a deps-status check before `dev` that fails against the
+			// volume-mounted node_modules and aborts the server.
+			// Self-heal pnpm, its config, AND deps before dev. All three live
+			// outside the bind-mounted /workspace (global pnpm in container
+			// FS; node_modules in a per-scope volume that Stop removes), so a
+			// re-up after Stop recreates the container with files present
+			// (scaffold skipped) but no deps — `pnpm dev` would then die with
+			// "vite: not found". Reinstalling when node_modules/.bin/vite is
+			// missing makes every boot self-correct (fast: the shared pnpm
+			// store volume hard-links, no re-download).
+			DevCmd: envOr("FASTCLAW_SHIPANY_DEV",
+				"command -v pnpm >/dev/null 2>&1 || npm i -g pnpm; "+
+					"pnpm config set verify-deps-before-run false 2>/dev/null || true; "+
+					"[ -x node_modules/.bin/vite ] || pnpm install || true; "+
+					"pnpm dev --host 0.0.0.0 --port 3000"),
 			// Local template checkout bind-mounted at /template (option C):
 			// set FASTCLAW_SHIPANY_TEMPLATE_DIR=~/code/shipany-tanstack to
 			// scaffold from disk without baking the image or cloning.
 			TemplateMount: os.Getenv("FASTCLAW_SHIPANY_TEMPLATE_DIR"),
+		})
+		// A second, lighter template demonstrating multi-template support:
+		// a plain Vite + React + TS starter. It needs no baked /template and
+		// no R2 source — it self-scaffolds with `npm create vite` — and shares
+		// the SAME sandbox image as shipany (Node toolchain), so it proves the
+		// "one e2b image, many templates differing only by ScaffoldCmd" model
+		// (no per-template image needed for same-stack templates). Vite's HMR
+		// client follows the page origin, so it works through both docker's
+		// host-port map and e2b's <port>-<id>.e2b.app proxy with no extra
+		// config. shipany-tanstack above is untouched.
+		rtMgr.RegisterTemplate("vite-react", coderuntime.TemplateSpec{
+			DevPort: 5173,
+			ScaffoldCmd: envOr("FASTCLAW_VITE_REACT_SCAFFOLD",
+				"set -e; cd /workspace; "+
+					"if [ ! -f package.json ]; then "+
+					"npm create vite@latest .fctmp -- --template react-ts && "+
+					"cp -a .fctmp/. ./ && rm -rf .fctmp; fi; "+
+					"npm install; "+
+					// Git baseline so the UI's changed-files view diffs against
+					// the pristine scaffold — same pattern as shipany above.
+					"git config --global --add safe.directory '*' 2>/dev/null || true; "+
+					"git init -q 2>/dev/null || true; git add -A 2>/dev/null || true; "+
+					"git -c user.email=bot@fastclaw -c user.name=fastclaw commit -q -m baseline 2>/dev/null || true"),
+			DevCmd: envOr("FASTCLAW_VITE_REACT_DEV",
+				"[ -x node_modules/.bin/vite ] || npm install; "+
+					"npm run dev -- --host 0.0.0.0 --port 5173"),
 		})
 		webSrv.SetRuntimeManager(rtMgr) // HTTP /runtime endpoints
 		gw.SetProjectRuntime(rtMgr)     // agent preview tools

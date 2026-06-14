@@ -226,6 +226,13 @@ func (g *Gateway) Usage() usage.Meter { return g.usage }
 // Store returns the gateway's storage backend.
 func (g *Gateway) Store() store.Store { return g.store }
 
+// SandboxPool returns the gateway's shared system sandbox pool (nil when
+// sandboxing is disabled). The project runtime borrows it so a dev-server
+// preview runs in the SAME executor the coding agent writes files to —
+// the only way edits reach the server on backends (E2B) without a shared
+// host mount.
+func (g *Gateway) SandboxPool() sandbox.ExecutorPool { return g.sandboxPool }
+
 // TaskQueue returns the gateway's task queue.
 func (g *Gateway) TaskQueue() *taskqueue.Queue { return g.taskQueue }
 

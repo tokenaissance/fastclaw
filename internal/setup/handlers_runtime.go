@@ -245,3 +245,71 @@ func (s *Server) handleScopePreview(w http.ResponseWriter, r *http.Request) {
 		"status":     rec.Status,
 	})
 }
+
+// handleScopePreviewLogs tails the build/dev log for the CURRENT chat scope
+// (sessionId or projectId query, like handleScopePreview). The preview panel
+// polls it while the app is scaffolding so the user sees the live
+// pnpm-install output instead of an opaque "Building…" spinner. Always 200
+// so the client can render conditionally; "logs" is "" when there's nothing
+// yet (no runtime, or scaffold hasn't written a line).
+func (s *Server) handleScopePreviewLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.runtimeMgr == nil {
+		jsonResponse(w, http.StatusOK, map[string]any{"logs": ""})
+		return
+	}
+	if !s.requireAgentReadable(w, r, id) {
+		return
+	}
+	uid := s.effectiveUserID(r)
+	if uid == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	tailLines := 400
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			tailLines = n
+		}
+	}
+	out, err := s.runtimeMgr.Logs(r.Context(), uid, id,
+		r.URL.Query().Get("projectId"), r.URL.Query().Get("sessionId"), tailLines)
+	if err != nil {
+		// Not live yet / no scope → nothing to show, not an error to the UI.
+		jsonResponse(w, http.StatusOK, map[string]any{"logs": ""})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"logs": out})
+}
+
+// handleChangedFiles returns only the files the agent created/modified vs
+// the template baseline (git diff inside the running app), so the file
+// tree can show just THIS task's output instead of the whole template.
+// `available` is false when there's no live runtime / git baseline — the
+// UI then falls back to listing all workspace files.
+func (s *Server) handleChangedFiles(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.runtimeMgr == nil {
+		jsonResponse(w, http.StatusOK, map[string]any{"available": false, "files": []any{}})
+		return
+	}
+	if !s.requireAgentReadable(w, r, id) {
+		return
+	}
+	uid := s.effectiveUserID(r)
+	if uid == "" {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	changed, err := s.runtimeMgr.ChangedFiles(r.Context(), uid, id,
+		r.URL.Query().Get("projectId"), r.URL.Query().Get("sessionId"))
+	if err != nil {
+		jsonResponse(w, http.StatusOK, map[string]any{"available": false, "files": []any{}})
+		return
+	}
+	files := make([]map[string]any, 0, len(changed))
+	for _, f := range changed {
+		files = append(files, map[string]any{"path": f.Path, "size": 0, "modTime": 0})
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"available": true, "files": files})
+}

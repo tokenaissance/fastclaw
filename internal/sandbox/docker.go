@@ -49,6 +49,12 @@ type DockerSandbox struct {
 	// without baking it into the image or cloning over the network. Empty
 	// for ordinary sandboxes.
 	templateMount string
+	// extraVolumes are raw `-v` specs appended verbatim to docker create
+	// (e.g. "fastclaw-pnpm-store:/pnpm-store" to share a pnpm content store
+	// across runtimes so installs skip re-downloading). Named volumes live
+	// in the Docker VM (fast on macOS, unlike bind mounts) and persist
+	// across container recreation.
+	extraVolumes []string
 	// publishPorts maps a container-internal port to a host port. A host
 	// value of 0 asks Docker to pick a free ephemeral port, which is then
 	// read back with HostPortFor after Create. Used by the coding-agent
@@ -124,6 +130,14 @@ func (s *DockerSandbox) SetTemplateMount(hostDir string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.templateMount = hostDir
+}
+
+// SetExtraVolumes appends raw `docker -v` specs (e.g.
+// "fastclaw-pnpm-store:/pnpm-store"). Must be called before Create().
+func (s *DockerSandbox) SetExtraVolumes(specs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extraVolumes = append(s.extraVolumes[:0], specs...)
 }
 
 // SetPublishPorts configures container→host port publishing. Keys are
@@ -312,6 +326,11 @@ func (s *DockerSandbox) Create() error {
 	// /workspace bind mount.
 	if s.templateMount != "" {
 		args = append(args, "-v", fmt.Sprintf("%s:/template:ro", s.templateMount))
+	}
+
+	// Extra volumes (e.g. the shared pnpm store).
+	for _, v := range s.extraVolumes {
+		args = append(args, "-v", v)
 	}
 
 	// Port publishing (coding-agent runtime previews). Bind to 127.0.0.1
