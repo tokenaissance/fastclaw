@@ -325,7 +325,10 @@ func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Mem
 		"Each past user message in the history is prefixed with its own send time in [brackets] (e.g. [2026-06-13 22:15 Fri]). "+
 		"Reason about time from NOW and those prefixes: tell today apart from earlier days (never treat a past day's events as today's), "+
 		"and before ANY time-of-day remark check NOW — e.g. don't say \"good night\" in the middle of the day. "+
-		"If the chatter states a timezone or local time that disagrees with the above, call set_timezone to correct it.",
+		"If the timezone above looks wrong for this chatter — it reads UTC but their city, region, or language place them elsewhere "+
+		"(e.g. someone writing in Chinese who mentions 浦东 is in Asia/Shanghai) — infer their real timezone, apply it when you talk "+
+		"about time this turn, and record it in their USER.md profile (e.g. a `Timezone: Asia/Shanghai` line) so future timestamps "+
+		"convert automatically. Do the same when they state a timezone outright. Never invent a timezone without a real signal.",
 		now.Format("2006-01-02 15:04:05 -0700"), wd, now.Location().String())
 
 	switch mode {

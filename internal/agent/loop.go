@@ -3064,6 +3064,19 @@ func (a *Agent) WorkspacePath() string {
 // chatter's wall clock; the cron tool runs the same resolution at
 // job-creation time.
 func (a *Agent) chatterLocation(chatterUID string) *time.Location {
+	// USER.md is the chatter-authoritative source: the deployment clock is
+	// UTC and inbound timestamps are UTC, so the only place the chatter's
+	// real timezone lives is what they (or the agent) recorded in their
+	// profile — "东八区", "UTC+8", "Asia/Shanghai". Parse it and let it win
+	// over the DB prefs, so editing USER.md is enough to fix the clock
+	// without also having to run set_timezone.
+	if a.memory != nil {
+		if profile := a.memory.WithUserID(chatterUID).LoadUserFile(); profile != "" {
+			if loc := scope.LocationFromText(profile); loc != nil {
+				return loc
+			}
+		}
+	}
 	if a.dataStore == nil {
 		return time.Local
 	}
