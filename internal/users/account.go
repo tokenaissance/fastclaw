@@ -329,22 +329,27 @@ func (a *Accounts) SetPassword(ctx context.Context, id, newPassword string) erro
 	return a.store.UpdateUser(ctx, rec)
 }
 
-// EnsureAppUser returns the fastagent user representing (apikeyID, externalID),
+// EnsureAppUser returns the fastagent user representing (scopeNS, externalID),
 // creating one with role=app_user the first time it's seen. Idempotent:
-// later calls with the same pair return the existing row. The caller is
-// expected to be the api_key owner — Mint does not authenticate, that's
-// the auth middleware's job. Username/email are synthesized from the
-// pair and namespaced ("ext:<apikeyID>:<externalID>") so they don't
-// collide with real human signups but still satisfy the UNIQUE
-// constraints on those columns.
-func (a *Accounts) EnsureAppUser(ctx context.Context, apikeyID, externalID, displayName string) (*Account, error) {
-	apikeyID = strings.TrimSpace(apikeyID)
+// later calls with the same pair return the existing row.
+//
+// scopeNS is the STABLE namespace the external id is unique within — the
+// api_key OWNER account for the REST/OpenAI path (so the calling app can
+// rotate its api_key freely), or a channel namespace for inbound IM. It is
+// deliberately NOT the api_key id. Stored in the users.apikey_id column,
+// which is really a generic mint-scope slot.
+//
+// Username/email are synthesized from the pair and namespaced
+// ("ext:<scopeNS>:<externalID>") so they don't collide with real human
+// signups but still satisfy the UNIQUE constraints on those columns.
+func (a *Accounts) EnsureAppUser(ctx context.Context, scopeNS, externalID, displayName string) (*Account, error) {
+	scopeNS = strings.TrimSpace(scopeNS)
 	externalID = strings.TrimSpace(externalID)
-	if apikeyID == "" || externalID == "" {
-		return nil, errors.New("users.EnsureAppUser: apikeyID and externalID are required")
+	if scopeNS == "" || externalID == "" {
+		return nil, errors.New("users.EnsureAppUser: scopeNS and externalID are required")
 	}
 	// Fast path — already provisioned.
-	if rec, err := a.store.GetUserByExternal(ctx, apikeyID, externalID); err == nil {
+	if rec, err := a.store.GetUserByExternal(ctx, scopeNS, externalID); err == nil {
 		return toAccount(rec), nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, err
@@ -356,7 +361,7 @@ func (a *Accounts) EnsureAppUser(ctx context.Context, apikeyID, externalID, disp
 	// Synthesize unique username/email tokens. The downstream app
 	// is the source of truth for the human-readable identity; we
 	// only need *something* unique to satisfy the schema.
-	syn := apikeyID + ":" + externalID
+	syn := scopeNS + ":" + externalID
 	rec := &store.UserRecord{
 		ID:           id,
 		Username:     "ext:" + syn,
@@ -365,7 +370,7 @@ func (a *Accounts) EnsureAppUser(ctx context.Context, apikeyID, externalID, disp
 		DisplayName:  displayName,
 		Role:         RoleAppUser,
 		Status:       StatusActive,
-		APIKeyID:     apikeyID,
+		APIKeyID:     scopeNS,
 		ExternalID:   externalID,
 		AgentQuota:   -1,
 	}
@@ -374,7 +379,7 @@ func (a *Accounts) EnsureAppUser(ctx context.Context, apikeyID, externalID, disp
 		// between our GetUserByExternal and CreateUser. Re-read
 		// and return that row instead of bubbling the unique
 		// violation up to the caller.
-		if again, qerr := a.store.GetUserByExternal(ctx, apikeyID, externalID); qerr == nil {
+		if again, qerr := a.store.GetUserByExternal(ctx, scopeNS, externalID); qerr == nil {
 			return toAccount(again), nil
 		}
 		return nil, err

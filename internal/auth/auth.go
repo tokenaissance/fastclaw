@@ -252,12 +252,13 @@ func (r *Resolver) ResolveBearer(ctx context.Context, token string) (Identity, e
 	}, nil
 }
 
-// SwitchToAppUser rebinds ident to the app_user associated with
-// (ident.APIKeyID, externalID), minting that row the first time it's
-// seen. APIKeyID + APIKeyAgents are preserved — only UserID and Role
-// flip — so the apikey's agent ACL still gates access. Pass through
-// empty externalID untouched. Only valid for AuthMethod=="apikey";
-// session callers stay as-is.
+// SwitchToAppUser rebinds ident to the app_user for (owner account,
+// externalID), minting that row the first time it's seen. The app_user is
+// keyed on the api_key's OWNER account — NOT the api_key id — so the calling
+// app can rotate/replace its api_key without orphaning the end-user. APIKeyID
+// + APIKeyAgents are preserved (only UserID + Role flip) so the apikey's agent
+// ACL still gates access. Empty externalID passes through untouched. Only
+// valid for AuthMethod=="apikey"; session callers stay as-is.
 func (r *Resolver) SwitchToAppUser(ctx context.Context, ident Identity, externalID string) (Identity, error) {
 	if externalID == "" {
 		return ident, nil
@@ -265,7 +266,14 @@ func (r *Resolver) SwitchToAppUser(ctx context.Context, ident Identity, external
 	if ident.AuthMethod != "apikey" || ident.APIKeyID == "" {
 		return ident, errors.New("auth.SwitchToAppUser: api_key auth required")
 	}
-	acc, err := r.accounts.EnsureAppUser(ctx, ident.APIKeyID, externalID, "")
+	// Already an app_user (request switched once) — re-keying off the
+	// app_user's own id would mint a nested user. No-op instead.
+	if ident.Role == users.RoleAppUser {
+		return ident, nil
+	}
+	// ident.UserID is the api_key's owner account here (pre-switch); key the
+	// app_user on it so rotating/replacing the api_key keeps the same user.
+	acc, err := r.accounts.EnsureAppUser(ctx, ident.UserID, externalID, "")
 	if err != nil {
 		return ident, err
 	}

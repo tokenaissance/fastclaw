@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -792,6 +793,32 @@ func (d *DBStore) migrateUsersAppUserCols(ctx context.Context) error {
 			ON users (apikey_id, external_id)
 			WHERE apikey_id <> '' AND external_id <> ''`); err != nil {
 		return fmt.Errorf("create idx_users_apikey_external: %w", err)
+	}
+
+	// One-time, collision-safe re-key: app_users minted under the OLD scheme
+	// stored the api_key id as their mint scope, which orphans the end-user
+	// when the calling app rotates/replaces that key. Re-key them onto the
+	// api_key's OWNER account so identity survives key rotation. Only rows
+	// whose apikey_id still resolves to a real api_key are remapped; rows that
+	// would collide with an already-owner-keyed sibling (same owner +
+	// external_id) are skipped. Idempotent: once apikey_id holds a "u_…" owner
+	// it no longer matches any apikeys.id ("k_…"), so reruns touch nothing.
+	// Non-fatal: a rare unrecoverable collision (two legacy keys, same owner,
+	// same external_id) is logged and left for manual reconciliation rather
+	// than blocking startup.
+	if _, err := d.db.ExecContext(ctx, `
+		UPDATE users SET apikey_id = (SELECT a.user_id FROM apikeys a WHERE a.id = users.apikey_id)
+		WHERE role = 'app_user'
+		  AND apikey_id <> ''
+		  AND apikey_id IN (SELECT id FROM apikeys)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM users u2
+		    WHERE u2.id <> users.id
+		      AND u2.role = 'app_user'
+		      AND u2.external_id = users.external_id
+		      AND u2.apikey_id = (SELECT a.user_id FROM apikeys a WHERE a.id = users.apikey_id)
+		  )`); err != nil {
+		slog.Warn("migrate: backfill app_user owner scope failed (non-fatal)", "error", err)
 	}
 	return nil
 }

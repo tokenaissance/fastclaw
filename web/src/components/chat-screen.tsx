@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { fileUrl, getAgent, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal } from "lucide-react";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
 
@@ -968,15 +968,12 @@ export function ChatScreen() {
     }
   }, [urlSessionId, sessionId]);
 
-  // Clicking "New chat" lands on the bare /chat/ route (no session, no
-  // project) — close the workspace panel so the previous chat's file
-  // tree doesn't linger over a fresh, empty conversation. Keyed on the
-  // URL ids, not on every render, so the user can still re-open the
-  // panel manually within the new chat without it snapping shut.
+  // Switching conversations (sidebar chat click, New chat, opening a project)
+  // changes the URL ids — close the workspace panel so the previous chat's
+  // files don't linger over a different conversation. Keyed on the URL ids,
+  // not every render, so the user can still re-open it within the SAME chat.
   useEffect(() => {
-    if (!urlSessionId && !urlProjectId) {
-      setFilesSheetOpen(false);
-    }
+    setFilesSheetOpen(false);
   }, [urlSessionId, urlProjectId]);
 
   // Keep the local sessionTitle in sync with the session list. Unknown
@@ -1910,7 +1907,11 @@ export function ChatScreen() {
         <div
           ref={messagesScrollRef}
           className={
-            "min-h-0 px-4 " +
+            // scrollbar-gutter:stable always reserves the 6px scrollbar track
+            // so message rows keep a fixed content width that lines up with the
+            // composer below (which gets a matching right inset) — otherwise the
+            // scrollbar shifts message edges out of alignment on a narrow panel.
+            "min-h-0 px-4 [scrollbar-gutter:stable] " +
             (isEmpty ? "shrink-0" : "flex-1 overflow-y-auto py-4")
           }
         >
@@ -2045,8 +2046,12 @@ export function ChatScreen() {
                   className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                 >
                   <div
-                    className={`group relative max-w-[80%] ${
-                      msg.role === "user" ? "order-1" : ""
+                    className={`group relative ${
+                      // Assistant content (tables, long markdown) uses the full
+                      // lane — capped only by the lane's max-w-2xl — so it stops
+                      // wrapping early and leaving a big empty gutter on narrow
+                      // panels. User bubbles stay hugged to the right.
+                      msg.role === "user" ? "max-w-[80%] order-1" : "max-w-full"
                     }`}
                   >
                     {msg.role === "user" && msg.sender && (
@@ -2276,8 +2281,9 @@ export function ChatScreen() {
           <TodoPanel items={todoItems} active={sending} />
         )}
 
-        {/* Input */}
-        <div className="shrink-0 px-4 pb-6 pt-2">
+        {/* Input — right inset matches the messages' reserved scrollbar gutter
+            (6px) so the composer's edges line up with the message rows above. */}
+        <div className="shrink-0 pl-4 pr-[calc(1rem+6px)] pb-6 pt-2">
           <div className="mx-auto max-w-2xl relative">
             {isReadOnlyChannel && (
               // The web compose path can't deliver into upstream IM
@@ -2818,7 +2824,7 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
   }
   return (
     <div className="flex justify-start">
-      <div className="max-w-[85%] space-y-2">{inner}</div>
+      <div className="max-w-full space-y-2">{inner}</div>
     </div>
   );
 }
@@ -2852,7 +2858,7 @@ function ToolRoundsBundle({
   const allDone = doneCount === totalTools;
   return (
     <div className="flex justify-start">
-      <div className="max-w-[85%] w-full">
+      <div className="max-w-full w-full">
         <div className="rounded-lg border border-border bg-card/50 overflow-hidden">
           <button
             onClick={() => setOpen(!open)}
@@ -2904,12 +2910,34 @@ function fileKind(path: string): { icon: typeof File; preview: "image" | "pdf" |
   if (ext === "pdf") return { icon: FileText, preview: "pdf" };
   if (ext === "md" || ext === "markdown") return { icon: FileText, preview: "markdown" };
   if (ext === "html" || ext === "htm") return { icon: FileCode, preview: "html" };
-  if (["mp4", "webm", "mov", "mkv"].includes(ext)) return { icon: Film, preview: "none" };
-  if (["mp3", "wav", "ogg", "flac", "m4a"].includes(ext)) return { icon: Music, preview: "none" };
-  if (["js", "ts", "tsx", "jsx", "py", "go", "rs", "c", "cpp", "h", "java", "rb", "sh", "json", "yaml", "yml", "toml", "xml", "css"].includes(ext))
+  if (["mp4", "webm", "mov", "mkv", "avi", "m4v"].includes(ext)) return { icon: Film, preview: "none" };
+  if (["mp3", "wav", "ogg", "flac", "m4a", "aac"].includes(ext)) return { icon: Music, preview: "none" };
+  // Genuinely binary formats → download only. Everything else is treated as
+  // plain text below (so .env / Dockerfile / .sql / SKILL / extension-less /
+  // unknown-but-textual files render their content instead of a download
+  // prompt). `.text()` on a binary that slips through just shows garbage —
+  // an acceptable trade for never hiding a readable file.
+  if (
+    [
+      "zip", "tar", "gz", "tgz", "bz2", "7z", "rar", "xz", "zst",
+      "woff", "woff2", "ttf", "otf", "eot",
+      "exe", "dll", "so", "dylib", "bin", "dat", "wasm", "class", "node",
+      "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+      "db", "sqlite", "sqlite3", "mdb",
+    ].includes(ext)
+  ) {
+    return { icon: File, preview: "none" };
+  }
+  // Known code extensions get the code icon; all other textual files fall
+  // through to a plain-text view with a generic file icon.
+  if (
+    ["js", "ts", "tsx", "jsx", "mjs", "cjs", "py", "go", "rs", "c", "cpp", "h", "java",
+     "rb", "sh", "bash", "zsh", "json", "jsonc", "yaml", "yml", "toml", "xml", "css",
+     "scss", "sql", "dockerfile"].includes(ext)
+  ) {
     return { icon: FileCode, preview: "text" };
-  if (["txt", "csv", "log"].includes(ext)) return { icon: FileText, preview: "text" };
-  return { icon: File, preview: "none" };
+  }
+  return { icon: FileText, preview: "text" };
 }
 
 function formatBytes(n?: number): string {
@@ -3050,17 +3078,37 @@ function FileTreeView({
   rootPrefix,
   selectedPath,
   onSelect,
+  defaultExpandDepth = 1,
 }: {
   files: WorkspaceFile[];
   rootPrefix: string;
   selectedPath?: string;
   onSelect: (f: ProducedFile) => void;
+  // Folders shallower than this are open on first load (1 = open the root
+  // folders only) so the user sees the top entries without a deep dump.
+  defaultExpandDepth?: number;
 }) {
   const tree = useMemo(() => buildFileTree(files, rootPrefix), [files, rootPrefix]);
-  // Default collapsed: only the top level shows; the user expands folders as
-  // needed. Expansion state keys on stable relative paths, so it survives
-  // refreshes.
+  // Expansion state keys on stable relative paths, so it survives refreshes.
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  // Auto-expand the first `defaultExpandDepth` folder levels once, when the
+  // tree first arrives (files load async). User toggles persist after that.
+  const initedRef = useRef(false);
+  useEffect(() => {
+    if (initedRef.current || tree.length === 0) return;
+    initedRef.current = true;
+    const next = new Set<string>();
+    const walk = (nodes: FileTreeNode[], depth: number) => {
+      for (const n of nodes) {
+        if (n.isDir && depth < defaultExpandDepth) {
+          next.add(n.path);
+          walk(n.children, depth + 1);
+        }
+      }
+    };
+    walk(tree, 0);
+    setExpanded(next);
+  }, [tree, defaultExpandDepth]);
   const toggle = useCallback((path: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -3186,6 +3234,8 @@ function WorkspacePanel({
   const [buildLogs, setBuildLogs] = useState("");
   // Code (file tree) vs Preview (embedded iframe of the running dev server).
   const [tab, setTab] = useState<"code" | "preview">("code");
+  // Collapse the left file tree to give the viewer the full width.
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
   // Files the agent changed vs the template baseline (so the tree can show
   // just this task's output), and whether to show all files instead.
   const [changed, setChanged] = useState<{ files: WorkspaceFile[]; available: boolean }>({ files: [], available: false });
@@ -3316,6 +3366,13 @@ function WorkspacePanel({
     refresh();
   }, [refresh]);
 
+  // Switching conversations swaps the file tree to the new scope — clear the
+  // selected file too, so the viewer never shows a file from the previous
+  // conversation (the tree refetches but `previewing` would otherwise linger).
+  useEffect(() => {
+    setPreviewing(null);
+  }, [agentId, sessionId, projectId]);
+
   // While the Preview tab is open, poll the runtime so a "building" preview
   // flips to the live iframe on its own (and reflects sleep/crash). Cheap
   // local call; stops when the tab closes.
@@ -3341,26 +3398,42 @@ function WorkspacePanel({
     };
   }, [tab, agentId, sessionId, projectId]);
 
-  // Auto-grow the panel when entering Preview so the embedded site isn't
-  // cramped. Transient — not written to localStorage, so the Code tab keeps
-  // its own saved width and dragging still wins.
+  // Open at a comfortable width: the 280px drag-floor is far too cramped to
+  // read a file tree + viewer. Grow to PREVIEW_AUTO_WIDTH on mount (panel
+  // open) — capped by the 70% container maxWidth, so it never overflows. The
+  // user can still drag narrower within the session; reopening re-widens.
   useEffect(() => {
-    if (tab === "preview") {
+    setWidth((w) => (w < PREVIEW_AUTO_WIDTH ? Math.min(PREVIEW_AUTO_WIDTH, FILES_PANEL_MAX) : w));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Also grow when entering Preview / opening a file (in case the user dragged
+  // narrow earlier) so the iframe / viewer column isn't cramped.
+  useEffect(() => {
+    if (tab === "preview" || previewing) {
       setWidth((w) => (w < PREVIEW_AUTO_WIDTH ? Math.min(PREVIEW_AUTO_WIDTH, FILES_PANEL_MAX) : w));
     }
-  }, [tab]);
+  }, [tab, previewing]);
+
+  // The Preview tab only exists for coding projects with a live dev server.
+  // When there's no app preview, hide the tab and snap back to Files.
+  const hasPreview = appPreview.status !== "none";
+  useEffect(() => {
+    if (!hasPreview && tab === "preview") setTab("code");
+  }, [hasPreview, tab]);
 
   return (
     <>
       <aside
         ref={asideRef}
-        // width is the dragged/auto px width, but cap it to the viewport so
-        // the panel (shrink-0) + the platform sidebar can never exceed the
-        // window and force a horizontal page scroll. 26rem reserve keeps the
-        // sidebar (~16rem) plus a usable chat sliver visible; min() lets it
-        // grow to FILES_PANEL_MAX on wide screens. overflow-hidden is the
-        // belt-and-suspenders so no inner content can push the page wide.
-        style={{ width, maxWidth: `min(${FILES_PANEL_MAX}px, calc(100vw - 26rem))` }}
+        // width is the dragged/auto px width, but cap it to 70% of THIS panel's
+        // own flex container (the chat-area minus the platform sidebar) — NOT
+        // the viewport. A container-relative cap auto-shrinks the panel when the
+        // sidebar expands (the container narrows, 70% narrows with it), so the
+        // chat always keeps ≥30% and the page never scrolls horizontally. min()
+        // still bounds it to FILES_PANEL_MAX on very wide screens. overflow-
+        // hidden is the belt-and-suspenders against inner content overflow.
+        style={{ width, maxWidth: `min(${FILES_PANEL_MAX}px, 70%)` }}
         className="relative z-30 hidden md:flex shrink-0 flex-col overflow-hidden border-l border-border bg-background -mt-12 h-screen"
       >
         <div
@@ -3377,35 +3450,9 @@ function WorkspacePanel({
         <div className="flex h-12 items-center justify-between gap-2 border-b border-border px-4">
           <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
             <FolderOpen className="h-4 w-4 shrink-0" />
-            {!compactHeader && <span className="truncate">Files</span>}
+            {!compactHeader && <span className="truncate">Workspace</span>}
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {/* Code (file tree) ⇄ Preview (live dev server iframe) toggle. */}
-            <div className="mr-1 flex items-center rounded-md bg-muted p-0.5 text-xs">
-              <button
-                onClick={() => setTab("code")}
-                className={`rounded px-2.5 py-1 transition-colors ${
-                  tab === "code"
-                    ? "bg-background font-medium text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                Code
-              </button>
-              <button
-                onClick={() => setTab("preview")}
-                className={`flex items-center gap-1 rounded px-2.5 py-1 transition-colors ${
-                  tab === "preview"
-                    ? "bg-background font-medium text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                Preview
-                {(appPreview.status === "starting" || appPreview.status === "scaffolding") && (
-                  <RefreshCw className="h-3 w-3 animate-spin" />
-                )}
-              </button>
-            </div>
             {/* Secondary actions: inline on a wide panel, folded into a "⋯"
                 menu when the panel is narrow so the toolbar never overflows
                 and pushes a horizontal page scroll. */}
@@ -3514,54 +3561,121 @@ function WorkspacePanel({
             </button>
           </div>
         </div>
+        {/* Row 2: Files (tree) / Preview (dev server) toggle + tree collapse.
+            The Preview tab is shown only for coding projects with a live dev
+            server; a plain file session (a PDF, some docs) just shows Files. */}
+        <div className="flex h-10 items-center justify-between gap-2 border-b border-border px-3">
+          {hasPreview ? (
+            <div className="flex items-center rounded-md bg-muted p-0.5 text-xs">
+              <button
+                onClick={() => setTab("code")}
+                className={`rounded px-2.5 py-1 transition-colors ${
+                  tab === "code"
+                    ? "bg-background font-medium text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Files
+              </button>
+              <button
+                onClick={() => setTab("preview")}
+                className={`flex items-center gap-1 rounded px-2.5 py-1 transition-colors ${
+                  tab === "preview"
+                    ? "bg-background font-medium text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Preview
+                {(appPreview.status === "starting" || appPreview.status === "scaffolding") && (
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                )}
+              </button>
+            </div>
+          ) : (
+            <span className="px-1 text-xs font-medium text-muted-foreground">Files</span>
+          )}
+          {tab === "code" && (
+            <button
+              onClick={() => setTreeCollapsed((c) => !c)}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+              title={treeCollapsed ? "Show file tree" : "Hide file tree"}
+            >
+              {treeCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+            </button>
+          )}
+        </div>
         {tab === "code" ? (
-          <div className="flex flex-1 min-h-0 flex-col">
-            {/* When there's a template baseline, default to showing only the
-                files THIS task changed; let the user flip to the full tree. */}
-            {changed.available && (
-              <div className="flex items-center gap-1 border-b border-border px-3 py-1.5 text-xs">
-                <button
-                  onClick={() => setShowAll(false)}
-                  className={`rounded px-2 py-0.5 transition-colors ${
-                    !showAll ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  Changed{changed.files.length ? ` (${changed.files.length})` : ""}
-                </button>
-                <button
-                  onClick={() => setShowAll(true)}
-                  className={`rounded px-2 py-0.5 transition-colors ${
-                    showAll ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  All files
-                </button>
-              </div>
-            )}
-            <div className="flex-1 overflow-y-auto p-2">
-              {(() => {
-                const showChanged = changed.available && !showAll;
-                const list = showChanged ? changed.files : files;
-                if (!loading && list.length === 0) {
+          <div className="flex min-h-0 flex-1">
+            {/* Left: file tree (collapsible). */}
+            {!treeCollapsed && (
+            <div className="flex w-56 shrink-0 flex-col border-r border-border">
+              {/* When there's a template baseline, default to showing only the
+                  files THIS task changed; let the user flip to the full tree. */}
+              {changed.available && (
+                <div className="flex items-center gap-1 border-b border-border px-3 py-1.5 text-xs">
+                  <button
+                    onClick={() => setShowAll(false)}
+                    className={`rounded px-2 py-0.5 transition-colors ${
+                      !showAll ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Changed{changed.files.length ? ` (${changed.files.length})` : ""}
+                  </button>
+                  <button
+                    onClick={() => setShowAll(true)}
+                    className={`rounded px-2 py-0.5 transition-colors ${
+                      showAll ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    All files
+                  </button>
+                </div>
+              )}
+              <div className="flex-1 overflow-y-auto p-2">
+                {(() => {
+                  const showChanged = changed.available && !showAll;
+                  const list = showChanged ? changed.files : files;
+                  if (!loading && list.length === 0) {
+                    return (
+                      <p className="px-3 py-8 text-center text-sm text-muted-foreground">
+                        {showChanged
+                          ? "No changes yet — the agent hasn't edited any files."
+                          : projectId
+                            ? "No files in this project yet."
+                            : "No files in this session yet."}
+                      </p>
+                    );
+                  }
                   return (
-                    <p className="px-3 py-8 text-center text-sm text-muted-foreground">
-                      {showChanged
-                        ? "No changes yet — the agent hasn't edited any files."
-                        : projectId
-                          ? "No files in this project yet."
-                          : "No files in this session yet."}
-                    </p>
+                    <FileTreeView
+                      files={list}
+                      rootPrefix={projectId ? `projects/${projectId}/` : `sessions/${sessionId}/`}
+                      selectedPath={previewing?.path}
+                      onSelect={(f) => setPreviewing(f)}
+                    />
                   );
-                }
-                return (
-                  <FileTreeView
-                    files={list}
-                    rootPrefix={projectId ? `projects/${projectId}/` : `sessions/${sessionId}/`}
-                    selectedPath={previewing?.path}
-                    onSelect={(f) => setPreviewing(f)}
-                  />
-                );
-              })()}
+                })()}
+              </div>
+            </div>
+            )}
+            {/* Right: viewer for the selected file — overflow-hidden so wide
+                content (a PDF, long code lines) never scrolls the panel. */}
+            <div className="min-w-0 flex-1 overflow-hidden">
+              {previewing ? (
+                <FileViewer
+                  // Remount on file change so text/error/view state resets and
+                  // the new file's content is fetched (not the stale previous).
+                  key={previewing.path}
+                  agentId={agentId}
+                  file={previewing}
+                  onClose={() => setPreviewing(null)}
+                />
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
+                  <FileText className="h-6 w-6" />
+                  <p className="text-sm">Select a file to view it here.</p>
+                </div>
+              )}
             </div>
           </div>
         ) : (
@@ -3605,13 +3719,6 @@ function WorkspacePanel({
           </div>
         )}
       </aside>
-      {previewing && (
-        <FilePreview
-          agentId={agentId}
-          file={previewing}
-          onClose={() => setPreviewing(null)}
-        />
-      )}
     </>
   );
 }
@@ -3628,40 +3735,36 @@ function formatRelativeTime(ts?: number): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function FilePreview({ agentId, file, onClose }: { agentId: string; file: ProducedFile; onClose: () => void }) {
+// FileViewer renders a selected workspace file inline (right column of the
+// Files tab): image / pdf / markdown / highlighted text / rendered-or-source
+// HTML. onClose, when given, deselects the file.
+function FileViewer({ agentId, file, onClose }: { agentId: string; file: ProducedFile; onClose?: () => void }) {
   const { preview } = fileKind(file.path);
   const src = fileUrl(agentId, file.path, false);
   const downloadUrl = fileUrl(agentId, file.path, true);
   const basename = file.path.split("/").pop() || file.path;
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [htmlView, setHtmlView] = useState<"rendered" | "source">("rendered");
+  // Default to SOURCE for markdown/html — clicking a file shows its code; the
+  // toggle flips to rendered when wanted.
+  const [view, setView] = useState<"rendered" | "source">("source");
 
   useEffect(() => {
-    // HTML fetches its text lazily only when the user switches to source view.
-    if (preview !== "markdown" && preview !== "text") return;
+    // Fetch the raw text for anything we show as source: markdown, code/text,
+    // and html (html starts in source view too).
+    if (preview !== "markdown" && preview !== "text" && preview !== "html") return;
+    if (text !== null) return;
     let cancelled = false;
     fetch(src)
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
       .then((t) => { if (!cancelled) setText(t); })
       .catch((e) => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; };
-  }, [src, preview]);
-
-  useEffect(() => {
-    if (preview !== "html" || htmlView !== "source" || text !== null) return;
-    let cancelled = false;
-    fetch(src)
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
-      .then((t) => { if (!cancelled) setText(t); })
-      .catch((e) => { if (!cancelled) setError(String(e)); });
-    return () => { cancelled = true; };
-  }, [src, preview, htmlView, text]);
+  }, [src, preview, text]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4" onClick={onClose}>
-      <div className="flex h-[85vh] w-full max-w-4xl flex-col rounded-xl border border-border bg-card shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-border px-4 py-3 shrink-0">
+    <div className="flex h-full flex-col">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
             <span className="font-medium text-sm truncate">{basename}</span>
@@ -3670,77 +3773,80 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            {preview === "html" && (
+            {(preview === "html" || preview === "markdown") && (
               <button
-                onClick={() => setHtmlView(htmlView === "rendered" ? "source" : "rendered")}
+                onClick={() => setView(view === "rendered" ? "source" : "rendered")}
                 className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
-                title={htmlView === "rendered" ? "View source" : "View rendered"}
+                title={view === "rendered" ? "View source" : "View rendered"}
               >
-                {htmlView === "rendered" ? <Code2 className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                {view === "rendered" ? <Code2 className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             )}
             <a
-              href={downloadUrl}
+              href={src}
+              target="_blank"
+              rel="noopener noreferrer"
               className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
-              title="Download"
+              title="Open in new tab"
             >
-              <Download className="h-4 w-4" />
+              <ExternalLink className="h-4 w-4" />
             </a>
-            <button
-              onClick={onClose}
-              className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
-              title="Close"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                title="Close file"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
-        <div className="flex-1 overflow-auto p-4 min-h-0">
+        <div className="min-h-0 flex-1">
           {preview === "image" && (
-            <img src={src} alt={basename} className="max-w-full max-h-full mx-auto object-contain" />
+            <div className="flex h-full items-center justify-center overflow-auto p-4">
+              <img src={src} alt={basename} className="max-h-full max-w-full object-contain" />
+            </div>
           )}
           {preview === "pdf" && (
             <iframe src={src} className="h-full w-full border-0" title={basename} />
           )}
-          {preview === "markdown" && (
-            error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
-            : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
-            : (
-              <ChatMarkdown text={text} />
-            )
-          )}
-          {preview === "text" && (
-            error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
-            : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
-            : text.includes("```") ? (
-              // Content with its own fences would break the wrapper — fall back
-              // to a plain (unhighlighted) block.
-              <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-muted/30 rounded p-3">{text}</pre>
+          {(preview === "markdown" || preview === "text" || preview === "html") && (
+            // Rendered view (markdown / html) only when toggled; otherwise the
+            // default is full-bleed highlighted SOURCE.
+            preview !== "text" && view === "rendered" ? (
+              preview === "html" ? (
+                // sandbox="allow-scripts": CSS/animations work; scripts can't
+                // reach parent cookies/storage — safe for untrusted output.
+                <iframe
+                  src={src}
+                  sandbox="allow-scripts"
+                  className="h-full w-full border-0 bg-white"
+                  title={basename}
+                />
+              ) : (
+                <div className="h-full overflow-auto p-4">
+                  <ChatMarkdown text={text ?? ""} />
+                </div>
+              )
+            ) : error ? (
+              <p className="p-4 text-sm text-destructive">Failed to load: {error}</p>
+            ) : text === null ? (
+              <p className="p-4 text-sm text-muted-foreground">Loading…</p>
+            ) : text.includes("```") ? (
+              // Content with its own fences would break the fenced wrapper —
+              // fall back to a plain (unhighlighted) full-bleed block.
+              <pre className="h-full overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-xs">{text}</pre>
             ) : (
-              // Reuse the chat markdown renderer's Shiki code plugin for
-              // highlighting by wrapping the file in a fenced block.
-              <ChatMarkdown text={"```" + langForPath(file.path) + "\n" + text + "\n```"} />
-            )
-          )}
-          {preview === "html" && (
-            htmlView === "rendered" ? (
-              // sandbox="allow-scripts" runs the page in a null origin: CSS,
-              // animations, charts work, but scripts can't reach parent
-              // cookies/storage/API — safe for untrusted agent output.
-              <iframe
-                src={src}
-                sandbox="allow-scripts"
-                className="h-full w-full border-0 rounded bg-white"
-                title={basename}
-              />
-            ) : error ? <p className="text-sm text-destructive">Failed to load: {error}</p>
-            : text === null ? <p className="text-sm text-muted-foreground">Loading…</p>
-            : (
-              <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-muted/30 rounded p-3">{text}</pre>
+              // Shiki-highlighted source, no card / copy pill / padding —
+              // fills the pane edge-to-edge.
+              <div className="h-full overflow-auto">
+                <ChatMarkdown bareCode text={"```" + langForPath(file.path) + "\n" + text + "\n```"} />
+              </div>
             )
           )}
           {preview === "none" && (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-center">
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center">
               <File className="h-12 w-12 text-muted-foreground/50" />
               <p className="text-sm text-muted-foreground">Preview not available for this file type.</p>
               <a href={downloadUrl} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90">
@@ -3749,7 +3855,6 @@ function FilePreview({ agentId, file, onClose }: { agentId: string; file: Produc
             </div>
           )}
         </div>
-      </div>
     </div>
   );
 }

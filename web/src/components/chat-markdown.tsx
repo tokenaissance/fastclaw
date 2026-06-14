@@ -74,10 +74,14 @@ export function ChatMarkdown({
   text,
   agentId,
   sessionId,
+  bareCode = false,
 }: {
   text: string;
   agentId?: string;
   sessionId?: string;
+  // File-viewer mode: hide the floating copy pill on code blocks (the .chat-md
+  // strip already removes the card) so a source file reads as plain code.
+  bareCode?: boolean;
 }) {
   // Build the URL transform once per agent/session. A stable identity keeps
   // Streamdown (a memo component) from re-rendering on every streamed keystroke,
@@ -119,7 +123,7 @@ export function ChatMarkdown({
   }
 
   return (
-    <div className={PROSE_CLASS} onClick={onMermaidClick} onWheelCapture={onWheelCapture}>
+    <div className={bareCode ? PROSE_CLASS + " chat-md-bare" : PROSE_CLASS} onClick={onMermaidClick} onWheelCapture={onWheelCapture}>
       <Streamdown
         parseIncompleteMarkdown
         plugins={streamdownPlugins}

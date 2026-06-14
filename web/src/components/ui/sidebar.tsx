@@ -31,6 +31,12 @@ const SIDEBAR_WIDTH = "16rem"
 const SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
+// Free-resize bounds for the expanded sidebar (px). The rail handle drags
+// between these; persisted so it survives navigation.
+const SIDEBAR_WIDTH_PX = 256 // 16rem default
+const SIDEBAR_MIN_PX = 200
+const SIDEBAR_MAX_PX = 420
+const SIDEBAR_WIDTH_KEY = "sidebar:width"
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed"
@@ -40,6 +46,9 @@ type SidebarContextProps = {
   setOpenMobile: (open: boolean) => void
   isMobile: boolean
   toggleSidebar: () => void
+  // Expanded sidebar width in px + setter (clamped) for the drag rail.
+  width: number
+  setWidth: (w: number) => void
 }
 
 const SidebarContext = React.createContext<SidebarContextProps | null>(null)
@@ -96,6 +105,24 @@ function SidebarProvider({
     [setOpenProp, open]
   )
 
+  // Free-resizable expanded width (px), persisted across navigation.
+  const [width, _setWidth] = React.useState<number>(() => {
+    if (typeof window === "undefined") return SIDEBAR_WIDTH_PX
+    const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY))
+    return Number.isFinite(stored) && stored >= SIDEBAR_MIN_PX && stored <= SIDEBAR_MAX_PX
+      ? stored
+      : SIDEBAR_WIDTH_PX
+  })
+  const setWidth = React.useCallback((w: number) => {
+    const clamped = Math.max(SIDEBAR_MIN_PX, Math.min(SIDEBAR_MAX_PX, Math.round(w)))
+    _setWidth(clamped)
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped))
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, [])
+
   // Helper to toggle the sidebar.
   const toggleSidebar = React.useCallback(() => {
     return isMobile ? setOpenMobile((open) => !open) : setOpen((open) => !open)
@@ -130,8 +157,10 @@ function SidebarProvider({
       openMobile,
       setOpenMobile,
       toggleSidebar,
+      width,
+      setWidth,
     }),
-    [state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar]
+    [state, open, setOpen, isMobile, openMobile, setOpenMobile, toggleSidebar, width, setWidth]
   )
 
   return (
@@ -140,7 +169,8 @@ function SidebarProvider({
         data-slot="sidebar-wrapper"
         style={
           {
-            "--sidebar-width": SIDEBAR_WIDTH,
+            // Dynamic expanded width (drag rail); icon width stays constant.
+            "--sidebar-width": `${width}px`,
             "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
             ...style,
           } as React.CSSProperties
@@ -286,16 +316,49 @@ function SidebarTrigger({
 }
 
 function SidebarRail({ className, ...props }: React.ComponentProps<"button">) {
-  const { toggleSidebar } = useSidebar()
+  const { toggleSidebar, setWidth, state } = useSidebar()
+  // Distinguish a drag (resize) from a click (toggle): the rail straddles the
+  // sidebar's right edge, so the new width is simply the pointer's X. Only an
+  // actual move counts as a resize; a clean click still toggles.
+  const movedRef = React.useRef(false)
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (state === "collapsed") return // collapsed → click expands; no resize
+    e.preventDefault()
+    movedRef.current = false
+    const startX = e.clientX
+    const onMove = (ev: MouseEvent) => {
+      if (Math.abs(ev.clientX - startX) > 3) movedRef.current = true
+      setWidth(ev.clientX)
+    }
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove)
+      document.removeEventListener("mouseup", onUp)
+      document.body.style.userSelect = ""
+      document.body.style.cursor = ""
+    }
+    document.body.style.userSelect = "none"
+    document.body.style.cursor = "col-resize"
+    document.addEventListener("mousemove", onMove)
+    document.addEventListener("mouseup", onUp)
+  }
 
   return (
     <button
       data-sidebar="rail"
       data-slot="sidebar-rail"
-      aria-label="Toggle Sidebar"
+      aria-label="Resize or toggle sidebar"
       tabIndex={-1}
-      onClick={toggleSidebar}
-      title="Toggle Sidebar"
+      onMouseDown={onMouseDown}
+      onClick={() => {
+        // A drag just ended — swallow the click so it doesn't also toggle.
+        if (movedRef.current) {
+          movedRef.current = false
+          return
+        }
+        toggleSidebar()
+      }}
+      title="Drag to resize · click to toggle"
       className={cn(
         "absolute inset-y-0 z-20 hidden w-4 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:start-1/2 after:w-[2px] hover:after:bg-sidebar-border sm:flex ltr:-translate-x-1/2 rtl:-translate-x-1/2",
         "in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize",

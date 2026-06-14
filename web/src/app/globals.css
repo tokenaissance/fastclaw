@@ -290,6 +290,17 @@ html.theme-transition *::after {
   .chat-md [data-streamdown="code-block"] {
     @apply !border-0 !bg-transparent !p-0 !rounded-none !min-w-0 !max-w-full !overflow-x-auto relative;
   }
+
+  /* File-viewer (bareCode) mode: no copy pill, no card border/padding — the
+     source fills the pane edge-to-edge (line numbers are the only gutter). */
+  .chat-md-bare [data-streamdown="code-block-actions"],
+  .chat-md-bare [data-streamdown="code-block-header"] { @apply !hidden; }
+  .chat-md-bare [data-streamdown="code-block"],
+  .chat-md-bare [data-streamdown="code-block"] > div,
+  .chat-md-bare [data-streamdown="code-block"] pre,
+  .chat-md-bare [data-streamdown="code-block"] code {
+    @apply !border-0 !bg-transparent !rounded-none !p-0 !m-0;
+  }
   .chat-md [data-streamdown="code-block"] pre { @apply !max-w-full !min-w-0 !overflow-x-auto; }
   .chat-md [data-streamdown="code-block"] > div { @apply !min-w-0 !max-w-full; }
   .chat-md [data-streamdown="code-block-header"] { @apply !hidden; }
