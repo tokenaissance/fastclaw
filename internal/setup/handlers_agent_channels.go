@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -129,24 +130,30 @@ func (s *Server) handleListAgentChannels(w http.ResponseWriter, r *http.Request)
 	caller := s.effectiveUserID(r)
 	_ = rec // kept around in case future logic gates on agent ownership again
 
-	// Channel rows always carry the binder's user_id + the target
-	// agent_id, so the caller's view is "what I bound to this agent" —
-	// (user_id=caller, agent_id=id). The first ListConfigs covers the
-	// owner's own bindings on their agent and a non-owner's per-(user,
-	// agent) overlay alike.
-	//
-	// We additionally pull (user_id='', agent_id=id) for legacy
-	// installs whose pre-refactor "scope=agent" rows escaped the
-	// migration backfill (e.g. an agent without a user_id at the
-	// time). New rows are never written there.
+	// Try the new channels table first. If it has rows for this agent,
+	// use them exclusively; otherwise fall back to the configs table.
 	out := make([]channelOut, 0)
+	hasNewRows := false
 	if caller != "" {
-		if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, caller, id); err == nil {
-			out = append(out, flattenChannelRows(rows, "agent", "", "")...)
+		if chRows, err := s.dataStore.ListChannels(r.Context(), caller, id); err == nil && len(chRows) > 0 {
+			hasNewRows = true
+			out = append(out, flattenChannelRecords(chRows, "agent")...)
 		}
 	}
-	if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, "", id); err == nil {
-		out = append(out, flattenChannelRows(rows, "agent", "", "")...)
+	if chRows, err := s.dataStore.ListChannels(r.Context(), "", id); err == nil && len(chRows) > 0 {
+		hasNewRows = true
+		out = append(out, flattenChannelRecords(chRows, "agent")...)
+	}
+	if !hasNewRows {
+		// Fallback: read from configs for pre-migration installs.
+		if caller != "" {
+			if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, caller, id); err == nil {
+				out = append(out, flattenChannelRows(rows, "agent", "", "")...)
+			}
+		}
+		if rows, err := s.dataStore.ListConfigs(r.Context(), store.KindChannel, "", id); err == nil {
+			out = append(out, flattenChannelRows(rows, "agent", "", "")...)
+		}
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"channels": out})
 }
@@ -192,6 +199,44 @@ func flattenChannelRows(rows []store.ConfigRecord, source string, _, _ string, f
 			}
 			out = append(out, channelOut{
 				Type:        rec.Name,
+				AccountID:   accountID,
+				BotUsername: accountID,
+				BotToken:    maskAPIKey(tok),
+				Enabled:     rec.Enabled,
+				UpdatedAt:   rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Source:      source,
+			})
+		}
+	}
+	return out
+}
+
+// flattenChannelRecords builds channelOut entries from ChannelRecord rows.
+func flattenChannelRecords(rows []store.ChannelRecord, source string) []channelOut {
+	out := make([]channelOut, 0, len(rows))
+	for _, rec := range rows {
+		cc := config.ChannelConfig{}
+		if blob, err := json.Marshal(rec.Data); err == nil {
+			_ = json.Unmarshal(blob, &cc)
+		}
+		if len(cc.Accounts) == 0 {
+			out = append(out, channelOut{
+				Type:      rec.Type,
+				AccountID: rec.AccountID,
+				BotToken:  maskAPIKey(rec.BotToken),
+				Enabled:   rec.Enabled,
+				UpdatedAt: rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Source:    source,
+			})
+			continue
+		}
+		for accountID, acct := range cc.Accounts {
+			tok := acct.BotToken
+			if tok == "" {
+				tok = rec.BotToken
+			}
+			out = append(out, channelOut{
+				Type:        rec.Type,
 				AccountID:   accountID,
 				BotUsername: accountID,
 				BotToken:    maskAPIKey(tok),
@@ -264,6 +309,7 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.saveChannelRecord(r.Context(), uid, aid, "telegram", username, true, cc)
 
 	// Append a binding so inbound messages route to this agent. Existing
 	// bindings (e.g. an earlier Discord bot) are preserved. AgentID
@@ -339,6 +385,8 @@ func (s *Server) handleDisconnectAgentChannel(w http.ResponseWriter, r *http.Req
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		// Also remove from the channels table.
+		s.deleteChannelRecord(r.Context(), channelType, accountID)
 		s.invalidateOwner(uid, aid)
 		s.hotUnregisterChannel(channelType, accountID)
 		jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
@@ -463,6 +511,7 @@ func (s *Server) handleConnectAgentDiscord(w http.ResponseWriter, r *http.Reques
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.saveChannelRecord(r.Context(), uid, aid, "discord", userID, true, cc)
 	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "discord", AccountID: userID},
@@ -599,6 +648,7 @@ func (s *Server) handleConnectAgentSlack(w http.ResponseWriter, r *http.Request)
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.saveChannelRecord(r.Context(), uid, aid, "slack", teamID, true, cc)
 	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "slack", AccountID: teamID},
@@ -879,6 +929,7 @@ func (s *Server) persistWeChatAccount(r *http.Request, userID, agentIDArg, agent
 	if err := scope.SaveChannel(r.Context(), s.dataStore, userID, agentIDArg, "wechat", credKey, true, cc); err != nil {
 		return err
 	}
+	s.saveChannelRecord(r.Context(), userID, agentIDArg, "wechat", creds.ILinkBotID, true, cc)
 	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: agentID,
 		Match:   config.Match{Channel: "wechat", AccountID: creds.ILinkBotID},
@@ -1044,6 +1095,7 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.saveChannelRecord(r.Context(), uid, aid, "feishu", appID, true, cc)
 	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "feishu", AccountID: appID},
@@ -1156,6 +1208,7 @@ func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) 
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.saveChannelRecord(r.Context(), uid, aid, "line", userID, true, cc)
 	if err := s.appendBinding(r, "", "", config.Binding{
 		AgentID: id,
 		Match:   config.Match{Channel: "line", AccountID: userID},
@@ -1193,4 +1246,63 @@ func lineWebhookPathFor(r *http.Request, userID string) string {
 		host = h
 	}
 	return scheme + "://" + host + "/api/line/webhook/" + userID
+}
+
+// saveChannelRecord writes a ChannelRecord to the channels table alongside
+// the existing configs row. This dual-write approach keeps backward
+// compatibility during the migration: configs rows are still written by
+// scope.SaveChannel above; this writes the new-table row so the new read
+// paths (registerChannelsFromStore, resolveChannelOwner, etc.) find it.
+func (s *Server) saveChannelRecord(ctx context.Context, userID, agentID, channelType, accountID string, enabled bool, cc config.ChannelConfig) {
+	if s.dataStore == nil {
+		return
+	}
+	data := channelConfigToData(cc)
+	ch := &store.ChannelRecord{
+		UserID:    userID,
+		AgentID:   agentID,
+		Type:      channelType,
+		AccountID: accountID,
+		Enabled:   enabled,
+		BotToken:  cc.BotToken,
+		Data:      data,
+	}
+	// Extract per-account fields when available.
+	if acct, ok := cc.Accounts[accountID]; ok {
+		if ch.BotToken == "" {
+			ch.BotToken = acct.BotToken
+		}
+		ch.BaseURL = acct.BaseURL
+		ch.PlatformUserID = acct.UserID
+	}
+	if err := s.dataStore.SaveChannel(ctx, ch); err != nil {
+		slog.Warn("saveChannelRecord failed (non-fatal, configs row is authoritative)",
+			"type", channelType, "account", accountID, "error", err)
+	}
+}
+
+// channelConfigToData converts a ChannelConfig to a JSON data map,
+// mirroring scope.channelToData but without the import cycle.
+func channelConfigToData(c config.ChannelConfig) map[string]interface{} {
+	blob, _ := json.Marshal(c)
+	var m map[string]interface{}
+	_ = json.Unmarshal(blob, &m)
+	delete(m, "enabled")
+	return m
+}
+
+// deleteChannelRecord removes a row from the channels table. Non-fatal
+// if it fails — the configs row is still authoritative.
+func (s *Server) deleteChannelRecord(ctx context.Context, channelType, accountID string) {
+	if s.dataStore == nil {
+		return
+	}
+	ch, err := s.dataStore.LookupChannel(ctx, channelType, accountID)
+	if err != nil || ch == nil {
+		return
+	}
+	if err := s.dataStore.DeleteChannel(ctx, ch.ID); err != nil {
+		slog.Warn("deleteChannelRecord failed (non-fatal)",
+			"type", channelType, "account", accountID, "error", err)
+	}
 }

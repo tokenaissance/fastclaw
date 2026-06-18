@@ -73,6 +73,15 @@ func (g *Gateway) RegisterChannelFromConfig(rec store.ConfigRecord) error {
 	return registerChannelInstance(rec, g.bus, g.chanMgr, g.store, true)
 }
 
+// RegisterChannel hot-starts a channel adapter from a ChannelRecord.
+// New-table equivalent of RegisterChannelFromConfig.
+func (g *Gateway) RegisterChannel(rec store.ChannelRecord) error {
+	if g.chanMgr == nil || g.bus == nil {
+		return nil
+	}
+	return registerChannelFromRecord(rec, g.bus, g.chanMgr, g.store, true)
+}
+
 // UnregisterChannel removes a channel from the routing table. Note:
 // the bot's polling goroutine is left to die when the root ctx ends —
 // see channels.Manager.Unregister for why. Inbound messages stop

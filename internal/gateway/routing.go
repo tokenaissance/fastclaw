@@ -92,6 +92,25 @@ func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessag
 	if g.store == nil {
 		return ""
 	}
+	// Try the new channels table first.
+	if ch, err := g.store.LookupChannel(ctx, msg.Channel, msg.AccountID); err == nil && ch != nil {
+		if ch.UserID != "" {
+			return ch.UserID
+		}
+		if ch.AgentID != "" {
+			all, err := g.store.ListAllAgents(ctx)
+			if err != nil {
+				return ""
+			}
+			for _, ar := range all {
+				if ar.ID == ch.AgentID {
+					return ar.UserID
+				}
+			}
+		}
+		return ""
+	}
+	// Fallback: legacy configs table lookup.
 	rec, err := g.store.LookupChannelByCredential(ctx, msg.Channel, msg.AccountID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
@@ -99,11 +118,6 @@ func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessag
 		}
 		return ""
 	}
-	// channel rows now carry user_id directly — the binder, not the
-	// agent owner indirection. The previous "scope=agent → look up
-	// agent.user_id" branch is gone because every channel row written
-	// by handleConnect* persists the resolved user_id (owner or
-	// non-owner) at insert time.
 	if rec.UserID != "" {
 		return rec.UserID
 	}

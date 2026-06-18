@@ -71,6 +71,11 @@ func (a *apiResolver) RegisterChannelFromConfig(rec store.ConfigRecord) error {
 	return a.gw.RegisterChannelFromConfig(rec)
 }
 
+// RegisterChannel hot-starts a freshly-saved ChannelRecord.
+func (a *apiResolver) RegisterChannel(rec store.ChannelRecord) error {
+	return a.gw.RegisterChannel(rec)
+}
+
 func (a *apiResolver) UnregisterChannel(channelType, accountID string) {
 	a.gw.UnregisterChannel(channelType, accountID)
 }

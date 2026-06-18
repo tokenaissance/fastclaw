@@ -157,6 +157,9 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateUsersAddOwnerUserID(ctx); err != nil {
 		return fmt.Errorf("migrate users.owner_user_id: %w", err)
 	}
+	if err := d.migrateChannelsFromConfigs(ctx); err != nil {
+		return fmt.Errorf("migrate channels from configs: %w", err)
+	}
 	return nil
 }
 
@@ -1731,6 +1734,25 @@ func (d *DBStore) migrationSQL() []string {
 			expires_at TIMESTAMP NOT NULL,
 			PRIMARY KEY (channel, account_id)
 		)`,
+		// channels is the dedicated IM bot binding table. Extracted from
+		// configs (kind='channel') so channel entities have their own
+		// lifecycle, credentials, and routing independent of config rows.
+		`CREATE TABLE IF NOT EXISTS channels (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL DEFAULT '',
+			agent_id TEXT NOT NULL DEFAULT '',
+			type TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			bot_token TEXT NOT NULL DEFAULT '',
+			base_url TEXT NOT NULL DEFAULT '',
+			platform_user_id TEXT NOT NULL DEFAULT '',
+			data TEXT NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (type, account_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_channels_user ON channels (user_id, agent_id)`,
 	}
 }
 
@@ -3139,6 +3161,228 @@ func scanConfigs(rows *sql.Rows) ([]ConfigRecord, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// --- Channels (IM bot bindings) ---
+
+const channelSelectCols = `id, user_id, agent_id, type, account_id, enabled, bot_token, base_url, platform_user_id, data, created_at, updated_at`
+
+func (d *DBStore) ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT `+channelSelectCols+`
+			FROM channels WHERE user_id = %s AND agent_id = %s ORDER BY type, account_id`,
+			d.ph(1), d.ph(2)),
+		userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChannels(rows)
+}
+
+func (d *DBStore) ListAllChannels(ctx context.Context) ([]ChannelRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT `+channelSelectCols+` FROM channels ORDER BY user_id, agent_id, type`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanChannels(rows)
+}
+
+func (d *DBStore) GetChannel(ctx context.Context, id string) (*ChannelRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+channelSelectCols+` FROM channels WHERE id = %s`, d.ph(1)), id)
+	return scanChannelRow(row)
+}
+
+func (d *DBStore) SaveChannel(ctx context.Context, ch *ChannelRecord) error {
+	if ch.Type == "" || ch.AccountID == "" {
+		return errors.New("store: SaveChannel requires type and accountId")
+	}
+	now := time.Now().UTC()
+	if ch.CreatedAt.IsZero() {
+		ch.CreatedAt = now
+	}
+	ch.UpdatedAt = now
+	if ch.ID == "" {
+		ch.ID = randomChannelID()
+	}
+	dataBytes, _ := json.Marshal(ch.Data)
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO channels (id, user_id, agent_id, type, account_id, enabled, bot_token, base_url, platform_user_id, data, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				ON CONFLICT (type, account_id) DO UPDATE SET
+				  user_id=$2, agent_id=$3, enabled=$6, bot_token=$7, base_url=$8,
+				  platform_user_id=$9, data=$10, updated_at=$12`,
+			ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, ch.Enabled, ch.BotToken, ch.BaseURL, ch.PlatformUserID, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO channels (id, user_id, agent_id, type, account_id, enabled, bot_token, base_url, platform_user_id, data, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (type, account_id) DO UPDATE SET
+			  user_id=excluded.user_id, agent_id=excluded.agent_id, enabled=excluded.enabled,
+			  bot_token=excluded.bot_token, base_url=excluded.base_url,
+			  platform_user_id=excluded.platform_user_id, data=excluded.data,
+			  updated_at=excluded.updated_at`,
+		ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, ch.Enabled, ch.BotToken, ch.BaseURL, ch.PlatformUserID, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
+	return err
+}
+
+func (d *DBStore) DeleteChannel(ctx context.Context, id string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM channels WHERE id = %s`, d.ph(1)), id)
+	return err
+}
+
+func (d *DBStore) LookupChannel(ctx context.Context, channelType, accountID string) (*ChannelRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+channelSelectCols+`
+			FROM channels WHERE type = %s AND account_id = %s LIMIT 1`,
+			d.ph(1), d.ph(2)),
+		channelType, accountID)
+	return scanChannelRow(row)
+}
+
+func randomChannelID() string {
+	var b [10]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		now := time.Now().UnixNano()
+		for i := range b {
+			b[i] = byte(now >> (i * 8))
+		}
+	}
+	return "ch_" + hex.EncodeToString(b[:])
+}
+
+func scanChannelRow(row rowScanner) (*ChannelRecord, error) {
+	var c ChannelRecord
+	var dataStr string
+	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		return nil, scanErr(err)
+	}
+	json.Unmarshal([]byte(dataStr), &c.Data)
+	return &c, nil
+}
+
+func scanChannels(rows *sql.Rows) ([]ChannelRecord, error) {
+	var out []ChannelRecord
+	for rows.Next() {
+		var c ChannelRecord
+		var dataStr string
+		if err := rows.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(dataStr), &c.Data)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// migrateChannelsFromConfigs copies kind='channel' configs rows into the
+// new channels table. Skipped when the channels table already has data
+// (i.e. migration already ran). Old configs rows are kept for rollback.
+func (d *DBStore) migrateChannelsFromConfigs(ctx context.Context) error {
+	exists, err := d.tableExists(ctx, "channels")
+	if err != nil || !exists {
+		return err
+	}
+	// Skip if channels table already has data.
+	var count int
+	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channels`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	// Read all channel configs.
+	configRows, err := d.db.QueryContext(ctx,
+		`SELECT `+configSelectCols+` FROM configs WHERE kind = 'channel'`)
+	if err != nil {
+		return err
+	}
+	defer configRows.Close()
+	configs, err := scanConfigs(configRows)
+	if err != nil {
+		return err
+	}
+	for _, cfg := range configs {
+		// Each config row may have multiple accounts in its data JSON.
+		// Extract them and create one channel row per account.
+		var cc struct {
+			BotToken string                       `json:"botToken"`
+			BaseURL  string                       `json:"baseUrl"`
+			Accounts map[string]json.RawMessage   `json:"accounts"`
+		}
+		if blob, merr := json.Marshal(cfg.Data); merr == nil {
+			_ = json.Unmarshal(blob, &cc)
+		}
+		if len(cc.Accounts) == 0 {
+			// Single-bot legacy shape: one channel row with credential_key as accountID.
+			ch := &ChannelRecord{
+				ID:        randomChannelID(),
+				UserID:    cfg.UserID,
+				AgentID:   cfg.AgentID,
+				Type:      cfg.Name,
+				AccountID: cfg.CredentialKey,
+				Enabled:   cfg.Enabled,
+				BotToken:  cc.BotToken,
+				BaseURL:   cc.BaseURL,
+				Data:      cfg.Data,
+				CreatedAt: cfg.CreatedAt,
+				UpdatedAt: cfg.UpdatedAt,
+			}
+			if ch.AccountID == "" {
+				ch.AccountID = cfg.Name // fallback
+			}
+			if err := d.SaveChannel(ctx, ch); err != nil {
+				slog.Warn("migrate channel from config failed",
+					"config_id", cfg.ID, "type", cfg.Name, "error", err)
+			}
+			continue
+		}
+		// Multi-account: one channel row per account entry.
+		for accountID, rawAcct := range cc.Accounts {
+			var acct struct {
+				BotToken string `json:"botToken"`
+				BaseURL  string `json:"baseUrl"`
+				UserID   string `json:"userId"`
+			}
+			_ = json.Unmarshal(rawAcct, &acct)
+			botToken := acct.BotToken
+			if botToken == "" {
+				botToken = cc.BotToken
+			}
+			baseURL := acct.BaseURL
+			if baseURL == "" {
+				baseURL = cc.BaseURL
+			}
+			ch := &ChannelRecord{
+				ID:             randomChannelID(),
+				UserID:         cfg.UserID,
+				AgentID:        cfg.AgentID,
+				Type:           cfg.Name,
+				AccountID:      accountID,
+				Enabled:        cfg.Enabled,
+				BotToken:       botToken,
+				BaseURL:        baseURL,
+				PlatformUserID: acct.UserID,
+				Data:           cfg.Data,
+				CreatedAt:      cfg.CreatedAt,
+				UpdatedAt:      cfg.UpdatedAt,
+			}
+			if err := d.SaveChannel(ctx, ch); err != nil {
+				slog.Warn("migrate channel from config failed",
+					"config_id", cfg.ID, "type", cfg.Name, "account", accountID, "error", err)
+			}
+		}
+	}
+	if len(configs) > 0 {
+		slog.Info("migrated channel configs to channels table", "count", len(configs))
+	}
+	return nil
 }
 
 // --- Cron jobs ---

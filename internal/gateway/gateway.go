@@ -764,14 +764,34 @@ const (
 	NSBindings       = "bindings"
 )
 
-// registerChannelsFromStore loads every enabled kind="channel" row from
-// configs and starts a channel adapter for each, regardless of
-// scope. The owner is captured per-row and resolved at message receipt
-// time via LookupChannelByCredential.
+// registerChannelsFromStore loads every enabled channel from the
+// channels table and starts a channel adapter for each. Falls back
+// to configs (kind='channel') when the channels table is empty (pre-
+// migration installs). The owner is captured per-row and resolved at
+// message receipt time via LookupChannel / LookupChannelByCredential.
 func registerChannelsFromStore(st store.Store, mb *bus.MessageBus, chanMgr *channels.Manager) error {
 	if st == nil {
 		return nil
 	}
+	// Try the new channels table first.
+	chRows, err := st.ListAllChannels(context.Background())
+	if err != nil {
+		slog.Warn("ListAllChannels failed, falling back to configs", "error", err)
+		chRows = nil
+	}
+	if len(chRows) > 0 {
+		for _, r := range chRows {
+			if !r.Enabled {
+				continue
+			}
+			if err := registerChannelFromRecord(r, mb, chanMgr, st, false); err != nil {
+				slog.Warn("register channel failed",
+					"type", r.Type, "user_id", r.UserID, "agent_id", r.AgentID, "error", err)
+			}
+		}
+		return nil
+	}
+	// Fallback: read from configs for pre-migration installs.
 	rows, err := allChannelRows(st)
 	if err != nil {
 		return err

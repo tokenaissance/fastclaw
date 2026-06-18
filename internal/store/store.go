@@ -238,6 +238,14 @@ type Store interface {
 	DeleteConfig(ctx context.Context, id string) error
 	LookupChannelByCredential(ctx context.Context, channelType, credKey string) (*ConfigRecord, error)
 
+	// --- Channels (IM bot bindings) ---
+	ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error)
+	ListAllChannels(ctx context.Context) ([]ChannelRecord, error)
+	GetChannel(ctx context.Context, id string) (*ChannelRecord, error)
+	SaveChannel(ctx context.Context, ch *ChannelRecord) error
+	DeleteChannel(ctx context.Context, id string) error
+	LookupChannel(ctx context.Context, channelType, accountID string) (*ChannelRecord, error)
+
 	// --- Cron jobs (per agent) ---
 	//
 	// Cron rows are owned by an agent; the executing identity is the
@@ -578,6 +586,22 @@ type ConfigRecord struct {
 	Data          map[string]interface{} `json:"data,omitempty"`
 	CreatedAt     time.Time              `json:"createdAt"`
 	UpdatedAt     time.Time              `json:"updatedAt"`
+}
+
+// ChannelRecord is one row of the channels table — a bound IM bot.
+type ChannelRecord struct {
+	ID             string                 `json:"id"`
+	UserID         string                 `json:"userId"`          // who bound this channel
+	AgentID        string                 `json:"agentId"`         // which agent it routes to
+	Type           string                 `json:"type"`            // wechat / telegram / discord / slack / line / feishu
+	AccountID      string                 `json:"accountId"`       // bot unique identifier (credential_key equivalent)
+	Enabled        bool                   `json:"enabled"`
+	BotToken       string                 `json:"botToken,omitempty"`
+	BaseURL        string                 `json:"baseUrl,omitempty"`
+	PlatformUserID string                 `json:"platformUserId,omitempty"` // scanner's platform ID (WeChat openID)
+	Data           map[string]interface{} `json:"data,omitempty"`           // extra config (accounts map, etc.)
+	CreatedAt      time.Time              `json:"createdAt"`
+	UpdatedAt      time.Time              `json:"updatedAt"`
 }
 
 // computeConfigScope derives the scope label from the (userID, agentID)
