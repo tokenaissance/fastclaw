@@ -689,7 +689,11 @@ type WebSession struct {
 	// turn of the session, surfaced so the sidebar can show "image +
 	// text" instead of just the text label for multimodal chats.
 	// Empty for sessions whose opening message had no image.
-	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
+	ThumbnailURL  string `json:"thumbnailUrl,omitempty"`
+	// ChatterUserID is the actual conversation participant (app_user
+	// for IM channels). Differs from user_id when an IM sender is
+	// resolved to a per-sender app_user under the channel owner's space.
+	ChatterUserID string `json:"chatterUserId,omitempty"`
 }
 
 // ListWebSessions scans session files for web chat sessions and returns

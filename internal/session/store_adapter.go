@@ -309,16 +309,17 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 			title = preview
 		}
 		sessions = append(sessions, WebSession{
-			ID:           m.Key,
-			Channel:      channel,
-			AccountID:    m.AccountID,
-			ChatID:       m.ChatID,
-			ProjectID:    m.ProjectID,
-			Title:        title,
-			Preview:      preview,
-			ThumbnailURL: thumb,
-			CreatedAt:    m.UpdatedAt.UnixMilli(),
-			UpdatedAt:    m.UpdatedAt.UnixMilli(),
+			ID:            m.Key,
+			Channel:       channel,
+			AccountID:     m.AccountID,
+			ChatID:        m.ChatID,
+			ProjectID:     m.ProjectID,
+			Title:         title,
+			Preview:       preview,
+			ThumbnailURL:  thumb,
+			CreatedAt:     m.UpdatedAt.UnixMilli(),
+			UpdatedAt:     m.UpdatedAt.UnixMilli(),
+			ChatterUserID: m.ChatterUserID,
 		})
 	}
 	return sessions, nil

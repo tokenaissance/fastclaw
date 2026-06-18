@@ -33,9 +33,10 @@ import (
 // contract (URL ?scope= params, dashboard scope picker). Translate to
 // storage form via OwnershipFromScope.
 const (
-	System = "system"
-	User   = "user"
-	Agent  = "agent"
+	System    = "system"
+	User      = "user"
+	Agent     = "agent"
+	UserAgent = "user-agent"
 )
 
 // OwnershipFromScope converts the HTTP-side (scope, scopeID) pair into
@@ -78,6 +79,11 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 	if st == nil {
 		return nil, errors.New("scope.Providers: store is required")
 	}
+	// Try configs_kv first — read all provider values with scope merge.
+	if kvProvs, err := providersFromKV(ctx, st, userID, agentID); err == nil && len(kvProvs) > 0 {
+		return kvProvs, nil
+	}
+	// Fallback: read from old configs table.
 	out := map[string]config.ProviderConfig{}
 	apply := func(rows []store.ConfigRecord) {
 		for _, r := range rows {
@@ -117,6 +123,87 @@ func Providers(ctx context.Context, st store.Store, userID, agentID string) (map
 	return out, nil
 }
 
+// providersFromKV reads all provider KV values with scope merge and
+// reconstructs them into ProviderConfig structs.
+func providersFromKV(ctx context.Context, st store.Store, userID, agentID string) (map[string]config.ProviderConfig, error) {
+	kvVals, err := GetValues(ctx, st, store.KindProvider, "", userID, agentID)
+	if err != nil || len(kvVals) == 0 {
+		return nil, err
+	}
+	// Group by provider name (first dot-segment).
+	providerKVs := map[string]map[string]string{}
+	for fullKey, value := range kvVals {
+		idx := -1
+		for i, c := range fullKey {
+			if c == '.' {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		provName := fullKey[:idx]
+		fieldKey := fullKey[idx+1:]
+		if providerKVs[provName] == nil {
+			providerKVs[provName] = map[string]string{}
+		}
+		providerKVs[provName][fieldKey] = value
+	}
+	out := make(map[string]config.ProviderConfig, len(providerKVs))
+	for provName, fields := range providerKVs {
+		// Reconstruct the camelCase JSON map, then unmarshal into ProviderConfig.
+		m := map[string]interface{}{}
+		for snakeKey, value := range fields {
+			camelKey := snakeToCamel(snakeKey)
+			m[camelKey] = parseKVValue(value)
+		}
+		blob, _ := json.Marshal(m)
+		var pc config.ProviderConfig
+		_ = json.Unmarshal(blob, &pc)
+		out[provName] = pc
+	}
+	return out, nil
+}
+
+// kvValsToProviders is a helper that converts flat KV pairs (from a single
+// scope) into a provider map. Used by AgentScopeProviders and
+// UserScopeProviders where scope merge is not needed.
+func kvValsToProviders(kvVals map[string]string) map[string]config.ProviderConfig {
+	providerKVs := map[string]map[string]string{}
+	for fullKey, value := range kvVals {
+		idx := -1
+		for i, c := range fullKey {
+			if c == '.' {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		provName := fullKey[:idx]
+		fieldKey := fullKey[idx+1:]
+		if providerKVs[provName] == nil {
+			providerKVs[provName] = map[string]string{}
+		}
+		providerKVs[provName][fieldKey] = value
+	}
+	out := make(map[string]config.ProviderConfig, len(providerKVs))
+	for provName, fields := range providerKVs {
+		m := map[string]interface{}{}
+		for snakeKey, value := range fields {
+			camelKey := snakeToCamel(snakeKey)
+			m[camelKey] = parseKVValue(value)
+		}
+		blob, _ := json.Marshal(m)
+		var pc config.ProviderConfig
+		_ = json.Unmarshal(blob, &pc)
+		out[provName] = pc
+	}
+	return out
+}
+
 // AgentScopeProviders returns providers stored at (user='', agent=Y)
 // only — the agent's "official" rows, without system or user layers
 // merged in. Use this to overlay an agent's own rows on top of an
@@ -130,6 +217,11 @@ func AgentScopeProviders(ctx context.Context, st store.Store, agentID string) (m
 	if agentID == "" {
 		return map[string]config.ProviderConfig{}, nil
 	}
+	// Try configs_kv first — agent scope only.
+	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, Agent, agentID, ""); err == nil && len(kvVals) > 0 {
+		return kvValsToProviders(kvVals), nil
+	}
+	// Fallback to old configs table.
 	rows, err := st.ListConfigs(ctx, store.KindProvider, "", agentID)
 	if err != nil {
 		return nil, err
@@ -154,6 +246,11 @@ func UserScopeProviders(ctx context.Context, st store.Store, userID string) (map
 	if userID == "" {
 		return map[string]config.ProviderConfig{}, nil
 	}
+	// Try configs_kv first — user scope only.
+	if kvVals, err := st.ListConfigValues(ctx, store.KindProvider, User, userID, ""); err == nil && len(kvVals) > 0 {
+		return kvValsToProviders(kvVals), nil
+	}
+	// Fallback to old configs table.
 	rows, err := st.ListConfigs(ctx, store.KindProvider, userID, "")
 	if err != nil {
 		return nil, err
@@ -219,6 +316,17 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID str
 	if st == nil {
 		return nil, errors.New("scope.Setting: store is required")
 	}
+	// Try configs_kv first — read all values matching the namespace prefix
+	// with scope merge, then reconstruct the map.
+	kvPrefix := namespace + "."
+	if namespace == "agents.defaults" {
+		kvPrefix = "agent."
+	}
+	kvVals, kvErr := GetValues(ctx, st, store.KindSetting, kvPrefix, userID, agentID)
+	if kvErr == nil && len(kvVals) > 0 {
+		return kvToSettingMap(kvPrefix, kvVals), nil
+	}
+	// Fallback: read from old configs table.
 	out := map[string]interface{}{}
 	merge := func(layer map[string]interface{}) {
 		for k, v := range layer {
@@ -257,6 +365,73 @@ func Setting(ctx context.Context, st store.Store, namespace, userID, agentID str
 		}
 	}
 	return out, nil
+}
+
+// kvToSettingMap converts flat KV pairs back into the camelCase map that
+// callers (SettingInto, assembleConfig) expect. The prefix is stripped and
+// snake_case keys are converted back to camelCase. Nested dots produce
+// nested maps.
+func kvToSettingMap(prefix string, kv map[string]string) map[string]interface{} {
+	out := map[string]interface{}{}
+	for fullKey, value := range kv {
+		// Strip the prefix to get the relative key.
+		relKey := fullKey
+		if len(prefix) > 0 && len(fullKey) > len(prefix) {
+			relKey = fullKey[len(prefix):]
+		}
+		// Convert snake_case back to camelCase.
+		camelKey := snakeToCamel(relKey)
+		// Try to parse booleans and numbers back into native types.
+		out[camelKey] = parseKVValue(value)
+	}
+	return out
+}
+
+// snakeToCamel converts a snake_case string to camelCase.
+func snakeToCamel(s string) string {
+	var b []byte
+	upper := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '_' {
+			upper = true
+			continue
+		}
+		if upper && s[i] >= 'a' && s[i] <= 'z' {
+			b = append(b, s[i]-32)
+			upper = false
+		} else {
+			b = append(b, s[i])
+			upper = false
+		}
+	}
+	return string(b)
+}
+
+// parseKVValue attempts to interpret a string value as its original Go type.
+func parseKVValue(s string) interface{} {
+	if s == "true" {
+		return true
+	}
+	if s == "false" {
+		return false
+	}
+	// Try JSON array/object.
+	if len(s) > 0 && (s[0] == '[' || s[0] == '{') {
+		var v interface{}
+		if json.Unmarshal([]byte(s), &v) == nil {
+			return v
+		}
+	}
+	// Try number — only if the entire string is numeric.
+	var f float64
+	if _, err := fmt.Sscanf(s, "%g", &f); err == nil {
+		// Verify the scan consumed the whole string.
+		check := fmt.Sprintf("%g", f)
+		if check == s {
+			return f
+		}
+	}
+	return s
 }
 
 // SettingInto resolves Setting and unmarshals the merged JSON into dst.
@@ -384,6 +559,8 @@ func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace
 	if st == nil {
 		return errors.New("scope.SaveSetting: store is required")
 	}
+	// Dual-write to configs_kv.
+	dualWriteSettingKV(ctx, st, userID, agentID, namespace, data)
 	if len(data) == 0 {
 		// Find and drop the row if it exists. Idempotent: missing-row is a no-op.
 		if rec, err := st.GetConfigByName(ctx, store.KindSetting, userID, agentID, namespace); err == nil && rec != nil {
@@ -405,6 +582,8 @@ func SaveSetting(ctx context.Context, st store.Store, userID, agentID, namespace
 // SaveProvider upserts a kind="provider" row at the given (user, agent)
 // ownership.
 func SaveProvider(ctx context.Context, st store.Store, userID, agentID, name string, p config.ProviderConfig) error {
+	// Dual-write to configs_kv.
+	dualWriteProviderKV(ctx, st, userID, agentID, name, p)
 	rec := &store.ConfigRecord{
 		Kind:    store.KindProvider,
 		UserID:  userID,
@@ -462,4 +641,201 @@ func channelToData(c config.ChannelConfig) map[string]interface{} {
 	_ = json.Unmarshal(blob, &m)
 	delete(m, "enabled") // enabled lives on the row column, not in data
 	return m
+}
+
+// ---------------------------------------------------------------------------
+// configs_kv read/write helpers
+// ---------------------------------------------------------------------------
+
+// kvScopeFromOwnership converts (userID, agentID) into the configs_kv
+// (scope, scope_id) pair. Mirrors ScopeFromOwnership so the per-(user,
+// agent) layer survives the configs_kv dual-write — without it, a key
+// bound at per-(user, agent) scope would be flattened to the user layer
+// and leak across the user's agents.
+func kvScopeFromOwnership(userID, agentID string) (scope, scopeID string) {
+	switch {
+	case userID != "" && agentID != "":
+		return UserAgent, userID + "/" + agentID
+	case userID != "":
+		return User, userID
+	case agentID != "":
+		return Agent, agentID
+	default:
+		return System, ""
+	}
+}
+
+// GetValue reads a single config value with scope precedence:
+// system → user → agent → per-(user,agent). Inner scope wins.
+func GetValue(ctx context.Context, st store.Store, kind, name, userID, agentID string) (string, bool, error) {
+	if st == nil {
+		return "", false, errors.New("scope.GetValue: store is required")
+	}
+	var found bool
+	var value string
+	tryGet := func(sc, sid string) error {
+		v, err := st.GetConfigValue(ctx, kind, sc, sid, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil
+			}
+			return err
+		}
+		value = v
+		found = true
+		return nil
+	}
+	if err := tryGet(System, ""); err != nil {
+		return "", false, err
+	}
+	if userID != "" {
+		if err := tryGet(User, userID); err != nil {
+			return "", false, err
+		}
+	}
+	if agentID != "" {
+		if err := tryGet(Agent, agentID); err != nil {
+			return "", false, err
+		}
+	}
+	if userID != "" && agentID != "" {
+		if err := tryGet(UserAgent, userID+"/"+agentID); err != nil {
+			return "", false, err
+		}
+	}
+	return value, found, nil
+}
+
+// GetValues reads all values matching a prefix with scope merge.
+// System values are read first, then user overrides, then agent overrides.
+// For each name key, the innermost scope wins.
+func GetValues(ctx context.Context, st store.Store, kind, prefix, userID, agentID string) (map[string]string, error) {
+	if st == nil {
+		return nil, errors.New("scope.GetValues: store is required")
+	}
+	out := map[string]string{}
+	merge := func(sc, sid string) error {
+		m, err := st.ListConfigValues(ctx, kind, sc, sid, prefix)
+		if err != nil {
+			return err
+		}
+		for k, v := range m {
+			out[k] = v
+		}
+		return nil
+	}
+	if err := merge(System, ""); err != nil {
+		return nil, err
+	}
+	if userID != "" {
+		if err := merge(User, userID); err != nil {
+			return nil, err
+		}
+	}
+	if agentID != "" {
+		if err := merge(Agent, agentID); err != nil {
+			return nil, err
+		}
+	}
+	if userID != "" && agentID != "" {
+		if err := merge(UserAgent, userID+"/"+agentID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// SetValue writes a single config value at the specified scope.
+func SetValue(ctx context.Context, st store.Store, kind, scope, scopeID, name, value string) error {
+	if st == nil {
+		return errors.New("scope.SetValue: store is required")
+	}
+	return st.SetConfigValue(ctx, kind, scope, scopeID, name, value)
+}
+
+// camelToSnake converts a camelCase string to snake_case.
+func camelToSnake(s string) string {
+	var b []byte
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				b = append(b, '_')
+			}
+			b = append(b, byte(r+32))
+		} else {
+			b = append(b, byte(r))
+		}
+	}
+	return string(b)
+}
+
+// flattenJSONToKV flattens a map into dotted-key → string pairs, used for
+// dual-writing to configs_kv. Same logic as store.flattenJSON.
+func flattenJSONToKV(prefix string, data map[string]interface{}, out map[string]string) {
+	for k, v := range data {
+		snakeKey := camelToSnake(k)
+		fullKey := prefix + snakeKey
+		switch val := v.(type) {
+		case map[string]interface{}:
+			flattenJSONToKV(fullKey+".", val, out)
+		case string:
+			out[fullKey] = val
+		case bool:
+			if val {
+				out[fullKey] = "true"
+			} else {
+				out[fullKey] = "false"
+			}
+		case float64:
+			out[fullKey] = fmt.Sprintf("%g", val)
+		case nil:
+			// skip
+		default:
+			blob, _ := json.Marshal(val)
+			out[fullKey] = string(blob)
+		}
+	}
+}
+
+// dualWriteSettingKV writes the flattened KV pairs to configs_kv alongside
+// the legacy configs table write. Called by SaveSetting to keep both tables
+// in sync during migration.
+func dualWriteSettingKV(ctx context.Context, st store.Store, userID, agentID, namespace string, data map[string]interface{}) {
+	sc, sid := kvScopeFromOwnership(userID, agentID)
+	// Determine the KV name prefix.
+	kvPrefix := namespace + "."
+	if namespace == "agents.defaults" {
+		kvPrefix = "agent."
+	}
+	if len(data) == 0 {
+		// Delete all KV entries for this prefix.
+		_ = st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix)
+		return
+	}
+	flat := map[string]string{}
+	flattenJSONToKV(kvPrefix, data, flat)
+	// Delete stale keys then write new ones.
+	_ = st.DeleteConfigPrefix(ctx, store.KindSetting, sc, sid, kvPrefix)
+	for name, value := range flat {
+		_ = st.SetConfigValue(ctx, store.KindSetting, sc, sid, name, value)
+	}
+}
+
+// dualWriteProviderKV writes the flattened provider config to configs_kv.
+func dualWriteProviderKV(ctx context.Context, st store.Store, userID, agentID, providerName string, p config.ProviderConfig) {
+	sc, sid := kvScopeFromOwnership(userID, agentID)
+	kvPrefix := providerName + "."
+	data := providerToData(p)
+	flat := map[string]string{}
+	flattenJSONToKV(kvPrefix, data, flat)
+	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, kvPrefix)
+	for name, value := range flat {
+		_ = st.SetConfigValue(ctx, store.KindProvider, sc, sid, name, value)
+	}
+}
+
+// DualDeleteProviderKV removes all KV entries for a provider.
+func DualDeleteProviderKV(ctx context.Context, st store.Store, userID, agentID, providerName string) {
+	sc, sid := kvScopeFromOwnership(userID, agentID)
+	_ = st.DeleteConfigPrefix(ctx, store.KindProvider, sc, sid, providerName+".")
 }

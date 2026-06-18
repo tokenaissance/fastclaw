@@ -298,6 +298,8 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeScope(w, r, rec.LegacyScope(), rec.LegacyScopeID(), scopeWrite) {
 		return
 	}
+	// Dual-delete from configs_kv.
+	scope.DualDeleteProviderKV(r.Context(), s.dataStore, rec.UserID, rec.AgentID, rec.Name)
 	if err := s.dataStore.DeleteConfig(r.Context(), id); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

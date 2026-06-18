@@ -615,6 +615,15 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 				entry["ownerDisplayName"] = owner.DisplayName
 			}
 		}
+		if sm.ChatterUserID != "" {
+			entry["chatterUserId"] = sm.ChatterUserID
+			if chatter := ownerMap[sm.ChatterUserID]; chatter != nil {
+				entry["chatterExternalId"] = chatter.ExternalID
+				if chatter.DisplayName != "" {
+					entry["chatterDisplayName"] = chatter.DisplayName
+				}
+			}
+		}
 		out = append(out, entry)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"sessions": out})

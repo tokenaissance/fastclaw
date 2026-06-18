@@ -238,6 +238,26 @@ type Store interface {
 	DeleteConfig(ctx context.Context, id string) error
 	LookupChannelByCredential(ctx context.Context, channelType, credKey string) (*ConfigRecord, error)
 
+	// --- Configs KV (single-value key-value pairs) ---
+	//
+	// configs_kv is the successor to the JSON-blob configs table. Each row
+	// stores exactly one scalar value; the dotted name encodes the former
+	// JSON hierarchy. During migration both tables are written (dual-write);
+	// reads prefer configs_kv when populated.
+
+	// GetConfigValue returns a single config value.
+	GetConfigValue(ctx context.Context, kind, scope, scopeID, name string) (string, error)
+	// SetConfigValue sets a single config value (upsert).
+	SetConfigValue(ctx context.Context, kind, scope, scopeID, name, value string) error
+	// DeleteConfigValue deletes a single config value.
+	DeleteConfigValue(ctx context.Context, kind, scope, scopeID, name string) error
+	// ListConfigValues returns all config values matching a prefix.
+	// Use name="" to get all values for a (kind, scope, scopeID).
+	// Use name="sandbox." to get all sandbox.* values.
+	ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]string, error)
+	// DeleteConfigPrefix deletes all values matching a name prefix.
+	DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, namePrefix string) error
+
 	// --- Channels (IM bot bindings) ---
 	ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error)
 	ListAllChannels(ctx context.Context) ([]ChannelRecord, error)
@@ -472,14 +492,15 @@ type SessionMetaWithOwner struct {
 
 // SessionMeta is summary info for a session (for listing).
 type SessionMeta struct {
-	Key          string    `json:"key"`
-	Channel      string    `json:"channel,omitempty"`
-	AccountID    string    `json:"accountId,omitempty"`
-	ChatID       string    `json:"chatId,omitempty"`
-	ProjectID    string    `json:"projectId,omitempty"`
-	Title        string    `json:"title,omitempty"`
-	MessageCount int       `json:"messageCount"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	Key           string    `json:"key"`
+	Channel       string    `json:"channel,omitempty"`
+	AccountID     string    `json:"accountId,omitempty"`
+	ChatID        string    `json:"chatId,omitempty"`
+	ProjectID     string    `json:"projectId,omitempty"`
+	Title         string    `json:"title,omitempty"`
+	MessageCount  int       `json:"messageCount"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+	ChatterUserID string    `json:"chatterUserId,omitempty"`
 }
 
 // ProjectRecord is a per-(user, agent) named workspace folder. Sessions

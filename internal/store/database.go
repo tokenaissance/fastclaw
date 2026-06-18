@@ -160,6 +160,9 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateChannelsFromConfigs(ctx); err != nil {
 		return fmt.Errorf("migrate channels from configs: %w", err)
 	}
+	if err := d.migrateConfigsToKV(ctx); err != nil {
+		return fmt.Errorf("migrate configs to kv: %w", err)
+	}
 	return nil
 }
 
@@ -1753,6 +1756,21 @@ func (d *DBStore) migrationSQL() []string {
 			UNIQUE (type, account_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_channels_user ON channels (user_id, agent_id)`,
+		// configs_kv is the single-value key-value successor to the JSON-blob
+		// configs table. Each row stores exactly one scalar; the dotted name
+		// encodes the hierarchy that the old JSON blob carried. The old
+		// configs table is kept for backward compatibility (dual-write during
+		// migration); this table is the read-preferred source of truth once
+		// populated.
+		`CREATE TABLE IF NOT EXISTS configs_kv (
+			kind TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			scope_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL,
+			value TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (kind, scope, scope_id, name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_configs_kv_prefix ON configs_kv (kind, scope, scope_id)`,
 	}
 }
 
@@ -2355,7 +2373,7 @@ func (d *DBStore) SaveSession(ctx context.Context, userID, agentID, sessionKey s
 
 func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT session_key, channel, account_id, chat_id, project_id, title, message_count, updated_at FROM sessions
+		fmt.Sprintf(`SELECT session_key, channel, account_id, chat_id, project_id, title, message_count, updated_at, COALESCE(chatter_user_id,'') FROM sessions
 			WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC`, d.ph(1), d.ph(2)),
 		userID, agentID)
 	if err != nil {
@@ -2365,7 +2383,7 @@ func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]S
 	var metas []SessionMeta
 	for rows.Next() {
 		var m SessionMeta
-		if err := rows.Scan(&m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt, &m.ChatterUserID); err != nil {
 			return nil, err
 		}
 		metas = append(metas, m)
@@ -2435,7 +2453,7 @@ func (d *DBStore) ListSessionOwnerPairsByAgents(ctx context.Context, agentIDs []
 // fan-out on the admin Chats page.
 func (d *DBStore) ListAllSessionMetas(ctx context.Context) ([]SessionMetaWithOwner, error) {
 	rows, err := d.db.QueryContext(ctx,
-		`SELECT user_id, agent_id, session_key, channel, account_id, chat_id, project_id, title, message_count, updated_at
+		`SELECT user_id, agent_id, session_key, channel, account_id, chat_id, project_id, title, message_count, updated_at, COALESCE(chatter_user_id,'') AS chatter_user_id
 			FROM sessions
 			WHERE user_id <> '' AND agent_id <> ''
 			ORDER BY updated_at DESC`)
@@ -2446,7 +2464,7 @@ func (d *DBStore) ListAllSessionMetas(ctx context.Context) ([]SessionMetaWithOwn
 	var out []SessionMetaWithOwner
 	for rows.Next() {
 		var m SessionMetaWithOwner
-		if err := rows.Scan(&m.UserID, &m.AgentID, &m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.UserID, &m.AgentID, &m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt, &m.ChatterUserID); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -3108,6 +3126,89 @@ func (d *DBStore) DeleteConfig(ctx context.Context, id string) error {
 	return err
 }
 
+// --- Configs KV (single-value key-value pairs) ---
+
+func (d *DBStore) GetConfigValue(ctx context.Context, kind, scope, scopeID, name string) (string, error) {
+	var value string
+	err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		kind, scope, scopeID, name).Scan(&value)
+	if err != nil {
+		return "", scanErr(err)
+	}
+	return value, nil
+}
+
+func (d *DBStore) SetConfigValue(ctx context.Context, kind, scope, scopeID, name, value string) error {
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO configs_kv (kind, scope, scope_id, name, value)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET value=$5`,
+			kind, scope, scopeID, name, value)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO configs_kv (kind, scope, scope_id, name, value)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (kind, scope, scope_id, name) DO UPDATE SET value=excluded.value`,
+		kind, scope, scopeID, name, value)
+	return err
+}
+
+func (d *DBStore) DeleteConfigValue(ctx context.Context, kind, scope, scopeID, name string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		kind, scope, scopeID, name)
+	return err
+}
+
+func (d *DBStore) ListConfigValues(ctx context.Context, kind, scope, scopeID, namePrefix string) (map[string]string, error) {
+	var rows *sql.Rows
+	var err error
+	if namePrefix == "" {
+		rows, err = d.db.QueryContext(ctx,
+			fmt.Sprintf(`SELECT name, value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s ORDER BY name`,
+				d.ph(1), d.ph(2), d.ph(3)),
+			kind, scope, scopeID)
+	} else {
+		rows, err = d.db.QueryContext(ctx,
+			fmt.Sprintf(`SELECT name, value FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s ORDER BY name`,
+				d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+			kind, scope, scopeID, namePrefix+"%")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
+		}
+		out[name] = value
+	}
+	return out, rows.Err()
+}
+
+func (d *DBStore) DeleteConfigPrefix(ctx context.Context, kind, scope, scopeID, namePrefix string) error {
+	if namePrefix == "" {
+		_, err := d.db.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s`,
+				d.ph(1), d.ph(2), d.ph(3)),
+			kind, scope, scopeID)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM configs_kv WHERE kind = %s AND scope = %s AND scope_id = %s AND name LIKE %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		kind, scope, scopeID, namePrefix+"%")
+	return err
+}
+
 func (d *DBStore) LookupChannelByCredential(ctx context.Context, channelType, credKey string) (*ConfigRecord, error) {
 	row := d.db.QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT `+configSelectCols+`
@@ -3381,6 +3482,133 @@ func (d *DBStore) migrateChannelsFromConfigs(ctx context.Context) error {
 	}
 	if len(configs) > 0 {
 		slog.Info("migrated channel configs to channels table", "count", len(configs))
+	}
+	return nil
+}
+
+// --- Configs KV migration ---
+
+// camelToSnake converts a camelCase string to snake_case.
+func camelToSnake(s string) string {
+	var result strings.Builder
+	for i, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				result.WriteByte('_')
+			}
+			result.WriteByte(byte(r + 32))
+		} else {
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
+}
+
+// flattenJSON recursively flattens a map into dotted-key → string pairs.
+// Arrays and nested objects that aren't maps are serialized as JSON strings.
+func flattenJSON(prefix string, data map[string]interface{}, out map[string]string) {
+	for k, v := range data {
+		snakeKey := camelToSnake(k)
+		fullKey := prefix + snakeKey
+		switch val := v.(type) {
+		case map[string]interface{}:
+			flattenJSON(fullKey+".", val, out)
+		case string:
+			out[fullKey] = val
+		case bool:
+			if val {
+				out[fullKey] = "true"
+			} else {
+				out[fullKey] = "false"
+			}
+		case float64:
+			// Use %g to avoid trailing zeros for integers.
+			out[fullKey] = fmt.Sprintf("%g", val)
+		case nil:
+			// skip nil values
+		default:
+			// Arrays and complex values: store as JSON string.
+			blob, _ := json.Marshal(val)
+			out[fullKey] = string(blob)
+		}
+	}
+}
+
+// migrateConfigsToKV reads all provider/setting rows from configs and
+// flattens them into configs_kv single-value rows. Skipped when configs_kv
+// already has data (idempotent). Old configs rows are kept for rollback.
+func (d *DBStore) migrateConfigsToKV(ctx context.Context) error {
+	exists, err := d.tableExists(ctx, "configs_kv")
+	if err != nil || !exists {
+		return err
+	}
+	// Skip if configs_kv already has data.
+	var count int
+	if err := d.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM configs_kv`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	// Read all provider + setting rows from configs.
+	configRows, err := d.db.QueryContext(ctx,
+		`SELECT `+configSelectCols+` FROM configs WHERE kind IN ('provider', 'setting')`)
+	if err != nil {
+		return err
+	}
+	defer configRows.Close()
+	configs, err := scanConfigs(configRows)
+	if err != nil {
+		return err
+	}
+	inserted := 0
+	for _, cfg := range configs {
+		if len(cfg.Data) == 0 {
+			continue
+		}
+		// Derive scope and scope_id from (user_id, agent_id). The
+		// per-(user, agent) layer is preserved as a distinct scope so
+		// per-agent provider keys keep their isolation in configs_kv
+		// instead of collapsing onto the user layer (which would leak
+		// one agent's key across all of the user's agents).
+		kvScope := "system"
+		kvScopeID := ""
+		switch {
+		case cfg.UserID != "" && cfg.AgentID != "":
+			kvScope = "user-agent"
+			kvScopeID = cfg.UserID + "/" + cfg.AgentID
+		case cfg.UserID != "":
+			kvScope = "user"
+			kvScopeID = cfg.UserID
+		case cfg.AgentID != "":
+			kvScope = "agent"
+			kvScopeID = cfg.AgentID
+		}
+		// Flatten JSON data into key-value pairs.
+		flat := map[string]string{}
+		switch {
+		case cfg.Kind == KindProvider:
+			// name becomes "{provider_name}.{json_key_snake_case}"
+			flattenJSON(cfg.Name+".", cfg.Data, flat)
+		case cfg.Kind == KindSetting && cfg.Name == "agents.defaults":
+			// namespace becomes "agent." prefix
+			flattenJSON("agent.", cfg.Data, flat)
+		default:
+			// Other settings: name becomes "{namespace}.{json_key_snake_case}"
+			flattenJSON(cfg.Name+".", cfg.Data, flat)
+		}
+		for name, value := range flat {
+			if err := d.SetConfigValue(ctx, cfg.Kind, kvScope, kvScopeID, name, value); err != nil {
+				slog.Warn("migrate config to kv failed",
+					"kind", cfg.Kind, "scope", kvScope, "scope_id", kvScopeID,
+					"name", name, "error", err)
+			} else {
+				inserted++
+			}
+		}
+	}
+	if inserted > 0 {
+		slog.Info("migrated configs to configs_kv", "rows", inserted)
 	}
 	return nil
 }
