@@ -9,6 +9,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 )
 
 // UserResolver looks up a user space by user ID.
@@ -38,10 +39,12 @@ type UserSpaceView struct {
 
 // Server handles the OpenAI-compatible API and WebSocket gateway.
 type Server struct {
-	resolver   UserResolver
+	resolver     UserResolver
 	authResolver *auth.Resolver
-	gatewayCfg *config.GatewayCfg
-	limiter    *rateLimiter
+	gatewayCfg   *config.GatewayCfg
+	limiter      *rateLimiter
+	meter        usage.Meter
+	quotaStore   usage.QuotaStore
 }
 
 // NewServer creates a new API server. authResolver is mandatory — there is
@@ -81,7 +84,25 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// store the returned fastagent user_id locally.
 	mux.HandleFunc("POST /v1/users",
 		s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, s.HandleProvisionAppUser)))
+
+	// Billing: usage query + quota management. Available to any
+	// authenticated api_key caller so upstream SaaS apps (weclaw etc.)
+	// can pull consumption data and set per-user ceilings.
+	mux.HandleFunc("GET /v1/usage",
+		s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, s.HandleGetUsage)))
+	mux.HandleFunc("PUT /v1/quota",
+		s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, s.HandleSetQuota)))
+	mux.HandleFunc("GET /v1/quota",
+		s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, s.HandleGetQuota)))
+	mux.HandleFunc("DELETE /v1/quota",
+		s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, s.HandleDeleteQuota)))
 }
+
+// SetMeter installs the token usage meter for the /v1/usage endpoint.
+func (s *Server) SetMeter(m usage.Meter) { s.meter = m }
+
+// SetQuotaStore installs the quota store for /v1/quota endpoints.
+func (s *Server) SetQuotaStore(qs usage.QuotaStore) { s.quotaStore = qs }
 
 // RegisterAdminRoutes is kept as a no-op for callers that still call it
 // during gateway boot. Admin user/apikey CRUD now lives under /api/admin

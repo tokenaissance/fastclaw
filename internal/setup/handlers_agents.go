@@ -539,6 +539,10 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// To clear all overrides for this agent, send pluginsReset:true.
 		Plugins      map[string]bool `json:"plugins,omitempty"`
 		PluginsReset bool            `json:"pluginsReset,omitempty"`
+		// MCPServers is a whole-map replace: omit to leave untouched,
+		// send {} to clear, or send the full desired map to replace.
+		MCPServers      map[string]config.MCPServerConfig `json:"mcpServers,omitempty"`
+		MCPServersReset bool                              `json:"mcpServersReset,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -578,6 +582,21 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			delete(rec.Config, "shareModelConfig")
 		} else {
 			rec.Config["shareModelConfig"] = false
+		}
+	}
+	// MCP servers: whole-map replace into the agent config blob.
+	if req.MCPServersReset {
+		if rec.Config != nil {
+			delete(rec.Config, "mcpServers")
+		}
+	} else if req.MCPServers != nil {
+		if rec.Config == nil {
+			rec.Config = map[string]interface{}{}
+		}
+		if len(req.MCPServers) == 0 {
+			delete(rec.Config, "mcpServers")
+		} else {
+			rec.Config["mcpServers"] = req.MCPServers
 		}
 	}
 	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {

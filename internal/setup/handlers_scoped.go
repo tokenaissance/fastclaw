@@ -518,6 +518,15 @@ func decodeChannelConfigFromRecord(rec *store.ConfigRecord) config.ChannelConfig
 // stricter "global uniqueness" semantics for callers that don't have
 // that context handy.
 func (s *Server) assertChannelCredentialUnique(r *http.Request, channelType, credKey, excludeID string, callerUserID, callerAgentID string) error {
+	return s.assertChannelCredentialUniqueOpt(r, channelType, credKey, excludeID, callerUserID, callerAgentID, false)
+}
+
+// assertChannelCredentialUniqueOpt is like assertChannelCredentialUnique but
+// accepts autoReplace: when true and the conflicting row belongs to the same
+// user, the old row is deleted automatically so the caller can proceed with
+// saving the new binding. This lets the dashboard "move" a bot from one agent
+// to another without forcing the user to disconnect manually first.
+func (s *Server) assertChannelCredentialUniqueOpt(r *http.Request, channelType, credKey, excludeID string, callerUserID, callerAgentID string, autoReplace bool) error {
 	if credKey == "" {
 		return nil
 	}
@@ -533,6 +542,27 @@ func (s *Server) assertChannelCredentialUnique(r *http.Request, channelType, cre
 	if existing.UserID == callerUserID &&
 		existing.AgentID == callerAgentID &&
 		existing.Name == channelType {
+		return nil
+	}
+	// Auto-replace: the caller is presenting the bot token (proof of
+	// ownership of the credential), so unconditionally tear down the old
+	// binding and let the new one take its place. The uniqueness check
+	// exists to prevent inbound-dispatcher races, not for authorization.
+	if autoReplace {
+		slog.Info("[channel-unique] auto-replacing old binding",
+			"existing.ID", existing.ID, "existing.UserID", existing.UserID, "existing.AgentID", existing.AgentID,
+			"callerUserID", callerUserID, "callerAgentID", callerAgentID)
+		cc := decodeChannelConfigFromRecord(existing)
+		if err := s.dataStore.DeleteConfig(r.Context(), existing.ID); err != nil {
+			return fmt.Errorf("failed to auto-disconnect old binding: %w", err)
+		}
+		s.invalidateOwner(existing.UserID, existing.AgentID)
+		for accountID := range cc.Accounts {
+			s.hotUnregisterChannel(existing.Name, accountID)
+		}
+		if len(cc.Accounts) == 0 {
+			s.hotUnregisterChannel(existing.Name, "")
+		}
 		return nil
 	}
 	// Surface where the conflict actually lives so the operator knows

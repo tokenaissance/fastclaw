@@ -28,7 +28,8 @@ type Store interface {
 	CreateUser(ctx context.Context, u *UserRecord) error
 	GetUser(ctx context.Context, id string) (*UserRecord, error)
 	GetUserByLogin(ctx context.Context, usernameOrEmail string) (*UserRecord, error)
-	GetUserByExternal(ctx context.Context, apikeyID, externalID string) (*UserRecord, error)
+	GetUserByExternal(ctx context.Context, ownerUserID, externalID string) (*UserRecord, error)
+	GetUserByExternalSuffix(ctx context.Context, ownerUserID, prefix, suffix string) (*UserRecord, error)
 	ListUsers(ctx context.Context) ([]UserRecord, error)
 	UpdateUser(ctx context.Context, u *UserRecord) error
 	DeleteUser(ctx context.Context, id string) error
@@ -90,6 +91,10 @@ type Store interface {
 	// map key is "userID\x00agentID\x00sessionKey". Used by the admin
 	// Chats page to extract previews in 1 query instead of per-session.
 	BatchFirstUserMessages(ctx context.Context) (map[string]SessionMessage, error)
+	// ListSessionOwnerPairsByAgents is like ListSessionOwnerPairs but
+	// restricted to the given agent IDs. Used by the scoped /api/chats
+	// endpoint so user/agent API keys see only their authorized agents.
+	ListSessionOwnerPairsByAgents(ctx context.Context, agentIDs []string) ([]SessionOwnerPair, error)
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
 	// MoveSession reassigns a session to a different project (or
@@ -306,6 +311,11 @@ type UserRecord struct {
 	Status       string `json:"status"` // "active" | "disabled"
 	APIKeyID     string `json:"apikeyId,omitempty"`
 	ExternalID   string `json:"externalId,omitempty"`
+	// OwnerUserID links this user to its parent:
+	//   app_user  → the user who created the API key that provisioned this row
+	//   chatter   → the channel owner (the user/app_user whose agent the chatter talks to)
+	//   super_admin / user → empty (top-level)
+	OwnerUserID string `json:"ownerUserId,omitempty"`
 	// AvatarURL is a self-contained data: URL ("data:image/png;base64,...")
 	// stored inline to avoid a separate blob path. Cap is enforced by the
 	// handler at write time (256KB by default). Empty means "no avatar"
@@ -412,6 +422,11 @@ type SessionMessage struct {
 	// (currently only "goal_context"). Stored as a column on
 	// session_messages (see migrateSessionMessagesAddOrigin).
 	Origin string `json:"origin,omitempty"`
+	// Provider and Model record which LLM produced this message.
+	// Only set on role="assistant" messages. Empty on user/tool rows
+	// and on rows written before this column existed.
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // SessionEventRecord is one row of session_events — a single delta the

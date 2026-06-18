@@ -185,6 +185,8 @@ func runGateway(port int) error {
 	gw.SetChatEvents(webSrv.ChatEventHub())
 
 	apiSrv := api.NewServer(&apiResolver{gw: gw}, authResolver, gwCfg)
+	apiSrv.SetMeter(gw.Usage())
+	apiSrv.SetQuotaStore(gw.QuotaStore())
 	webSrv.SetAPIServer(apiSrv)
 
 	// Coding-agent project runtime: long-lived dev-server sandbox +

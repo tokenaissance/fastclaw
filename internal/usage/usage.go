@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // Tokens is one Chat call's token accounting. Mirrors provider.Usage
@@ -97,7 +99,31 @@ type Meter interface {
 	// is public and you only want your own sessions); pass "" to
 	// include all chatters.
 	SessionsForAgent(ctx context.Context, agentID, userID string, r Range, limit int) ([]Rank, error)
+	// TotalsForUser returns aggregate token counts scoped to one user.
+	// Used by quota enforcement and the /v1/usage API.
+	TotalsForUser(ctx context.Context, userID string, r Range) (Totals, error)
+	// DailyForUser returns per-day, per-agent token breakdowns for
+	// one user. Backs the GET /v1/usage API so upstream SaaS apps
+	// can pull detailed consumption.
+	DailyForUser(ctx context.Context, userID string, r Range) ([]DailyUsage, error)
+	// RecordTokenLog appends one row per LLM call to token_usage_log.
+	// Unlike RecordTokens (which UPSERTs into daily buckets), this is
+	// append-only so every call is individually auditable. durationMs
+	// is the wall-clock time of the provider.Chat call.
+	RecordTokenLog(ctx context.Context, userID, agentID, sessionKey, provider, model string, t Tokens, durationMs int64) error
 	Close() error
+}
+
+// DailyUsage is one day+agent row returned by DailyForUser.
+type DailyUsage struct {
+	Day           string `json:"day"`
+	AgentID       string `json:"agentId"`
+	Model         string `json:"model"`
+	InputTokens   int64  `json:"inputTokens"`
+	OutputTokens  int64  `json:"outputTokens"`
+	CacheRead     int64  `json:"cacheReadTokens"`
+	CacheCreation int64  `json:"cacheCreationTokens"`
+	Requests      int64  `json:"requestCount"`
 }
 
 // dayBucket truncates a time to UTC midnight. Exported indirectly via
@@ -250,6 +276,59 @@ func (m *MemMeter) rank(r Range, limit int, key func(memKey) string) ([]Rank, er
 	return out, nil
 }
 
+func (m *MemMeter) TotalsForUser(_ context.Context, userID string, r Range) (Totals, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out Totals
+	for k, c := range m.data {
+		if k.userID != userID || !inRange(k.day, r) {
+			continue
+		}
+		out.Input += c.input
+		out.Output += c.output
+		out.CacheRead += c.cacheRead
+		out.CacheCreation += c.cacheCreate
+		out.Requests += c.requests
+	}
+	return out, nil
+}
+
+func (m *MemMeter) DailyForUser(_ context.Context, userID string, r Range) ([]DailyUsage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	type groupKey struct {
+		day     string
+		agentID string
+		model   string
+	}
+	agg := map[groupKey]*DailyUsage{}
+	for k, c := range m.data {
+		if k.userID != userID || !inRange(k.day, r) {
+			continue
+		}
+		gk := groupKey{day: k.day.Format("2006-01-02"), agentID: k.agentID, model: k.model}
+		row, ok := agg[gk]
+		if !ok {
+			row = &DailyUsage{Day: gk.day, AgentID: gk.agentID, Model: gk.model}
+			agg[gk] = row
+		}
+		row.InputTokens += c.input
+		row.OutputTokens += c.output
+		row.CacheRead += c.cacheRead
+		row.CacheCreation += c.cacheCreate
+		row.Requests += c.requests
+	}
+	out := make([]DailyUsage, 0, len(agg))
+	for _, v := range agg {
+		out = append(out, *v)
+	}
+	return out, nil
+}
+
+func (m *MemMeter) RecordTokenLog(_ context.Context, _, _, _, _, _ string, _ Tokens, _ int64) error {
+	return nil // MemMeter doesn't persist logs
+}
+
 func (m *MemMeter) Close() error { return nil }
 
 func inRange(day time.Time, r Range) bool {
@@ -325,22 +404,29 @@ func (s *SQLMeter) dayParam(t time.Time) any {
 
 func (s *SQLMeter) RecordTokens(ctx context.Context, userID, agentID, sessionKey, provider, model string, t Tokens) error {
 	day := s.dayParam(dayBucket(time.Now()))
+	channel := store.ChannelFromContext(ctx)
+	chatterUID := store.ChatterUserIDFromContext(ctx)
 	// Both dialects support this six-column conflict target and the
 	// EXCLUDED reference. We additionally bump request_count by 1.
+	// channel + chatter_user_id are informational — not part of the PK.
 	q := s.rebind(`
 		INSERT INTO token_usage_daily
 			(day, user_id, agent_id, session_key, provider, model,
-			 input_tokens, output_tokens, cache_read_tokens, cache_create_tokens, request_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+			 input_tokens, output_tokens, cache_read_tokens, cache_create_tokens, request_count,
+			 channel, chatter_user_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 		ON CONFLICT (day, user_id, agent_id, session_key, provider, model) DO UPDATE SET
 			input_tokens         = token_usage_daily.input_tokens         + EXCLUDED.input_tokens,
 			output_tokens        = token_usage_daily.output_tokens        + EXCLUDED.output_tokens,
 			cache_read_tokens    = token_usage_daily.cache_read_tokens    + EXCLUDED.cache_read_tokens,
 			cache_create_tokens  = token_usage_daily.cache_create_tokens  + EXCLUDED.cache_create_tokens,
-			request_count        = token_usage_daily.request_count        + 1`)
+			request_count        = token_usage_daily.request_count        + 1,
+			channel              = EXCLUDED.channel,
+			chatter_user_id      = EXCLUDED.chatter_user_id`)
 	_, err := s.db.ExecContext(ctx, q,
 		day, userID, agentID, sessionKey, provider, model,
 		t.Input, t.Output, t.CacheRead, t.CacheCreation,
+		channel, chatterUID,
 	)
 	return err
 }
@@ -424,6 +510,74 @@ func (s *SQLMeter) scanRanks(ctx context.Context, q string, args ...any) ([]Rank
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *SQLMeter) TotalsForUser(ctx context.Context, userID string, r Range) (Totals, error) {
+	q := s.rebind(`
+		SELECT
+			COALESCE(SUM(input_tokens),0),
+			COALESCE(SUM(output_tokens),0),
+			COALESCE(SUM(cache_read_tokens),0),
+			COALESCE(SUM(cache_create_tokens),0),
+			COALESCE(SUM(request_count),0)
+		FROM token_usage_daily
+		WHERE user_id = ? AND day BETWEEN ? AND ?`)
+	row := s.db.QueryRowContext(ctx, q, userID, s.dayParam(r.Since), s.dayParam(r.Until))
+	var out Totals
+	if err := row.Scan(&out.Input, &out.Output, &out.CacheRead, &out.CacheCreation, &out.Requests); err != nil {
+		return Totals{}, err
+	}
+	return out, nil
+}
+
+func (s *SQLMeter) DailyForUser(ctx context.Context, userID string, r Range) ([]DailyUsage, error) {
+	q := s.rebind(`
+		SELECT
+			day,
+			agent_id,
+			model,
+			COALESCE(SUM(input_tokens),0),
+			COALESCE(SUM(output_tokens),0),
+			COALESCE(SUM(cache_read_tokens),0),
+			COALESCE(SUM(cache_create_tokens),0),
+			COALESCE(SUM(request_count),0)
+		FROM token_usage_daily
+		WHERE user_id = ? AND day BETWEEN ? AND ?
+		GROUP BY day, agent_id, model
+		ORDER BY day DESC, agent_id`)
+	rows, err := s.db.QueryContext(ctx, q, userID, s.dayParam(r.Since), s.dayParam(r.Until))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DailyUsage
+	for rows.Next() {
+		var d DailyUsage
+		var day time.Time
+		if err := rows.Scan(&day, &d.AgentID, &d.Model, &d.InputTokens, &d.OutputTokens, &d.CacheRead, &d.CacheCreation, &d.Requests); err != nil {
+			return nil, err
+		}
+		d.Day = day.Format("2006-01-02")
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLMeter) RecordTokenLog(ctx context.Context, userID, agentID, sessionKey, prov, model string, t Tokens, durationMs int64) error {
+	channel := store.ChannelFromContext(ctx)
+	chatterUID := store.ChatterUserIDFromContext(ctx)
+	q := s.rebind(`
+		INSERT INTO token_usage_log
+			(user_id, agent_id, session_key, provider, model,
+			 input_tokens, output_tokens, cache_read_tokens, cache_create_tokens,
+			 duration_ms, channel, chatter_user_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`)
+	_, err := s.db.ExecContext(ctx, q,
+		userID, agentID, sessionKey, prov, model,
+		t.Input, t.Output, t.CacheRead, t.CacheCreation,
+		durationMs, channel, chatterUID,
+	)
+	return err
 }
 
 func (s *SQLMeter) topBy(ctx context.Context, r Range, limit int, col string) ([]Rank, error) {

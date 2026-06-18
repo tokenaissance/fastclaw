@@ -107,6 +107,10 @@ type Agent struct {
 	// leave it nil and metering becomes a no-op via meterTokens().
 	meter     usage.Meter
 	lastUsage provider.Usage // last LLM call's usage; read by HandleChatCompletions for API response
+	// quotaStore is the per-user billing quota store. When set, the
+	// agent loop checks the owner's quota before processing a turn.
+	// Nil means no quota enforcement (unlimited).
+	quotaStore usage.QuotaStore
 	// sandboxPool is the per-user (agent + session) sandbox pool. Set
 	// once at boot/hot-reload by attachSandboxToAgents; bindSession
 	// pulls a session-scoped executor from it at the top of every turn
@@ -651,27 +655,53 @@ func (a *Agent) OwnerUserID() string { return a.ownerUserID }
 // invocation. Nil is fine — meterTokens() is a no-op when unset.
 func (a *Agent) SetMeter(m usage.Meter) { a.meter = m }
 
+// SetQuotaStore wires the billing quota store. Called by the gateway at
+// boot / hot-reload alongside SetMeter. Nil disables quota enforcement.
+func (a *Agent) SetQuotaStore(qs usage.QuotaStore) { a.quotaStore = qs }
+
+// checkQuota returns a non-empty rejection message when the agent's
+// owner has exceeded their billing quota. Returns "" when the request
+// should proceed (no quota, unlimited, or still under limit).
+func (a *Agent) checkQuota(ctx context.Context) string {
+	if a.quotaStore == nil || a.meter == nil {
+		return ""
+	}
+	status, err := usage.CheckQuota(ctx, a.quotaStore, a.meter, a.ownerUserID)
+	if err != nil || status.Allowed {
+		return ""
+	}
+	return fmt.Sprintf("Sorry, your usage quota has been exceeded (used %d/%d tokens, %d/%d requests). Your quota resets on %s. Please contact your service provider to upgrade your plan.",
+		status.TokensUsed, status.MonthlyTokenLimit,
+		status.RequestsUsed, status.MonthlyRequestLimit,
+		status.ResetsAt)
+}
+
 // meterTokens records one Chat call's token counts. Safe to call with
 // zero usage (still bumps request_count). Errors are logged but never
 // propagated — metering must not break the chat path. The agent's
 // configured model string carries the provider prefix when a per-agent
 // override is set; we split it so the meter stores provider and model
 // in their own columns rather than mashing them together.
-func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.Usage) {
+// durationMs is the wall-clock time of the LLM call; pass 0 when not
+// measured (the daily bucket doesn't use it, only the log table).
+func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.Usage, durationMs int64) {
 	a.lastUsage = u // stash for LastUsage()
+
 	if a.meter == nil {
 		return
 	}
 	prov, mdl := provider.SplitProviderModel(a.model)
-	err := a.meter.RecordTokens(ctx, a.ownerUserID, a.agentID, sessionKey, prov, mdl,
-		usage.Tokens{
-			Input:         u.InputTokens,
-			Output:        u.OutputTokens,
-			CacheRead:     u.CacheReadTokens,
-			CacheCreation: u.CacheCreationTokens,
-		})
-	if err != nil {
+	t := usage.Tokens{
+		Input:         u.InputTokens,
+		Output:        u.OutputTokens,
+		CacheRead:     u.CacheReadTokens,
+		CacheCreation: u.CacheCreationTokens,
+	}
+	if err := a.meter.RecordTokens(ctx, a.ownerUserID, a.agentID, sessionKey, prov, mdl, t); err != nil {
 		slog.Warn("meter record failed", "agent", a.name, "error", err)
+	}
+	if err := a.meter.RecordTokenLog(ctx, a.ownerUserID, a.agentID, sessionKey, prov, mdl, t, durationMs); err != nil {
+		slog.Warn("meter log failed", "agent", a.name, "error", err)
 	}
 }
 
@@ -1631,6 +1661,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	chatterUID := a.chatterUserID(msg)
 	ctx = sandbox.WithUserID(ctx, chatterUID)
 	ctx = store.WithChatterUserID(ctx, chatterUID)
+	ctx = store.WithChannel(ctx, msg.Channel)
 	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	// Session.ctx() builds its OWN context from session-held fields
 	// rather than inheriting the caller's ctx — without binding the
@@ -1638,6 +1669,10 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// above never reaches AppendSessionMessage / SaveSession and the
 	// chatter_user_id column stays empty.
 	sess.SetChatter(chatterUID)
+	{
+		prov, mdl := provider.SplitProviderModel(a.model)
+		sess.SetProviderModel(prov, mdl)
+	}
 	// Steering during plan drafting: plan mode has no ReAct loop to drain
 	// into, so a mid-draft steer is parked in history and answered on
 	// the user's next turn — which matches the plan-mode contract
@@ -1688,7 +1723,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 		emitEvent(ctx, ChatEvent{Type: "done"})
 		return "Sorry, I couldn't draft the plan — the LLM call failed."
 	}
-	a.meterTokens(ctx, sess.Key(), resp.Usage)
+	a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
 
 	planMeta := map[string]any{"planMode": true}
 	sess.Append(provider.Message{
@@ -1765,6 +1800,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return result.reply
 	}
 
+	// Quota gate: reject the turn early when the agent owner has
+	// exceeded their billing ceiling. Checked before plan-mode and
+	// the main ReAct loop so no LLM tokens are burned.
+	if rejection := a.checkQuota(ctx); rejection != "" {
+		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": rejection}})
+		emitEvent(ctx, ChatEvent{Type: "done"})
+		return rejection
+	}
+
 	// Plan mode short-circuits the ReAct loop: tools off, the model
 	// emits a numbered plan, the user reviews it and replies normally
 	// (no planMode flag) on the next turn to execute. Lets users catch
@@ -1801,6 +1845,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// continue to list "all sessions on my bots"; chatter_user_id
 	// records the actual participant for per-chatter queries.
 	ctx = store.WithChatterUserID(ctx, chatterUID)
+	ctx = store.WithChannel(ctx, msg.Channel)
 	// Per-turn channel context for the skill-refresh diagnostic. Lets
 	// us correlate the "skills summary refreshed" log emitted inside
 	// refreshSkillsFromStore with the channel the request arrived on,
@@ -1815,6 +1860,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// reach AppendSessionMessage / SaveSession on its own — sess has to
 	// carry the chatter itself.
 	sess.SetChatter(chatterUID)
+	{
+		prov, mdl := provider.SplitProviderModel(a.model)
+		sess.SetProviderModel(prov, mdl)
+	}
 	// Bind the registry to this chat's session so workspace.Store reads
 	// + writes get session-scoped paths and (when a sandbox pool is
 	// wired) the executor used by exec/read_file/list_dir is tied to a
@@ -2001,7 +2050,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			return "Sorry, I encountered an error processing your request."
 		}
-		a.meterTokens(ctx, sess.Key(), resp.Usage)
+		a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
 		a.maybeRecoverToolCalls(resp)
 
 		if !resp.HasToolCalls() {
@@ -2282,7 +2331,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	finalResp, finalErr := a.streamChatToResponse(ctx, finalMessages, nil)
 	if finalErr == nil {
 		finalContent = finalResp.Content
-		a.meterTokens(ctx, sess.Key(), finalResp.Usage)
+		a.meterTokens(ctx, sess.Key(), finalResp.Usage, 0)
 	}
 	if finalContent == "" {
 		// Synthesis call itself failed or returned empty — fall back to
@@ -2542,11 +2591,17 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return provider.NewStreamReader(ch)
 	}
 
+	// Quota gate — mirrors the check in HandleMessage.
+	if rejection := a.checkQuota(ctx); rejection != "" {
+		return a.stringStream(rejection)
+	}
+
 	chatterUID := a.chatterUserID(msg)
 	ctx = sandbox.WithUserID(ctx, chatterUID)
 	// Tag ctx so DBStore session writes stamp chatter_user_id — see
 	// the HandleMessage path for the rationale.
 	ctx = store.WithChatterUserID(ctx, chatterUID)
+	ctx = store.WithChannel(ctx, msg.Channel)
 	slog.Info("turn: refreshing skills",
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
@@ -2555,6 +2610,10 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// for DBStore session writes — Session.ctx() rebuilds ctx from its
 	// own fields, so the chatter has to live on sess itself.
 	sess.SetChatter(chatterUID)
+	{
+		prov, mdl := provider.SplitProviderModel(a.model)
+		sess.SetProviderModel(prov, mdl)
+	}
 	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
 	a.registry.SetCallerIsAdmin(a.isAdminChatter(msg))
 	a.registry.SetGoalSessionKey(sess.SessionKey())
@@ -2636,7 +2695,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			slog.Error("LLM chat failed", "agent", a.name, "error", err)
 			return a.stringStream("Sorry, I encountered an error processing your request.")
 		}
-		a.meterTokens(ctx, sess.Key(), resp.Usage)
+		a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
 		a.maybeRecoverToolCalls(resp)
 
 		if !resp.HasToolCalls() {
@@ -2692,7 +2751,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 						return
 					}
 				}
-				a.meterTokens(ctx, sess.Key(), streamUsage)
+				a.meterTokens(ctx, sess.Key(), streamUsage, 0)
 				msg := provider.Message{Role: "assistant", Content: full.String(), Thinking: thinking}
 				switch {
 				case len(rawAssistant) > 0:
@@ -2851,7 +2910,7 @@ func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.
 				return
 			}
 		}
-		a.meterTokens(ctx, sess.Key(), streamUsage)
+		a.meterTokens(ctx, sess.Key(), streamUsage, 0)
 		content := full.String()
 		if content == "" {
 			content = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)

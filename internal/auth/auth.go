@@ -273,7 +273,7 @@ func (r *Resolver) SwitchToAppUser(ctx context.Context, ident Identity, external
 	}
 	// ident.UserID is the api_key's owner account here (pre-switch); key the
 	// app_user on it so rotating/replacing the api_key keeps the same user.
-	acc, err := r.accounts.EnsureAppUser(ctx, ident.UserID, externalID, "")
+	acc, err := r.accounts.EnsureAppUser(ctx, ident.UserID, externalID, "", ident.APIKeyID)
 	if err != nil {
 		return ident, err
 	}

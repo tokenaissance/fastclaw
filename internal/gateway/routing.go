@@ -155,24 +155,45 @@ func (g *Gateway) resolveChatter(ctx context.Context, ownerID string, msg bus.In
 	if g.store == nil || g.accounts == nil {
 		return ""
 	}
-	owner, err := g.store.GetUser(ctx, ownerID)
+	// extID uses channel + platform user ID only — no accountID.
+	// This keeps the chatter's identity stable across bot reconnections
+	// (where accountID changes) and across multiple agents owned by the
+	// same user (where each agent has a different bot / accountID).
+	extID := msg.Channel + ":" + msg.UserID
+
+	// Look up by owner_user_id + extID (new format).
+	if acc, err := g.store.GetUserByExternal(ctx, ownerID, extID); err == nil {
+		return acc.ID
+	}
+	// Fall back: owner_user_id + legacy extID (channel:accountID:userID)
+	// for chatters created before the accountID-free format.
+	if acc, err := g.store.GetUserByExternalSuffix(ctx, ownerID, msg.Channel+":", ":"+msg.UserID); err == nil {
+		return acc.ID
+	}
+	// Fall back: legacy rows where owner_user_id was stored as
+	// "owner:xxx" in the old apikey_id column (pre-migration). The
+	// migration backfills owner_user_id, but in case it hasn't run
+	// yet or the row was created by an older binary, check the old
+	// namespace format too.
+	legacyNS := "owner:" + ownerID
+	if acc, err := g.store.GetUserByExternalSuffix(ctx, legacyNS, msg.Channel+":", ":"+msg.UserID); err == nil {
+		return acc.ID
+	}
+	// Also check platform-scoped namespace (apikey owner ID) used
+	// before the per-tenant fix.
+	if owner, err := g.store.GetUser(ctx, ownerID); err == nil && owner.APIKeyID != "" {
+		if acc, err := g.store.GetUserByExternalSuffix(ctx, owner.APIKeyID, msg.Channel+":", ":"+msg.UserID); err == nil {
+			return acc.ID
+		}
+	}
+	// Neither found — brand new chatter.
+	chatter, err := g.accounts.EnsureChatter(ctx, ownerID, extID, msg.SenderName)
 	if err != nil {
-		slog.Warn("resolveChatter: owner lookup failed",
-			"owner", ownerID, "channel", msg.Channel, "error", err)
+		slog.Warn("resolveChatter: EnsureChatter failed",
+			"owner", ownerID, "ext", extID, "error", err)
 		return ""
 	}
-	namespace := owner.APIKeyID
-	if namespace == "" {
-		namespace = "owner:" + ownerID
-	}
-	extID := msg.Channel + ":" + msg.AccountID + ":" + msg.UserID
-	acc, err := g.accounts.EnsureAppUser(ctx, namespace, extID, msg.SenderName)
-	if err != nil {
-		slog.Warn("resolveChatter: EnsureAppUser failed",
-			"owner", ownerID, "namespace", namespace, "ext", extID, "error", err)
-		return ""
-	}
-	return acc.ID
+	return chatter.ID
 }
 
 // trySteer diverts msg into target's currently in-flight turn instead of

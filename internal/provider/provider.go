@@ -78,6 +78,13 @@ type Message struct {
 	// as part of the JSONB sessions.messages working set and as a
 	// column on the structured session_messages archive.
 	Origin string `json:"origin,omitempty"`
+
+	// Provider and Model record which LLM produced this message.
+	// Only set on role="assistant" messages by the agent loop.
+	// Not sent to the LLM — used for session_messages archive
+	// and billing audit trails.
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 // TextContent returns the message's user-visible text. Falls back to

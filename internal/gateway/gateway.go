@@ -174,6 +174,7 @@ type Gateway struct {
 	workspace   workspace.Store
 	sandboxPool sandbox.ExecutorPool
 	usage       usage.Meter
+	quotaStore  usage.QuotaStore
 	envCfg      *config.EnvConfig
 	// projectRuntime is the coding-agent runtime manager (live dev server
 	// + preview). Set by SetProjectRuntime after construction; nil keeps
@@ -222,6 +223,9 @@ func (g *Gateway) Workspace() workspace.Store { return g.workspace }
 
 // Usage returns the per-tenant resource meter.
 func (g *Gateway) Usage() usage.Meter { return g.usage }
+
+// QuotaStore returns the per-user quota store.
+func (g *Gateway) QuotaStore() usage.QuotaStore { return g.quotaStore }
 
 // Store returns the gateway's storage backend.
 func (g *Gateway) Store() store.Store { return g.store }
@@ -290,8 +294,10 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	// back to MemMeter if the store doesn't expose a *sql.DB (shouldn't
 	// happen in real installs — only an embedded test double would).
 	var localMeter usage.Meter = usage.NewMemMeter()
+	var quotaStore usage.QuotaStore = usage.NewMemQuotaStore()
 	if dbs, ok := st.(*store.DBStore); ok {
 		localMeter = usage.NewSQLMeter(dbs.DB(), dbs.Dialect())
+		quotaStore = usage.NewSQLQuotaStore(dbs.DB(), dbs.Dialect())
 	}
 
 	// Webhook billing integration: if FASTAGENT_WEBHOOK_URL is set, wrap the
@@ -401,8 +407,9 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		accounts:    accts,
 		workspace:   ws,
 		usage:       meter,
+		quotaStore:  quotaStore,
 		sandboxPool: systemSandboxPool,
-		users:       newUserSpaceRegistry(mb, st, ws, meter, systemSandboxPool, pluginMgr),
+		users:       newUserSpaceRegistry(mb, st, ws, meter, quotaStore, systemSandboxPool, pluginMgr),
 		chanMgr:     chanMgr,
 		webChan:     webChan,
 		scheduler:   scheduler,

@@ -1553,6 +1553,118 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"sessions": ag.WebChatSessions()})
 }
 
+// handleChats returns chat sessions scoped by the caller's API key type:
+//   - admin key: all sessions across all users and agents
+//   - user key:  all sessions for agents owned by the key's user
+//   - agent key: all sessions for agents in the key's ACL
+//
+// Session-based callers (browser) get the same scoping as user keys.
+func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
+	if s.dataStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no data store"})
+		return
+	}
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+
+	var pairs []store.SessionOwnerPair
+	var err error
+
+	switch {
+	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAdmin:
+		// Admin: all sessions
+		pairs, err = s.dataStore.ListSessionOwnerPairs(r.Context())
+	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAgent:
+		// Agent key: sessions for explicitly authorized agents only
+		pairs, err = s.dataStore.ListSessionOwnerPairsByAgents(r.Context(), ident.APIKeyAgents)
+	default:
+		// User key or session caller: sessions for agents owned by the user
+		uid := ident.EffectiveUserID()
+		agents, agentsErr := s.dataStore.ListAgents(r.Context(), uid)
+		if agentsErr != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": agentsErr.Error()})
+			return
+		}
+		agentIDs := make([]string, len(agents))
+		for i, a := range agents {
+			agentIDs[i] = a.ID
+		}
+		pairs, err = s.dataStore.ListSessionOwnerPairsByAgents(r.Context(), agentIDs)
+	}
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	ownerCache := map[string]*users.Account{}
+	resolveOwner := func(uid string) *users.Account {
+		if uid == "" {
+			return nil
+		}
+		if a, ok := ownerCache[uid]; ok {
+			return a
+		}
+		a, _ := s.accounts.Get(r.Context(), uid)
+		ownerCache[uid] = a
+		return a
+	}
+	agentCache := map[string]*store.AgentRecord{}
+	resolveAgentRec := func(agentID string) *store.AgentRecord {
+		if agentID == "" {
+			return nil
+		}
+		if a, ok := agentCache[agentID]; ok {
+			return a
+		}
+		a, _ := s.dataStore.GetAgent(r.Context(), agentID)
+		agentCache[agentID] = a
+		return a
+	}
+
+	out := make([]map[string]any, 0)
+	for _, p := range pairs {
+		ag := resolveAgentRec(p.AgentID)
+		if ag == nil {
+			continue
+		}
+		adapter := session.NewStoreAdapter(s.dataStore, p.UserID)
+		sessions, listErr := adapter.ListWebSessions(r.Context(), p.AgentID)
+		if listErr != nil {
+			continue
+		}
+		owner := resolveOwner(p.UserID)
+		for _, ws := range sessions {
+			entry := map[string]any{
+				"id":           ws.ID,
+				"agentId":      p.AgentID,
+				"agentName":    ag.Name,
+				"userId":       p.UserID,
+				"channel":      ws.Channel,
+				"accountId":    ws.AccountID,
+				"chatId":       ws.ChatID,
+				"projectId":    ws.ProjectID,
+				"title":        ws.Title,
+				"preview":      ws.Preview,
+				"thumbnailUrl": ws.ThumbnailURL,
+				"createdAt":    ws.CreatedAt,
+				"updatedAt":    ws.UpdatedAt,
+			}
+			if owner != nil {
+				entry["ownerUsername"] = owner.Username
+				entry["ownerEmail"] = owner.Email
+				if owner.DisplayName != "" {
+					entry["ownerDisplayName"] = owner.DisplayName
+				}
+			}
+			out = append(out, entry)
+		}
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"sessions": out})
+}
+
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
 	// Body-or-query for agentId — the frontend sends it in the JSON body
 	// (see renameChatSession in web/src/lib/api.ts), matching the

@@ -48,6 +48,11 @@ type Session struct {
 	// Empty when the caller hasn't bound a chatter — writes leave the
 	// column '' and readers fall back to user_id.
 	chatterUserID string
+	// provider and model are stamped onto assistant messages by
+	// Append so session_messages rows record which LLM produced them.
+	// Set per-turn by the agent loop via SetProviderModel.
+	provider string
+	model    string
 
 	// Steering: turnDepth counts in-flight HandleMessage turns for this
 	// session (a counter, not a bool, so re-entrant/overlapping turns
@@ -95,6 +100,16 @@ func (s *Session) ctx() context.Context {
 func (s *Session) SetChatter(uid string) {
 	s.mu.Lock()
 	s.chatterUserID = uid
+	s.mu.Unlock()
+}
+
+// SetProviderModel binds the current LLM provider and model to this
+// Session so Append stamps them onto assistant messages. Called by the
+// agent loop alongside SetChatter.
+func (s *Session) SetProviderModel(prov, mdl string) {
+	s.mu.Lock()
+	s.provider = prov
+	s.model = mdl
 	s.mu.Unlock()
 }
 
@@ -443,6 +458,12 @@ func (s *Session) Append(msg provider.Message) {
 	// Auto-set timestamp if not provided
 	if msg.Timestamp == 0 {
 		msg.Timestamp = time.Now().UnixMilli()
+	}
+	// Stamp provider/model on assistant messages so the archive
+	// records which LLM produced each response.
+	if msg.Role == "assistant" && msg.Provider == "" && s.provider != "" {
+		msg.Provider = s.provider
+		msg.Model = s.model
 	}
 
 	s.Messages = append(s.Messages, msg)

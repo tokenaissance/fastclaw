@@ -276,9 +276,13 @@ func webFetchTool(ctx context.Context, r *Registry, rawArgs json.RawMessage) (st
 	// Strip HTML tags
 	text := stripHTML(string(body))
 
-	// Truncate to max length
+	// Truncate to max length (UTF-8 safe: back up to a valid rune boundary).
 	if len(text) > maxLen {
-		text = text[:maxLen] + "\n[...truncated]"
+		cut := maxLen
+		for cut > 0 && cut < len(text) && text[cut]&0xC0 == 0x80 {
+			cut-- // skip continuation bytes so we don't split a multi-byte rune
+		}
+		text = text[:cut] + "\n[...truncated]"
 	}
 
 	return text, nil

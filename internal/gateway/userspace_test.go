@@ -132,10 +132,15 @@ func TestResolveChatterSeparatesIMSendersForRegularOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get alice app_user: %v", err)
 	}
-	if aliceAccount.APIKeyID != "owner:"+owner.ID {
-		t.Fatalf("unexpected namespace: %q", aliceAccount.APIKeyID)
+	if aliceAccount.OwnerUserID != owner.ID {
+		t.Fatalf("unexpected owner_user_id: got %q, want %q", aliceAccount.OwnerUserID, owner.ID)
 	}
-	if aliceAccount.ExternalID != "telegram:bot-a:111" {
+	if aliceAccount.Role != users.RoleChannelUser {
+		t.Fatalf("unexpected role: got %q, want %q", aliceAccount.Role, users.RoleChannelUser)
+	}
+	// New users get the accountID-free format so chatter identity
+	// survives bot reconnections and is shared across agents.
+	if aliceAccount.ExternalID != "telegram:111" {
 		t.Fatalf("unexpected external id: %q", aliceAccount.ExternalID)
 	}
 }

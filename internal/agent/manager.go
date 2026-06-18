@@ -47,6 +47,7 @@ type managerOpts struct {
 	workspaceStore  workspace.Store
 	dataStore       store.Store
 	meter           usage.Meter
+	quotaStore      usage.QuotaStore
 	userID          string
 	globalSkillsCfg config.SkillsCfg
 }
@@ -88,6 +89,14 @@ func WithDataStore(st store.Store) ManagerOption {
 // to disable metering (tests, single-user dev runs).
 func WithMeter(m usage.Meter) ManagerOption {
 	return func(o *managerOpts) { o.meter = m }
+}
+
+// WithQuotaStore installs per-user billing quota enforcement on every
+// agent. The agent loop checks the owner's quota before processing a
+// turn — when exceeded, the user gets a friendly rejection and no LLM
+// tokens are burned. Omit to disable quota enforcement.
+func WithQuotaStore(qs usage.QuotaStore) ManagerOption {
+	return func(o *managerOpts) { o.quotaStore = qs }
 }
 
 // WithGlobalSkillsCfg propagates cfg.Skills (entries + agentEntries
@@ -247,6 +256,9 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	ag.agentID = rc.ID
 	if m.opts.meter != nil {
 		ag.SetMeter(m.opts.meter)
+	}
+	if m.opts.quotaStore != nil {
+		ag.SetQuotaStore(m.opts.quotaStore)
 	}
 	return ag
 }

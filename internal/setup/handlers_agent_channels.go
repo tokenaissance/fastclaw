@@ -256,7 +256,7 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 	// fallback (credentialKeyFor) silently dropped every inbound
 	// message because no row matched.
 	credKey := username
-	if err := s.assertChannelCredentialUnique(r, "telegram", credKey, "", uid, aid); err != nil {
+	if err := s.assertChannelCredentialUniqueOpt(r, "telegram", credKey, "", uid, aid, true); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
@@ -455,7 +455,7 @@ func (s *Server) handleConnectAgentDiscord(w http.ResponseWriter, r *http.Reques
 		Accounts: map[string]config.AccountConfig{userID: {BotToken: token}},
 	}
 	credKey := userID
-	if err := s.assertChannelCredentialUnique(r, "discord", credKey, "", uid, aid); err != nil {
+	if err := s.assertChannelCredentialUniqueOpt(r, "discord", credKey, "", uid, aid, true); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
@@ -591,7 +591,7 @@ func (s *Server) handleConnectAgentSlack(w http.ResponseWriter, r *http.Request)
 		Accounts: map[string]config.AccountConfig{teamID: {BotToken: botToken}},
 	}
 	credKey := teamID
-	if err := s.assertChannelCredentialUnique(r, "slack", credKey, "", uid, aid); err != nil {
+	if err := s.assertChannelCredentialUniqueOpt(r, "slack", credKey, "", uid, aid, true); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
@@ -873,7 +873,7 @@ func (s *Server) persistWeChatAccount(r *http.Request, userID, agentIDArg, agent
 		},
 	}
 	credKey := creds.ILinkBotID
-	if err := s.assertChannelCredentialUnique(r, "wechat", credKey, "", userID, agentIDArg); err != nil {
+	if err := s.assertChannelCredentialUniqueOpt(r, "wechat", credKey, "", userID, agentIDArg, true); err != nil {
 		return err
 	}
 	if err := scope.SaveChannel(r.Context(), s.dataStore, userID, agentIDArg, "wechat", credKey, true, cc); err != nil {
@@ -1036,7 +1036,7 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		},
 	}
 	credKey := appID
-	if err := s.assertChannelCredentialUnique(r, "feishu", credKey, "", uid, aid); err != nil {
+	if err := s.assertChannelCredentialUniqueOpt(r, "feishu", credKey, "", uid, aid, true); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}
@@ -1148,7 +1148,7 @@ func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 	credKey := userID
-	if err := s.assertChannelCredentialUnique(r, "line", credKey, "", uid, aid); err != nil {
+	if err := s.assertChannelCredentialUniqueOpt(r, "line", credKey, "", uid, aid, true); err != nil {
 		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
 		return
 	}

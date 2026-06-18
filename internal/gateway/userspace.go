@@ -619,7 +619,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 // by the resulting UserSpace. Pass nil when sandbox is disabled at
 // system scope; agents will run with path-only file roots in that
 // case.
-func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, projectRuntime *coderuntime.Manager) (*UserSpace, error) {
+func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, projectRuntime *coderuntime.Manager) (*UserSpace, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("loadUserSpace: userID required")
 	}
@@ -770,6 +770,9 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 	}
 	if meter != nil {
 		managerOpts = append(managerOpts, agent.WithMeter(meter))
+	}
+	if quotaStore != nil {
+		managerOpts = append(managerOpts, agent.WithQuotaStore(quotaStore))
 	}
 	agentMgr, err := agent.NewManager(resolved, prov, mb, managerOpts...)
 	if err != nil {
@@ -932,6 +935,7 @@ type userSpaceRegistry struct {
 	store             store.Store
 	workspace         workspace.Store
 	meter             usage.Meter
+	quotaStore        usage.QuotaStore
 	systemSandboxPool sandbox.ExecutorPool
 	// pluginMgr is the shared (process-wide) plugin manager. Nil
 	// when systemPlugins is disabled. Used by loadUserSpace and
@@ -960,13 +964,14 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
-func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager) *userSpaceRegistry {
+func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager) *userSpaceRegistry {
 	return &userSpaceRegistry{
 		spaces:            make(map[string]*userSpaceEntry),
 		bus:               mb,
 		store:             st,
 		workspace:         ws,
 		meter:             meter,
+		quotaStore:        quotaStore,
 		systemSandboxPool: systemSandboxPool,
 		pluginMgr:         pluginMgr,
 		idleTTL:           30 * time.Minute,
@@ -996,7 +1001,7 @@ func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*User
 		e.lastUsed = time.Now()
 		return e.space, nil
 	}
-	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.systemSandboxPool, r.pluginMgr, r.projectRuntime)
+	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.quotaStore, r.systemSandboxPool, r.pluginMgr, r.projectRuntime)
 	if err != nil {
 		return nil, err
 	}
