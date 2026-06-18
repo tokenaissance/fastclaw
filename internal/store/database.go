@@ -3489,7 +3489,20 @@ func (d *DBStore) migrateChannelsFromConfigs(ctx context.Context) error {
 // --- Configs KV migration ---
 
 // camelToSnake converts a camelCase string to snake_case.
+// ALL_CAPS and already_snake strings pass through (lowercased only).
 func camelToSnake(s string) string {
+	hasUpper, hasLower := false, false
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			hasUpper = true
+		}
+		if r >= 'a' && r <= 'z' {
+			hasLower = true
+		}
+	}
+	if !hasUpper || !hasLower {
+		return strings.ToLower(s)
+	}
 	var result strings.Builder
 	for i, r := range s {
 		if r >= 'A' && r <= 'Z' {
