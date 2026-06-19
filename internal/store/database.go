@@ -3417,9 +3417,11 @@ func randomChannelID() string {
 func scanChannelRow(row rowScanner) (*ChannelRecord, error) {
 	var c ChannelRecord
 	var dataStr string
-	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &c.SharedIdentity, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	var sharedIdent int
+	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
+	c.SharedIdentity = sharedIdent != 0
 	json.Unmarshal([]byte(dataStr), &c.Data)
 	return &c, nil
 }
@@ -3429,9 +3431,11 @@ func scanChannels(rows *sql.Rows) ([]ChannelRecord, error) {
 	for rows.Next() {
 		var c ChannelRecord
 		var dataStr string
-		if err := rows.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &c.SharedIdentity, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		var sharedIdent int
+		if err := rows.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
+		c.SharedIdentity = sharedIdent != 0
 		json.Unmarshal([]byte(dataStr), &c.Data)
 		out = append(out, c)
 	}
