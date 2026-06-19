@@ -3297,7 +3297,7 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	// name/soul" greeting).
 	if a.memoryStore != nil {
 		a.ctxBuilder.store = a.memoryStore
-		a.ctxBuilder.agentID = a.name
+		a.ctxBuilder.agentID = a.agentID
 		a.ctxBuilder.userID = a.ownerUserID
 	}
 	// Chatter-timezone date line — same re-apply rule as the Store
