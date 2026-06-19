@@ -2610,10 +2610,29 @@ func (d *DBStore) ResolveActiveSessionKey(ctx context.Context, userID, agentID, 
 			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
 		userID, agentID, channel, accountID, chatID)
 	var key string
-	if err := row.Scan(&key); err != nil {
-		return "", scanErr(err)
+	if err := row.Scan(&key); err == nil {
+		return key, nil
 	}
-	return key, nil
+	// Fallback for IM channels: when the bot is re-scanned the
+	// accountID changes (e.g. iLink assigns a new bot ID) but the
+	// chatID (platform user openid) stays the same. Try matching by
+	// (channel, chatID) only so the conversation continues in the
+	// existing session instead of minting a fresh one. Also widen
+	// user_id to include child app_users (the session may have been
+	// created under a different app_user or the web user).
+	if channel != "" && channel != "web" && channel != "api" && channel != "shared" {
+		row = d.db.QueryRowContext(ctx,
+			fmt.Sprintf(`SELECT session_key FROM sessions
+				WHERE agent_id = %s AND channel = %s AND chat_id = %s
+				  AND user_id IN (SELECT id FROM users WHERE id = %s OR owner_user_id = %s)
+				ORDER BY updated_at DESC LIMIT 1`,
+				d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
+			agentID, channel, chatID, userID, userID)
+		if err := row.Scan(&key); err == nil {
+			return key, nil
+		}
+	}
+	return "", ErrNotFound
 }
 
 func (d *DBStore) DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error {
