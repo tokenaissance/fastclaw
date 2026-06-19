@@ -3362,6 +3362,11 @@ func (d *DBStore) SaveChannel(ctx context.Context, ch *ChannelRecord) error {
 		ch.ID = randomChannelID()
 	}
 	dataBytes, _ := json.Marshal(ch.Data)
+	// Convert bools to int for PostgreSQL INTEGER columns.
+	enabledInt := 0
+	if ch.Enabled {
+		enabledInt = 1
+	}
 	sharedIdent := 0
 	if ch.SharedIdentity {
 		sharedIdent = 1
@@ -3373,7 +3378,7 @@ func (d *DBStore) SaveChannel(ctx context.Context, ch *ChannelRecord) error {
 				ON CONFLICT (type, account_id) DO UPDATE SET
 				  user_id=$2, agent_id=$3, enabled=$6, bot_token=$7, base_url=$8,
 				  platform_user_id=$9, shared_identity=$10, data=$11, updated_at=$13`,
-			ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, ch.Enabled, ch.BotToken, ch.BaseURL, ch.PlatformUserID, sharedIdent, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
+			ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, enabledInt, ch.BotToken, ch.BaseURL, ch.PlatformUserID, sharedIdent, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
@@ -3384,7 +3389,7 @@ func (d *DBStore) SaveChannel(ctx context.Context, ch *ChannelRecord) error {
 			  bot_token=excluded.bot_token, base_url=excluded.base_url,
 			  platform_user_id=excluded.platform_user_id, shared_identity=excluded.shared_identity,
 			  data=excluded.data, updated_at=excluded.updated_at`,
-		ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, ch.Enabled, ch.BotToken, ch.BaseURL, ch.PlatformUserID, sharedIdent, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
+		ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, enabledInt, ch.BotToken, ch.BaseURL, ch.PlatformUserID, sharedIdent, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
 	return err
 }
 
@@ -3417,10 +3422,11 @@ func randomChannelID() string {
 func scanChannelRow(row rowScanner) (*ChannelRecord, error) {
 	var c ChannelRecord
 	var dataStr string
-	var sharedIdent int
-	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	var enabledInt, sharedIdent int
+	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &enabledInt, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
+	c.Enabled = enabledInt != 0
 	c.SharedIdentity = sharedIdent != 0
 	json.Unmarshal([]byte(dataStr), &c.Data)
 	return &c, nil
@@ -3431,10 +3437,11 @@ func scanChannels(rows *sql.Rows) ([]ChannelRecord, error) {
 	for rows.Next() {
 		var c ChannelRecord
 		var dataStr string
-		var sharedIdent int
-		if err := rows.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &c.Enabled, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		var enabledInt, sharedIdent int
+		if err := rows.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &enabledInt, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
+		c.Enabled = enabledInt != 0
 		c.SharedIdentity = sharedIdent != 0
 		json.Unmarshal([]byte(dataStr), &c.Data)
 		out = append(out, c)
