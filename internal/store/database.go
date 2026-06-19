@@ -2529,7 +2529,7 @@ func (d *DBStore) ListSessionsPaginated(ctx context.Context, agentIDs []string, 
 		phs := make([]string, len(agentIDs))
 		args = make([]any, len(agentIDs))
 		for i, id := range agentIDs {
-			phs[i] = "?"
+			phs[i] = d.ph(i + 1)
 			args[i] = id
 		}
 		where = `WHERE agent_id IN (` + strings.Join(phs, ",") + `)`
