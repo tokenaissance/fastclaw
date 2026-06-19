@@ -3075,10 +3075,10 @@ func (a *Agent) RegisteredTools() []tools.ToolInfo {
 // (cron-triggered greetings, multi-recipient broadcasts) should fall
 // back to `agent` mode or write a plugin.
 //
-// Also absent: exec, web_fetch / web_search, scheduling, delegation
-// — all agent-loop machinery that doesn't belong in a chat persona's
-// voice. Add new built-ins here only when they're universally useful
-// for chatbot products; everything else belongs in a plugin.
+// Still absent: scheduling (create_cron_job), delegation (delegate_task),
+// start_app_preview — agent-loop machinery that doesn't belong in a
+// chat persona. Add new built-ins here only when they're universally
+// useful for chatbot products; everything else belongs in a plugin.
 var chatbotBuiltinAllowlist = []string{
 	"image_gen",
 	"tts",
@@ -3087,12 +3087,15 @@ var chatbotBuiltinAllowlist = []string{
 	// set_timezone keeps "their local time" right for chat (greetings,
 	// "晚安" timing) — chatbots need it as much as full agents do.
 	"set_timezone",
-	// Coding-agent preview tools. Only ever REGISTERED when a project
-	// runtime is wired (SetProjectRuntime), so listing them here is a
-	// harmless no-op for ordinary chat personas and makes the preview
-	// usable regardless of the agent's prompt mode.
-	"start_app_preview",
-	"app_preview_logs",
+	// Web tools let the chatbot answer real-time questions (weather,
+	// news, prices, etc.) without requiring full agent mode.
+	"web_search",
+	"web_fetch",
+	// exec + load_skill let the chatbot invoke installed skills
+	// (e.g. image generation, data lookup). Skills are the primary
+	// extension mechanism — without exec the chatbot can't run them.
+	"exec",
+	"load_skill",
 }
 
 // builtinAllowForMode returns the built-in tool name allowlist for the
