@@ -490,7 +490,13 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		// image-tool already saved the real file to /workspace. Dedupe
 		// by filename so we don't double-send anything
 		// splitMediaFromReply already resolved.
-		items = appendRecentWorkspaceMedia(ctx, g.workspace, task.AgentID, task.Message.ProjectID, task.Message.ChatID, turnStart, items)
+		// Skip fallback when splitMediaFromReply already extracted
+		// images — the explicit markdown refs are authoritative and
+		// the time-based scan can pick up stale files whose mtime
+		// was refreshed by sandbox mount/restart.
+		if len(items) == 0 {
+			items = appendRecentWorkspaceMedia(ctx, g.workspace, task.AgentID, task.Message.ProjectID, task.Message.ChatID, turnStart, items)
+		}
 		// Web-streamed turns already delivered the reply via the hub.
 		// Skip the outbound push entirely when there's no media; with
 		// media, push with empty text so attachments still flow but
