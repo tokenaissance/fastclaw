@@ -221,6 +221,24 @@ func (g *Gateway) resolveChatter(ctx context.Context, ownerID string, msg bus.In
 			return acc.ID
 		}
 	}
+	// Ancestor fallback: when the channel is bound by an app_user but
+	// the chatter was historically created under the app_user's parent
+	// (web user) or another app_user, walk up the ownership chain and
+	// retry. On hit, migrate the chatter's owner_user_id to the current
+	// ownerID so subsequent lookups are fast and don't repeat this walk.
+	if owner, err := g.store.GetUser(ctx, ownerID); err == nil && owner.OwnerUserID != "" {
+		// ownerID is an app_user — try its parent (web user).
+		if acc, err := g.store.GetUserByExternal(ctx, owner.OwnerUserID, extID); err == nil {
+			acc.OwnerUserID = ownerID
+			_ = g.store.UpdateUser(ctx, acc)
+			return acc.ID
+		}
+		if acc, err := g.store.GetUserByExternalSuffix(ctx, owner.OwnerUserID, msg.Channel+":", ":"+msg.UserID); err == nil {
+			acc.OwnerUserID = ownerID
+			_ = g.store.UpdateUser(ctx, acc)
+			return acc.ID
+		}
+	}
 	// Neither found — brand new chatter.
 	chatter, err := g.accounts.EnsureChatter(ctx, ownerID, extID, msg.SenderName)
 	if err != nil {
