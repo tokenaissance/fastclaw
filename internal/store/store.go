@@ -62,6 +62,14 @@ type Store interface {
 
 	// --- Sessions (per user, per agent — chat history is private) ---
 	GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error)
+	// GetSessionByKey loads a session by (agentID, sessionKey) without
+	// user_id scoping. Used when the caller's user_id may differ from
+	// the session's owner (e.g. parent user viewing a child app_user's
+	// session in the dashboard).
+	GetSessionByKey(ctx context.Context, agentID, sessionKey string) (*SessionRecord, error)
+	// LookupSessionOwner returns the user_id that owns the given session.
+	// Used to resolve the correct user_id for cross-user session reads.
+	LookupSessionOwner(ctx context.Context, agentID, sessionKey string) (string, error)
 	SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error
 	ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error)
 	// ListSessionOwnerPairs returns every distinct (user_id, agent_id)

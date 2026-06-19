@@ -24,8 +24,19 @@ func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {
 	return &StoreAdapter{st: st, userID: userID}
 }
 
+// resolveSessionOwner returns the actual user_id that owns a session row.
+// Falls back to a.userID when the lookup fails (new session, no store, etc.).
+// This lets the adapter read sessions owned by child app_users whose
+// user_id differs from the listing caller's.
+func (a *StoreAdapter) resolveSessionOwner(ctx context.Context, agentID, sessionKey string) string {
+	if owner, err := a.st.LookupSessionOwner(ctx, agentID, sessionKey); err == nil && owner != "" {
+		return owner
+	}
+	return a.userID
+}
+
 func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
-	rec, err := a.st.GetSession(ctx, a.userID, agentID, sessionKey)
+	rec, err := a.st.GetSession(ctx, a.resolveSessionOwner(ctx, agentID, sessionKey), agentID, sessionKey)
 	if err != nil || rec == nil {
 		return nil, err
 	}
@@ -139,7 +150,7 @@ func (a *StoreAdapter) AppendMessage(ctx context.Context, agentID, sessionKey st
 // Used by the chat history UI so users see the original conversation
 // even after compaction has shrunk the LLM-facing working set.
 func (a *StoreAdapter) ListMessages(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
-	sms, err := a.st.ListSessionMessages(ctx, a.userID, agentID, sessionKey)
+	sms, err := a.st.ListSessionMessages(ctx, a.resolveSessionOwner(ctx, agentID, sessionKey), agentID, sessionKey)
 	if err != nil {
 		return nil, err
 	}

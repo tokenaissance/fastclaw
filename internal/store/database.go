@@ -1981,6 +1981,35 @@ func (d *DBStore) GetSession(ctx context.Context, userID, agentID, sessionKey st
 	return &rec, nil
 }
 
+// LookupSessionOwner returns the user_id that owns the given session row.
+func (d *DBStore) LookupSessionOwner(ctx context.Context, agentID, sessionKey string) (string, error) {
+	var uid string
+	err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT user_id FROM sessions WHERE agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2)),
+		agentID, sessionKey).Scan(&uid)
+	if err != nil {
+		return "", scanErr(err)
+	}
+	return uid, nil
+}
+
+// GetSessionByKey loads a session by (agentID, sessionKey) without
+// user_id scoping. Safe because session_key is globally unique.
+func (d *DBStore) GetSessionByKey(ctx context.Context, agentID, sessionKey string) (*SessionRecord, error) {
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT messages, channel, account_id, chat_id, project_id, updated_at FROM sessions WHERE agent_id = %s AND session_key = %s`,
+			d.ph(1), d.ph(2)),
+		agentID, sessionKey)
+	var msgsStr string
+	var rec SessionRecord
+	if err := row.Scan(&msgsStr, &rec.Channel, &rec.AccountID, &rec.ChatID, &rec.ProjectID, &rec.UpdatedAt); err != nil {
+		return nil, scanErr(err)
+	}
+	json.Unmarshal([]byte(msgsStr), &rec.Messages)
+	return &rec, nil
+}
+
 // SaveSession upserts the session row. Channel / AccountID / ChatID /
 // ProjectID are written on INSERT only; the ON CONFLICT branch
 // deliberately preserves the existing values so a callback that didn't
