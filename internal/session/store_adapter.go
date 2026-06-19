@@ -16,8 +16,9 @@ import (
 // scoping is implicit at the call site instead of getting plumbed through
 // every agent loop call.
 type StoreAdapter struct {
-	st     store.Store
-	userID string
+	st             store.Store
+	userID         string
+	ownerCache     map[string]string // sessionKey → resolved owner userID
 }
 
 func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {
@@ -30,22 +31,31 @@ func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {
 // permitted user. This prevents cross-user data leakage: knowing a
 // session_key on a shared/public agent cannot read another user's chat.
 func (a *StoreAdapter) resolveSessionOwner(ctx context.Context, agentID, sessionKey string) string {
+	// Check cache first to avoid repeated DB lookups for the same session.
+	if a.ownerCache != nil {
+		if cached, ok := a.ownerCache[sessionKey]; ok {
+			return cached
+		}
+	}
+	result := a.userID // default: deny / self
 	owner, err := a.st.LookupSessionOwner(ctx, agentID, sessionKey)
-	if err != nil || owner == "" {
-		return a.userID
+	if err == nil && owner != "" {
+		if owner == a.userID {
+			result = owner
+		} else {
+			// Check if the owner is a child of the caller (app_user whose
+			// owner_user_id == a.userID). If not, deny by returning a.userID
+			// so the downstream query simply returns no rows.
+			if u, err := a.st.GetUser(ctx, owner); err == nil && u != nil && u.OwnerUserID == a.userID {
+				result = owner
+			}
+		}
 	}
-	// Same user — fast path.
-	if owner == a.userID {
-		return owner
+	if a.ownerCache == nil {
+		a.ownerCache = make(map[string]string)
 	}
-	// Check if the owner is a child of the caller (app_user whose
-	// owner_user_id == a.userID). If not, deny by returning a.userID
-	// so the downstream query simply returns no rows.
-	u, err := a.st.GetUser(ctx, owner)
-	if err != nil || u == nil || u.OwnerUserID != a.userID {
-		return a.userID
-	}
-	return owner
+	a.ownerCache[sessionKey] = result
+	return result
 }
 
 func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {
