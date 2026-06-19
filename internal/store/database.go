@@ -1856,7 +1856,7 @@ func (d *DBStore) GetUserByExternal(ctx context.Context, ownerUserID, externalID
 		return nil, ErrNotFound
 	}
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT `+userColumns+` FROM users WHERE owner_user_id = %s AND external_id = %s LIMIT 1`,
+		fmt.Sprintf(`SELECT `+userColumns+` FROM users WHERE owner_user_id = %s AND external_id = %s ORDER BY created_at ASC LIMIT 1`,
 			d.ph(1), d.ph(2)),
 		ownerUserID, externalID)
 	u, err := scanUser(row)
