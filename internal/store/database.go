@@ -2519,6 +2519,48 @@ func (d *DBStore) BatchFirstUserMessages(ctx context.Context) (map[string]Sessio
 	return out, rows.Err()
 }
 
+func (d *DBStore) ListSessionsPaginated(ctx context.Context, agentIDs []string, offset, limit int) ([]SessionMeta, int, error) {
+	var where string
+	var args []any
+	if agentIDs != nil {
+		if len(agentIDs) == 0 {
+			return nil, 0, nil
+		}
+		phs := make([]string, len(agentIDs))
+		args = make([]any, len(agentIDs))
+		for i, id := range agentIDs {
+			phs[i] = "?"
+			args[i] = id
+		}
+		where = `WHERE agent_id IN (` + strings.Join(phs, ",") + `)`
+	}
+	// Total count.
+	var total int
+	countQ := `SELECT COUNT(*) FROM sessions ` + where
+	if err := d.db.QueryRowContext(ctx, countQ, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	// Page query.
+	dataQ := fmt.Sprintf(`SELECT session_key, user_id, agent_id, channel, account_id, chat_id, project_id, title, message_count, updated_at, COALESCE(chatter_user_id,'')
+		FROM sessions %s ORDER BY updated_at DESC LIMIT %d OFFSET %d`, where, limit, offset)
+	rows, err := d.db.QueryContext(ctx, dataQ, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var metas []SessionMeta
+	for rows.Next() {
+		var m SessionMeta
+		var agentID string
+		if err := rows.Scan(&m.Key, &m.UserID, &agentID, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt, &m.ChatterUserID); err != nil {
+			return nil, 0, err
+		}
+		m.AgentID = agentID
+		metas = append(metas, m)
+	}
+	return metas, total, rows.Err()
+}
+
 // LookupSessionTriple is ResolveActiveSessionKey's inverse: given a
 // session_key (the canonical row id), return the (channel, accountID,
 // chatID) it belongs to. Used by handlers that take a session_key from

@@ -1570,30 +1570,38 @@ func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var pairs []store.SessionOwnerPair
-	var err error
+	// Pagination: ?page=1&pageSize=30 (1-based, defaults to page 1, 30 per page).
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 30
+	}
 
+	// Resolve which agent IDs the caller may see.
+	var agentIDs []string // nil = all (admin)
 	switch {
 	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAdmin:
-		// Admin: all sessions
-		pairs, err = s.dataStore.ListSessionOwnerPairs(r.Context())
+		agentIDs = nil // admin sees everything
 	case ident.AuthMethod == "apikey" && ident.APIKeyType == users.APIKeyTypeAgent:
-		// Agent key: sessions for explicitly authorized agents only
-		pairs, err = s.dataStore.ListSessionOwnerPairsByAgents(r.Context(), ident.APIKeyAgents)
+		agentIDs = ident.APIKeyAgents
 	default:
-		// User key or session caller: sessions for agents owned by the user
 		uid := ident.EffectiveUserID()
 		agents, agentsErr := s.dataStore.ListAgents(r.Context(), uid)
 		if agentsErr != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": agentsErr.Error()})
 			return
 		}
-		agentIDs := make([]string, len(agents))
+		agentIDs = make([]string, len(agents))
 		for i, a := range agents {
 			agentIDs[i] = a.ID
 		}
-		pairs, err = s.dataStore.ListSessionOwnerPairsByAgents(r.Context(), agentIDs)
 	}
+
+	offset := (page - 1) * pageSize
+	metas, total, err := s.dataStore.ListSessionsPaginated(r.Context(), agentIDs, offset, pageSize)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -1624,59 +1632,65 @@ func (s *Server) handleChats(w http.ResponseWriter, r *http.Request) {
 		return a
 	}
 
-	out := make([]map[string]any, 0)
-	for _, p := range pairs {
-		ag := resolveAgentRec(p.AgentID)
+	out := make([]map[string]any, 0, len(metas))
+	for _, m := range metas {
+		ag := resolveAgentRec(m.AgentID)
 		if ag == nil {
 			continue
 		}
-		adapter := session.NewStoreAdapter(s.dataStore, p.UserID)
-		sessions, listErr := adapter.ListWebSessions(r.Context(), p.AgentID)
-		if listErr != nil {
+		// Build preview from first user message.
+		adapter := session.NewStoreAdapter(s.dataStore, m.UserID)
+		ws := adapter.BuildWebSession(r.Context(), m)
+		if ws == nil {
 			continue
 		}
-		owner := resolveOwner(p.UserID)
-		for _, ws := range sessions {
-			entry := map[string]any{
-				"id":           ws.ID,
-				"agentId":      p.AgentID,
-				"agentName":    ag.Name,
-				"userId":       p.UserID,
-				"channel":      ws.Channel,
-				"accountId":    ws.AccountID,
-				"chatId":       ws.ChatID,
-				"projectId":    ws.ProjectID,
-				"title":        ws.Title,
-				"preview":      ws.Preview,
-				"thumbnailUrl": ws.ThumbnailURL,
-				"createdAt":    ws.CreatedAt,
-				"updatedAt":    ws.UpdatedAt,
-			}
-			if ws.ChatterUserID != "" {
-				entry["chatterUserId"] = ws.ChatterUserID
-				if chatter := resolveOwner(ws.ChatterUserID); chatter != nil {
-					if chatter.ExternalID != "" {
-						entry["chatterExternalId"] = chatter.ExternalID
-					}
-					if chatter.DisplayName != "" {
-						entry["chatterDisplayName"] = chatter.DisplayName
-					}
-				}
-			}
-			if owner != nil {
-				entry["ownerUsername"] = owner.Username
-				entry["ownerEmail"] = owner.Email
-				if owner.ExternalID != "" {
-					entry["ownerExternalId"] = owner.ExternalID
-				}
-				if owner.DisplayName != "" {
-					entry["ownerDisplayName"] = owner.DisplayName
-				}
-			}
-			out = append(out, entry)
+		owner := resolveOwner(m.UserID)
+		entry := map[string]any{
+			"id":           ws.ID,
+			"agentId":      m.AgentID,
+			"agentName":    ag.Name,
+			"userId":       m.UserID,
+			"channel":      ws.Channel,
+			"accountId":    ws.AccountID,
+			"chatId":       ws.ChatID,
+			"projectId":    ws.ProjectID,
+			"title":        ws.Title,
+			"preview":      ws.Preview,
+			"thumbnailUrl": ws.ThumbnailURL,
+			"createdAt":    ws.CreatedAt,
+			"updatedAt":    ws.UpdatedAt,
 		}
+		if ws.ChatterUserID != "" {
+			entry["chatterUserId"] = ws.ChatterUserID
+			if chatter := resolveOwner(ws.ChatterUserID); chatter != nil {
+				if chatter.ExternalID != "" {
+					entry["chatterExternalId"] = chatter.ExternalID
+				}
+				if chatter.DisplayName != "" {
+					entry["chatterDisplayName"] = chatter.DisplayName
+				}
+			}
+		}
+		if owner != nil {
+			entry["ownerUsername"] = owner.Username
+			entry["ownerEmail"] = owner.Email
+			if owner.ExternalID != "" {
+				entry["ownerExternalId"] = owner.ExternalID
+			}
+			if owner.DisplayName != "" {
+				entry["ownerDisplayName"] = owner.DisplayName
+			}
+		}
+		out = append(out, entry)
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"sessions": out})
+	totalPages := (total + pageSize - 1) / pageSize
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"sessions":  out,
+		"page":      page,
+		"pageSize":  pageSize,
+		"total":     total,
+		"totalPages": totalPages,
+	})
 }
 
 func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {

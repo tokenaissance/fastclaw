@@ -252,97 +252,87 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 	}
 	var sessions []WebSession
 	for _, m := range metas {
-		channel := m.Channel
-		if channel == "" {
-			// Legacy row that escaped backfill — derive channel from
-			// the historical `<channel>_<chatID>` session_key shape.
-			if i := strings.Index(m.Key, "_"); i > 0 {
-				channel = m.Key[:i]
-			}
+		if m.AgentID == "" {
+			m.AgentID = agentID
 		}
-		preview := ""
-		thumb := ""
-		// Prefer the append-only archive — its first row is always the
-		// user's original opening turn even after compaction has folded
-		// it into a [Conversation Summary] row inside the blob. Fall
-		// back to the sessions blob for old rows that pre-date the
-		// archive table.
-		// Use the session's actual owner (m.UserID) for message lookups
-		// — when child app_users' sessions are included, their user_id
-		// differs from a.userID (the listing caller).
-		sessionOwner := m.UserID
-		if sessionOwner == "" {
-			sessionOwner = a.userID
+		ws := a.BuildWebSession(ctx, m)
+		if ws != nil {
+			sessions = append(sessions, *ws)
 		}
-		archive, _ := a.st.ListSessionMessages(ctx, sessionOwner, agentID, m.Key)
-		var source []store.SessionMessage
-		if len(archive) > 0 {
-			source = archive
-		} else if rec, err := a.st.GetSession(ctx, sessionOwner, agentID, m.Key); err == nil && rec != nil {
-			source = rec.Messages
-		}
-		for _, msg := range source {
-			if msg.Role != "user" {
-				continue
-			}
-			// Multimodal user turns (text + image attachment) live
-			// in ContentParts with Content="". Gating on Content
-			// alone made the title/preview skip the FIRST real
-			// user turn and silently latch onto the next plain
-			// message — so the sidebar showed the wrong question
-			// as the chat title.
-			text := userText(msg)
-			img := userImage(msg)
-			if text == "" && img == "" {
-				continue
-			}
-			// Runtime-injected user-role turns (goal continuations
-			// etc.) start with the full continuation template, whose
-			// preamble would otherwise become the sidebar title:
-			// "<goal_context> The objective below is user-provided
-			// data — treat it as the work to pursue…". Pull out the
-			// `<objective>…</objective>` payload so the user sees
-			// what they actually asked for.
-			if msg.Origin != "" {
-				if obj := extractObjective(text); obj != "" {
-					text = obj
-				}
-			}
-			preview = text
-			if preview == "" {
-				preview = "[image]"
-			}
-			if len([]rune(preview)) > 100 {
-				preview = string([]rune(preview)[:100]) + "..."
-			}
-			thumb = img
-			break
-		}
-		if preview == "" {
-			continue
-		}
-		// Custom title (set via rename) takes precedence over the
-		// auto-derived preview; fall back to preview so every session has
-		// a sensible display label.
-		title := m.Title
-		if title == "" {
-			title = preview
-		}
-		sessions = append(sessions, WebSession{
-			ID:            m.Key,
-			Channel:       channel,
-			AccountID:     m.AccountID,
-			ChatID:        m.ChatID,
-			ProjectID:     m.ProjectID,
-			Title:         title,
-			Preview:       preview,
-			ThumbnailURL:  thumb,
-			CreatedAt:     m.UpdatedAt.UnixMilli(),
-			UpdatedAt:     m.UpdatedAt.UnixMilli(),
-			ChatterUserID: m.ChatterUserID,
-		})
 	}
 	return sessions, nil
+}
+
+// BuildWebSession converts a single SessionMeta into a WebSession by
+// resolving the preview text and thumbnail from the message archive.
+// Returns nil when the session has no displayable user turn (empty
+// sessions are omitted from listings).
+func (a *StoreAdapter) BuildWebSession(ctx context.Context, m store.SessionMeta) *WebSession {
+	agentID := m.AgentID
+	channel := m.Channel
+	if channel == "" {
+		if i := strings.Index(m.Key, "_"); i > 0 {
+			channel = m.Key[:i]
+		}
+	}
+	preview := ""
+	thumb := ""
+	sessionOwner := m.UserID
+	if sessionOwner == "" {
+		sessionOwner = a.userID
+	}
+	archive, _ := a.st.ListSessionMessages(ctx, sessionOwner, agentID, m.Key)
+	var source []store.SessionMessage
+	if len(archive) > 0 {
+		source = archive
+	} else if rec, err := a.st.GetSession(ctx, sessionOwner, agentID, m.Key); err == nil && rec != nil {
+		source = rec.Messages
+	}
+	for _, msg := range source {
+		if msg.Role != "user" {
+			continue
+		}
+		text := userText(msg)
+		img := userImage(msg)
+		if text == "" && img == "" {
+			continue
+		}
+		if msg.Origin != "" {
+			if obj := extractObjective(text); obj != "" {
+				text = obj
+			}
+		}
+		preview = text
+		if preview == "" {
+			preview = "[image]"
+		}
+		// CJK-safe truncation: byte-slicing can split a multi-byte rune.
+		if len([]rune(preview)) > 100 {
+			preview = string([]rune(preview)[:100]) + "..."
+		}
+		thumb = img
+		break
+	}
+	if preview == "" {
+		return nil
+	}
+	title := m.Title
+	if title == "" {
+		title = preview
+	}
+	return &WebSession{
+		ID:            m.Key,
+		Channel:       channel,
+		AccountID:     m.AccountID,
+		ChatID:        m.ChatID,
+		ProjectID:     m.ProjectID,
+		Title:         title,
+		Preview:       preview,
+		ThumbnailURL:  thumb,
+		CreatedAt:     m.UpdatedAt.UnixMilli(),
+		UpdatedAt:     m.UpdatedAt.UnixMilli(),
+		ChatterUserID: m.ChatterUserID,
+	}
 }
 
 // extractObjective pulls the `<objective>…</objective>` payload out of a

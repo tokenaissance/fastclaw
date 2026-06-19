@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
@@ -531,8 +532,22 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	// 1 query: all session metadata with (user_id, agent_id).
-	allSessions, err := s.dataStore.ListAllSessionMetas(ctx)
+	// Pagination: ?page=1&pageSize=30 (1-based, defaults to page 1, 30 per page).
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 30
+	}
+	offset := (page - 1) * pageSize
+	// Fork adaptation (#38): paginate the meta source via the upstream
+	// ListSessionsPaginated (nil agentIDs = admin sees every session),
+	// then enrich the page with the fork's batch lookups below instead of
+	// upstream's per-meta N+1 (BuildWebSession) — preserves the admin
+	// Chats page's N+1-avoiding batch structure from the #54/#43 era.
+	metas, total, err := s.dataStore.ListSessionsPaginated(ctx, nil, offset, pageSize)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -552,7 +567,6 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 			agentMap[allAgents[i].ID] = &allAgents[i]
 		}
 	}
-
 	// 1 query: all users indexed by ID.
 	ownerMap := map[string]*users.Account{}
 	if allUsers, err := s.accounts.List(ctx); err == nil {
@@ -561,8 +575,8 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	out := make([]map[string]any, 0, len(allSessions))
-	for _, sm := range allSessions {
+	out := make([]map[string]any, 0, len(metas))
+	for _, sm := range metas {
 		ag := agentMap[sm.AgentID]
 		if ag == nil {
 			// Orphan session row whose agent has been deleted — skip.
@@ -631,7 +645,14 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, entry)
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"sessions": out})
+	totalPages := (total + pageSize - 1) / pageSize
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"sessions":   out,
+		"page":       page,
+		"pageSize":   pageSize,
+		"total":      total,
+		"totalPages": totalPages,
+	})
 }
 
 // --- Admin provisioning (per-user) ---

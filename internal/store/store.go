@@ -96,6 +96,10 @@ type Store interface {
 	// restricted to the given agent IDs. Used by the scoped /api/chats
 	// endpoint so user/agent API keys see only their authorized agents.
 	ListSessionOwnerPairsByAgents(ctx context.Context, agentIDs []string) ([]SessionOwnerPair, error)
+	// ListSessionsPaginated returns a page of session metadata ordered by
+	// updated_at DESC. When agentIDs is nil every agent is included (admin
+	// view); otherwise only the listed agents. Returns (rows, totalCount, err).
+	ListSessionsPaginated(ctx context.Context, agentIDs []string, offset, limit int) ([]SessionMeta, int, error)
 	DeleteSession(ctx context.Context, userID, agentID, sessionKey string) error
 	RenameSession(ctx context.Context, userID, agentID, sessionKey, title string) error
 	// MoveSession reassigns a session to a different project (or
@@ -493,7 +497,8 @@ type SessionMetaWithOwner struct {
 // SessionMeta is summary info for a session (for listing).
 type SessionMeta struct {
 	Key           string    `json:"key"`
-	UserID        string    `json:"userId,omitempty"` // session owner (may differ from the listing caller when child app_users are included)
+	UserID        string    `json:"userId,omitempty"`  // session owner (may differ from the listing caller when child app_users are included)
+	AgentID       string    `json:"agentId,omitempty"` // populated by ListSessionsPaginated
 	Channel       string    `json:"channel,omitempty"`
 	AccountID     string    `json:"accountId,omitempty"`
 	ChatID        string    `json:"chatId,omitempty"`
