@@ -24,15 +24,28 @@ func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {
 	return &StoreAdapter{st: st, userID: userID}
 }
 
-// resolveSessionOwner returns the actual user_id that owns a session row.
-// Falls back to a.userID when the lookup fails (new session, no store, etc.).
-// This lets the adapter read sessions owned by child app_users whose
-// user_id differs from the listing caller's.
+// resolveSessionOwner returns the actual user_id that owns a session row,
+// but ONLY if it belongs to the caller or one of the caller's child users.
+// Falls back to a.userID when the lookup fails or the owner is not a
+// permitted user. This prevents cross-user data leakage: knowing a
+// session_key on a shared/public agent cannot read another user's chat.
 func (a *StoreAdapter) resolveSessionOwner(ctx context.Context, agentID, sessionKey string) string {
-	if owner, err := a.st.LookupSessionOwner(ctx, agentID, sessionKey); err == nil && owner != "" {
+	owner, err := a.st.LookupSessionOwner(ctx, agentID, sessionKey)
+	if err != nil || owner == "" {
+		return a.userID
+	}
+	// Same user — fast path.
+	if owner == a.userID {
 		return owner
 	}
-	return a.userID
+	// Check if the owner is a child of the caller (app_user whose
+	// owner_user_id == a.userID). If not, deny by returning a.userID
+	// so the downstream query simply returns no rows.
+	u, err := a.st.GetUser(ctx, owner)
+	if err != nil || u == nil || u.OwnerUserID != a.userID {
+		return a.userID
+	}
+	return owner
 }
 
 func (a *StoreAdapter) GetSession(ctx context.Context, agentID, sessionKey string) ([]provider.Message, error) {

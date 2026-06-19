@@ -114,15 +114,20 @@ func TestSessions_CrossUserOwnerResolutionE2E(t *testing.T) {
 		t.Fatalf("ListMessages = %+v, want the child's archived turn", arch)
 	}
 
-	// Resolution is driven purely by the globally-unique (agent_id,
-	// session_key) — there is no caller-supplied user_id to redirect onto
-	// another row. Document that: even an unrelated caller resolves the
-	// row's true owner. The security handle is the key, not the caller's
-	// identity, and the read still lands on exactly the row that key names.
+	// #39 (f94119f) security: an unrelated caller must NOT resolve the
+	// row's true owner — knowing a session_key on a shared/public agent
+	// must not read another user's chat. resolveSessionOwner now returns
+	// the caller's own ID (deny), so the downstream user_id-scoped query
+	// lands on zero rows (fail closed).
 	createSessionE2EUser(t, db, "sess_e2e_stranger", "user", "")
 	strangerAdapter := NewStoreAdapter(db, "sess_e2e_stranger")
-	if got := strangerAdapter.resolveSessionOwner(ctx, agentID, sessionKey); got != childID {
-		t.Fatalf("stranger resolveSessionOwner = %q, want %q", got, childID)
+	if got := strangerAdapter.resolveSessionOwner(ctx, agentID, sessionKey); got != "sess_e2e_stranger" {
+		t.Fatalf("stranger resolveSessionOwner = %q, want %q (denied: not caller, not caller's child)", got, "sess_e2e_stranger")
+	}
+	// The denied read surfaces as empty history (or not-found), never
+	// another user's chat — fail closed.
+	if msgs, err := strangerAdapter.GetSession(ctx, agentID, sessionKey); err == nil && len(msgs) != 0 {
+		t.Fatalf("stranger GetSession leaked %d msgs, want 0 (fail closed)", len(msgs))
 	}
 
 	// Fallback: an unknown key (new session, not yet stored) falls back to
