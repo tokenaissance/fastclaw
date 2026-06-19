@@ -18,6 +18,18 @@ func TestSessionChannelTriple(t *testing.T) {
 	const userID = "u-test"
 	const agentID = "agt-test"
 
+	// #41 (05ed1b1) ListSessions now resolves the owner set via
+	// `user_id IN (SELECT id FROM users WHERE id = ? OR owner_user_id = ?)`
+	// — sessions whose owner has no users row are no longer listed. The
+	// triple assertions below are about the channel columns, so register
+	// the owner row explicitly to keep the sessions visible.
+	if err := db.CreateUser(ctx, &UserRecord{
+		ID: userID, Username: "triple-test", Email: "triple@test",
+		Role: "user", Status: "active", AgentQuota: -1,
+	}); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+
 	// Two sessions sharing the same wechat (account, openid) triple —
 	// the older "v1" thread plus a newer "v2" minted after a /new.
 	older := &SessionRecord{

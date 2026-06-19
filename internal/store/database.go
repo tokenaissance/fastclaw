@@ -2183,7 +2183,7 @@ const agentSelectCols = `id, user_id, name, config, is_public, created_at, updat
 
 func (d *DBStore) ListAgents(ctx context.Context, ownerUserID string) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT `+agentSelectCols+` FROM agents WHERE user_id = %s ORDER BY created_at`, d.ph(1)),
+		fmt.Sprintf(`SELECT `+agentSelectCols+` FROM agents WHERE user_id = %s ORDER BY created_at DESC`, d.ph(1)),
 		ownerUserID)
 	if err != nil {
 		return nil, err
@@ -2376,10 +2376,16 @@ func (d *DBStore) SaveSession(ctx context.Context, userID, agentID, sessionKey s
 }
 
 func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error) {
+	// Include sessions owned by the caller AND sessions owned by any
+	// app_user whose owner_user_id is the caller. This surfaces IM
+	// conversations routed through an API-key-provisioned app_user's
+	// channel binding in the web dashboard sidebar.
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT session_key, channel, account_id, chat_id, project_id, title, message_count, updated_at, COALESCE(chatter_user_id,'') FROM sessions
-			WHERE user_id = %s AND agent_id = %s ORDER BY updated_at DESC`, d.ph(1), d.ph(2)),
-		userID, agentID)
+		fmt.Sprintf(`SELECT session_key, user_id, channel, account_id, chat_id, project_id, title, message_count, updated_at, COALESCE(chatter_user_id,'') FROM sessions
+			WHERE agent_id = %s AND user_id IN (
+				SELECT id FROM users WHERE id = %s OR owner_user_id = %s
+			) ORDER BY updated_at DESC`, d.ph(1), d.ph(2), d.ph(3)),
+		agentID, userID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -2387,7 +2393,7 @@ func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]S
 	var metas []SessionMeta
 	for rows.Next() {
 		var m SessionMeta
-		if err := rows.Scan(&m.Key, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt, &m.ChatterUserID); err != nil {
+		if err := rows.Scan(&m.Key, &m.UserID, &m.Channel, &m.AccountID, &m.ChatID, &m.ProjectID, &m.Title, &m.MessageCount, &m.UpdatedAt, &m.ChatterUserID); err != nil {
 			return nil, err
 		}
 		metas = append(metas, m)

@@ -254,11 +254,18 @@ func (a *StoreAdapter) ListWebSessions(ctx context.Context, agentID string) ([]W
 		// it into a [Conversation Summary] row inside the blob. Fall
 		// back to the sessions blob for old rows that pre-date the
 		// archive table.
-		archive, _ := a.st.ListSessionMessages(ctx, a.userID, agentID, m.Key)
+		// Use the session's actual owner (m.UserID) for message lookups
+		// — when child app_users' sessions are included, their user_id
+		// differs from a.userID (the listing caller).
+		sessionOwner := m.UserID
+		if sessionOwner == "" {
+			sessionOwner = a.userID
+		}
+		archive, _ := a.st.ListSessionMessages(ctx, sessionOwner, agentID, m.Key)
 		var source []store.SessionMessage
 		if len(archive) > 0 {
 			source = archive
-		} else if rec, err := a.st.GetSession(ctx, a.userID, agentID, m.Key); err == nil && rec != nil {
+		} else if rec, err := a.st.GetSession(ctx, sessionOwner, agentID, m.Key); err == nil && rec != nil {
 			source = rec.Messages
 		}
 		for _, msg := range source {
