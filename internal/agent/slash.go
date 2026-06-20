@@ -174,10 +174,12 @@ func (a *Agent) isAdminChatter(msg bus.InboundMessage) bool {
 	}
 	list, ok := a.admins[msg.Channel]
 	if !ok || len(list) == 0 {
-		// No allowlist configured for this channel → preserve legacy
-		// unrestricted behavior. Operators opt in to group-chat
-		// protection by populating admins[channel].
-		return true
+		// No allowlist configured for this channel. Fall back to
+		// ownership check: if the IM chatter's resolved FastAgent
+		// user_id matches the agent owner, they're admin. Otherwise
+		// deny — an unconfigured allowlist should NOT grant admin
+		// to every anonymous chatter on a public-facing IM channel.
+		return msg.UserID != "" && msg.UserID == a.ownerUserID
 	}
 	for _, id := range list {
 		if id == msg.UserID {
