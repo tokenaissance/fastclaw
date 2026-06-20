@@ -490,6 +490,9 @@ type applyPatchArgs struct {
 // -----------------------------------------------------------------------------
 
 func (r *Registry) readForPatch(ctx context.Context, path string) (string, error) {
+	if r.identityFileBlocked(path) {
+		return "", fmt.Errorf("%s", IdentityFileRefusal)
+	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
 		rc, err := r.workspaceStore.Get(ctx, r.agentID, r.projectID, r.sessionID, path)
 		if err != nil {
@@ -530,6 +533,9 @@ func (r *Registry) readForPatch(ctx context.Context, path string) (string, error
 }
 
 func (r *Registry) writeForPatch(ctx context.Context, path, content string) error {
+	if r.identityFileBlocked(path) {
+		return fmt.Errorf("%s", IdentityFileRefusal)
+	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
 		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, path,
 			strings.NewReader(content), int64(len(content)), "")
@@ -590,6 +596,9 @@ func (r *Registry) deleteForPatch(ctx context.Context, path string) error {
 // -----------------------------------------------------------------------------
 
 func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor, path string) (string, error) {
+	if r.identityFileBlocked(path) {
+		return "", fmt.Errorf("%s", IdentityFileRefusal)
+	}
 	if r.systemFileStore != nil && r.agentID != "" && basenameIsSystemFile(path) {
 		name := filepath.Base(filepath.Clean(path))
 		if data, err := r.readSystemFileForUser(ctx, r.systemFileUserID(name), name); err == nil {
@@ -612,6 +621,9 @@ func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor,
 }
 
 func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor, path, content string) error {
+	if r.identityFileBlocked(path) {
+		return fmt.Errorf("%s", IdentityFileRefusal)
+	}
 	if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(path) {
 		name := filepath.Clean(path)
 		return r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content))
