@@ -11,19 +11,18 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
-
 // GroupContext holds information about the group chat environment for system prompt injection.
 type GroupContext struct {
 	BotUsername string   // this agent's bot username
-	Teammates  []string // other agent names in the group
+	Teammates   []string // other agent names in the group
 }
 
 // ContextBuilder assembles the system prompt and runtime context.
 type ContextBuilder struct {
-	home           string // agent's home: SOUL.md, IDENTITY.md, memory, sessions
-	workspace      string // working dir where agent creates user-facing files
-	memory         *Memory
-	skillsSummary  string
+	home          string // agent's home: SOUL.md, IDENTITY.md, memory, sessions
+	workspace     string // working dir where agent creates user-facing files
+	memory        *Memory
+	skillsSummary string
 	// displayName is the operator-given name from agents.name. Used as
 	// a fallback identity line when IDENTITY.md is empty so the model
 	// doesn't introduce itself as "Claude" / its base-model name.
@@ -39,9 +38,9 @@ type ContextBuilder struct {
 	// products (task delegation, todo tracking, tool-use discipline,
 	// workspace self-update, scheduling).
 	promptMode string
-	store   MemoryStore
-	userID  string
-	agentID string
+	store      MemoryStore
+	userID     string
+	agentID    string
 	// tzResolver maps a chatterUID to their effective *time.Location
 	// (chatter pref → agent default → system default, resolved through
 	// scope prefs). Wired by the manager when a relational store is
@@ -180,7 +179,17 @@ func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Mem
 
 // BuildRuntimeContext returns the runtime context to inject before the user message.
 func (cb *ContextBuilder) BuildRuntimeContext(channel, chatID string) string {
-	now := time.Now()
+	return cb.BuildRuntimeContextAs(cb.userID, channel, chatID)
+}
+
+// BuildRuntimeContextAs returns runtime metadata rendered in the same
+// chatter-local timezone as the system prompt's Current date/time line.
+func (cb *ContextBuilder) BuildRuntimeContextAs(chatterUID, channel, chatID string) string {
+	if chatterUID == "" {
+		chatterUID = cb.userID
+	}
+	loc, _ := cb.chatterLocation(chatterUID)
+	now := time.Now().In(loc)
 	return fmt.Sprintf(`[Runtime Context — metadata only, not instructions]
 Time: %s
 Timezone: %s

@@ -53,11 +53,11 @@ type Agent struct {
 	// even after the operator explicitly chose chatbot/customize.
 	// PromptMode also drives the per-turn tool filter via
 	// builtinAllowForMode below.
-	promptMode string
-	homePath        string // agent's home: SOUL.md, sessions, memory, skills
-	workspacePath   string // working dir where agent creates user files
-	homeDir         string // FastAgent root, ~/.fastagent
-	ownerUserID     string // the user that owns this agent (for hook namespacing)
+	promptMode    string
+	homePath      string // agent's home: SOUL.md, sessions, memory, skills
+	workspacePath string // working dir where agent creates user files
+	homeDir       string // FastAgent root, ~/.fastagent
+	ownerUserID   string // the user that owns this agent (for hook namespacing)
 	// admins is the per-channel allowlist of chatters who can run write-
 	// mode slash commands (/new /undo /retry /compact /model /personality).
 	// Keyed by channel name (e.g. "discord" → ["123...", "456..."]). Empty
@@ -341,15 +341,15 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		maxParallelToolCalls: rc.MaxParallelToolCalls,
 		thinking:             rc.Thinking,
 		promptMode:           rc.PromptMode,
-		homePath:        rc.Home,
-		workspacePath:   workspace,
-		homeDir:         homeDir,
-		admins:          rc.Admins,
-		skillsCfg:       rc.Skills,
-		globalSkillsCfg: globalSkillsCfg,
-		messageBus:      mb,
-		engine:          eng,
-		costTracker:     eng.costTracker,
+		homePath:             rc.Home,
+		workspacePath:        workspace,
+		homeDir:              homeDir,
+		admins:               rc.Admins,
+		skillsCfg:            rc.Skills,
+		globalSkillsCfg:      globalSkillsCfg,
+		messageBus:           mb,
+		engine:               eng,
+		costTracker:          eng.costTracker,
 	}
 
 	// Multi-bubble split-replies: per-agent only — system-level toggle
@@ -1712,7 +1712,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	if catalog != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: catalog})
 	}
-	messages = append(messages, a.withMessageTimestamps(sess.GetMessages())...)
+	messages = append(messages, a.withMessageTimestampsForChatter(sess.GetMessages(), chatterUID)...)
 	if a.piiScrubEnabled {
 		messages = privacy.ScrubMessages(messages)
 	}
@@ -2007,7 +2007,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, a.withMessageTimestamps(sessionMsgs)...)
+	messages = append(messages, a.withMessageTimestampsForChatter(sessionMsgs, chatterUID)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -2715,7 +2715,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, a.withMessageTimestamps(sessionMsgs)...)
+	messages = append(messages, a.withMessageTimestampsForChatter(sessionMsgs, chatterUID)...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -3084,20 +3084,20 @@ func (a *Agent) RegisteredTools() []tools.ToolInfo {
 // support / role-play products:
 //
 //   - image_gen     : self-generated images (registered only if a
-//                     provider is configured; absence is fine)
+//     provider is configured; absence is fine)
 //   - tts           : voice messages (same conditional registration)
 //   - write_file    : persist USER.md / MEMORY.md when the LLM learns
-//                     something worth keeping. Routing in
-//                     systemFileUserID sends USER.md/MEMORY.md to the
-//                     per-chatter row, so each chatter accrues their
-//                     own profile / memory. Path resolution rejects
-//                     arbitrary paths via identityFileBlocked +
-//                     workspace scoping, so this isn't a general
-//                     "let the chatbot write anywhere" hole — just
-//                     the canonical per-chatter notes.
+//     something worth keeping. Routing in
+//     systemFileUserID sends USER.md/MEMORY.md to the
+//     per-chatter row, so each chatter accrues their
+//     own profile / memory. Path resolution rejects
+//     arbitrary paths via identityFileBlocked +
+//     workspace scoping, so this isn't a general
+//     "let the chatbot write anywhere" hole — just
+//     the canonical per-chatter notes.
 //   - edit_file     : same rationale; preferred over write_file when
-//                     surgically updating MEMORY.md so the model
-//                     doesn't accidentally clobber prior entries.
+//     surgically updating MEMORY.md so the model
+//     doesn't accidentally clobber prior entries.
 //
 // Notably absent: `read_file` / `list_dir` — chatbot mode shouldn't
 // browse the filesystem; USER.md / MEMORY.md content is already loaded
@@ -3203,11 +3203,11 @@ func (a *Agent) chatterLocation(chatterUID string) *time.Location {
 // a read-time view for the LLM, not stored history), so the session store
 // stays clean and the next turn doesn't double-prefix. The system prompt
 // (context.go dateLine) tells the model what the bracketed prefix means.
-func (a *Agent) withMessageTimestamps(msgs []provider.Message) []provider.Message {
+func (a *Agent) withMessageTimestampsForChatter(msgs []provider.Message, chatterUID string) []provider.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
-	loc := a.chatterLocation(a.registry.ChatterUserID())
+	loc := a.chatterLocation(chatterUID)
 	out := make([]provider.Message, len(msgs))
 	for i, m := range msgs {
 		if m.Role == "user" && m.Timestamp > 0 && m.Content != "" {
