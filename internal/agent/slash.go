@@ -41,12 +41,11 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 	// Owner-only gate for write commands. Read-only inspections (/status,
 	// /usage, /insights, /help, /version, /start, /whoami) stay open so
 	// any group member can self-serve info. Mutators that change the
-	// agent's runtime state (model, personality) or the session history
-	// (new/reset/undo/retry/compact) are restricted to the agent owner
-	// + per-channel admin allowlist — without this gate, anyone in a
-	// Discord guild could `/model haiku` and silently downgrade a shared
-	// agent for everyone else.
-	if writeSlashCommands[cmd] && !a.isAdminChatter(msg) {
+	// agent's runtime state (model, personality) or shared group-session
+	// history are restricted to the agent owner + per-channel admin
+	// allowlist. A DM chatter may start a fresh copy of their own session
+	// with /new or /reset; those commands don't affect anybody else there.
+	if slashRequiresAdmin(cmd, msg) && !a.isAdminChatter(msg) {
 		return slashResult{
 			handled: true,
 			reply:   fmt.Sprintf("🔒 `%s` 只有 agent owner / admin 能用。让 owner 把你的 platform 用户 ID 加进 agent.json 的 `admins.%s` 里(用 `/whoami` 查自己的 ID)。", cmd, msg.Channel),
@@ -150,6 +149,19 @@ var writeSlashCommands = map[string]bool{
 	"/compact":     true,
 	"/model":       true,
 	"/personality": true,
+}
+
+// slashRequiresAdmin keeps agent-wide mutations owner/admin-only and also
+// protects shared group history. Starting a fresh private session is a
+// per-chatter operation, so /new and /reset stay available outside groups.
+func slashRequiresAdmin(cmd string, msg bus.InboundMessage) bool {
+	if !writeSlashCommands[cmd] {
+		return false
+	}
+	if (cmd == "/new" || cmd == "/reset") && msg.PeerKind != "group" {
+		return false
+	}
+	return true
 }
 
 // isAdminChatter decides whether the chatter is allowed to run a write-mode
@@ -492,9 +504,10 @@ Info
   /version        — Show version
   /whoami         — Show your platform user ID
 
-🔒 Write commands (/new /reset /undo /retry /compact /model /personality)
-   in IM channels are restricted to the agent owner + admins listed in
-   agent.json's "admins" field. Use /whoami to find your ID.`
+🔒 Agent-wide write commands (/undo /retry /compact /model /personality)
+   and group-chat /new or /reset are restricted to the agent owner + admins
+   listed in agent.json's "admins" field. Private-chat /new and /reset are
+   available to the chatter. Use /whoami to find your ID.`
 }
 
 // slashPlan handles `/plan <task>`: republish the rest of the message
