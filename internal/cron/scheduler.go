@@ -278,6 +278,7 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 
 		s.bus.Inbound <- bus.InboundMessage{
 			Channel:     j.Channel,
+			AccountID:   j.AccountID,
 			ChatID:      j.ChatID,
 			UserID:      "cron",
 			OwnerUserID: j.OwnerUserID,
