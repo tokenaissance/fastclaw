@@ -168,14 +168,14 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 // bindSession wires per-turn session state into the tool registry: the
 // session-scoped sandbox executor (when a pool is configured), the
 // sessionID workspace.Store calls use to namespace artifacts, and the
-// (channel, chatID) bus address so deferred-work tools (create_cron_job)
+// (channel, accountID, chatID) bus address so deferred-work tools (create_cron_job)
 // can stamp it onto persisted rows for later replay. Called at the top
 // of HandleMessage / HandleMessageStream before any tool runs.
 //
 // Mutating the shared registry across concurrent chats would race, but
 // the current invariant is one chat-in-flight per agent — the gateway
 // serializes per-agent turns. Documenting it here in case that changes.
-func (a *Agent) bindSession(ctx context.Context, channel, sessionID, projectID string) {
+func (a *Agent) bindSession(ctx context.Context, channel, accountID, sessionID, projectID string) {
 	a.registry.SetSessionID(sessionID)
 	a.registry.SetProjectID(projectID)
 	// Coding agents (those with a project runtime wired) treat a project
@@ -196,7 +196,7 @@ func (a *Agent) bindSession(ctx context.Context, channel, sessionID, projectID s
 			}
 		}
 	}
-	a.registry.SetMessageContext(channel, sessionID)
+	a.registry.SetMessageContext(channel, accountID, sessionID)
 	if a.sandboxPool == nil {
 		return
 	}
@@ -1913,7 +1913,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// + writes get session-scoped paths and (when a sandbox pool is
 	// wired) the executor used by exec/read_file/list_dir is tied to a
 	// session-private container.
-	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	a.bindSession(ctx, msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	// Flag whether this turn's chatter is the agent owner / channel
 	// admin. File tools use this to refuse identity-file reads from
 	// regular chatters (SOUL/IDENTITY/BOOTSTRAP/... leak as verbatim
@@ -2661,7 +2661,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		prov, mdl := provider.SplitProviderModel(a.model)
 		sess.SetProviderModel(prov, mdl)
 	}
-	a.bindSession(ctx, msg.Channel, msg.ChatID, msg.ProjectID)
+	a.bindSession(ctx, msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
 	a.registry.SetCallerIsAdmin(a.isAdminChatter(msg))
 	a.registry.SetGoalSessionKey(sess.SessionKey())
 	// Per-user file writes (USER.md / MEMORY.md) need to land in the

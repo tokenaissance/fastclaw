@@ -30,6 +30,7 @@ type Job struct {
 	Schedule    string  `json:"schedule"` // depends on type
 	AgentID     string  `json:"agentId"`
 	Channel     string  `json:"channel"`               // channel to send results back through
+	AccountID   string  `json:"accountId,omitempty"`   // account/bot within the channel
 	ChatID      string  `json:"chatId"`                // chat to send results to
 	Message     string  `json:"message"`               // message to send to the agent
 	OwnerUserID string  `json:"ownerUserId,omitempty"` // fastagent user that owns this job
@@ -452,6 +453,7 @@ func (s *Scheduler) fireJob(job Job) {
 
 	s.bus.Inbound <- bus.InboundMessage{
 		Channel:     job.Channel,
+		AccountID:   job.AccountID,
 		ChatID:      job.ChatID,
 		UserID:      "cron",
 		OwnerUserID: job.OwnerUserID,

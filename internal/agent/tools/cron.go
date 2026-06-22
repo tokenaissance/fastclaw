@@ -103,6 +103,7 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 		// stamps it on every turn, so this captures the channel/chatID
 		// the user was on when they asked for the reminder.
 		channel := r.MessageChannel()
+		accountID := r.MessageAccountID()
 		chatID := r.MessageChatID()
 
 		// The chatter's effective timezone governs how the schedule is
@@ -155,6 +156,7 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 			Schedule:  args.Schedule,
 			Message:   args.Message,
 			Channel:   channel,
+			AccountID: accountID,
 			ChatID:    chatID,
 			// "" = server-local; the scheduler's LocationOf maps it
 			// the same way LoadLocationOrLocal did above, so creation
