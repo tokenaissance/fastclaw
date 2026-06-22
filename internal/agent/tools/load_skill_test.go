@@ -82,3 +82,42 @@ func TestLoadSkillUsesDirectoryPrecedence(t *testing.T) {
 		t.Fatalf("load_skill should not include lower-priority skill:\n%s", got)
 	}
 }
+
+func TestLoadSkillMarksMissingEnvRequirement(t *testing.T) {
+	home := t.TempDir()
+	skillDir := filepath.Join(home, "skills", "deepcoin-trade")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `---
+name: deepcoin-trade
+description: Place orders.
+metadata:
+  openclaw:
+    requires:
+      env: ["DC_API_KEY", "DC_SECRET_KEY"]
+---
+
+Authenticated instructions.`
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRegistry(t.TempDir(), t.TempDir())
+	RegisterLoadSkill(r, []string{filepath.Join(home, "skills")})
+	rawArgs, err := json.Marshal(map[string]string{"name": "deepcoin-trade"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.GetFunc("load_skill")(context.Background(), rawArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, "SKILL CURRENTLY UNAVAILABLE") {
+		t.Fatalf("load_skill output missing unavailable warning:\n%s", got)
+	}
+	if !strings.Contains(got, "DC_API_KEY, DC_SECRET_KEY") {
+		t.Fatalf("load_skill output missing env names:\n%s", got)
+	}
+}

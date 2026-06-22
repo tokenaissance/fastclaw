@@ -102,3 +102,45 @@ ALWAYS_LOAD_BODY_SHOULD_APPEAR`
 		t.Fatalf("summary should inline explicitly always-loaded skill:\n%s", summary)
 	}
 }
+
+func TestGatedSkillsStayInCatalogWithUnavailableReason(t *testing.T) {
+	t.Setenv("FASTCLAW_HOME", t.TempDir())
+	home := t.TempDir()
+	skillDir := filepath.Join(home, "skills", "deepcoin-trade")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `---
+name: deepcoin-trade
+description: Place and manage Deepcoin orders.
+metadata:
+  openclaw:
+    requires:
+      env: ["DC_API_KEY"]
+---
+
+BODY_SHOULD_NOT_INLINE_WHEN_GATED`
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewSkillsLoaderWithGlobal(home, t.TempDir(), "", config.SkillsConfig{}, config.SkillsCfg{})
+	skills := loader.LoadSkills()
+	if len(skills) != 1 {
+		t.Fatalf("skills len = %d, want 1", len(skills))
+	}
+	if !skills[0].Gated {
+		t.Fatalf("skill should be gated: %+v", skills[0])
+	}
+
+	summary := loader.BuildSkillsSummary(skills)
+	if !strings.Contains(summary, "deepcoin-trade") {
+		t.Fatalf("summary missing gated skill:\n%s", summary)
+	}
+	if !strings.Contains(summary, `currently unavailable: required env var "DC_API_KEY" not set`) {
+		t.Fatalf("summary missing unavailable reason:\n%s", summary)
+	}
+	if strings.Contains(summary, "BODY_SHOULD_NOT_INLINE_WHEN_GATED") {
+		t.Fatalf("summary should not inline gated skill body:\n%s", summary)
+	}
+}
