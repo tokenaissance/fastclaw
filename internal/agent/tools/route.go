@@ -98,10 +98,11 @@ func (r *Registry) routeFor(path string, op Operation) RouteTarget {
 	// Rule 2: local with sandbox configured → sandbox-first. Host disk is
 	// reachable only via explicit host-scope paths (the operator's
 	// Documents, an absolute /Users/<u>/... that's clearly NOT
-	// sandbox-internal, fastagent-internal subtrees for upgrade ops).
+	// sandbox-internal). FastAgent internals must not be exposed through
+	// chat-facing file tools; operator maintenance should use host_exec.
 	if sandboxOK {
 		if isFastAgentInternalPath(path) {
-			return RouteHostFS
+			return RouteSandbox
 		}
 		if isExplicitHostScope(path) {
 			return RouteHostFS
@@ -173,9 +174,8 @@ func isFastAgentInternalPath(path string) bool {
 		return true
 	}
 	if filepath.IsAbs(path) {
-		if home, err := os.UserHomeDir(); err == nil {
-			fastagentDir := filepath.Join(home, ".fastagent")
-			if path == fastagentDir || strings.HasPrefix(path, fastagentDir+string(filepath.Separator)) {
+		for _, root := range fastAgentInternalRoots() {
+			if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
 				return true
 			}
 		}
@@ -183,12 +183,29 @@ func isFastAgentInternalPath(path string) bool {
 	return false
 }
 
+// fastAgentInternalRoots returns every location FastAgent manages at
+// runtime (install home, the sandbox-resolved /root path, and the
+// operator's home dir). File-tool routing refuses to treat these as
+// chat-accessible host paths — operator maintenance should use
+// host_exec instead.
+func fastAgentInternalRoots() []string {
+	roots := []string{}
+	if h := os.Getenv("FASTAGENT_HOME"); h != "" {
+		roots = append(roots, filepath.Clean(h))
+	}
+	roots = append(roots, filepath.Clean("/root/.fastagent"))
+	if home, err := os.UserHomeDir(); err == nil {
+		roots = append(roots, filepath.Join(home, ".fastagent"))
+	}
+	return roots
+}
+
 // isSandboxOnlyPath reports whether path only exists inside the sandbox
 // container — typically a bind-mount target. Host has the bind-source at
 // a different location, so naive host expansion would always 404.
 //
 //   - ~/.agents/...    : npx skills' install dir (bind-mounted from
-//                        ~/.fastagent/users/<uid>/skills/)
+//     ~/.fastagent/users/<uid>/skills/)
 //   - /root/.agents/.. : same, via the sandbox-resolved absolute path
 func isSandboxOnlyPath(path string) bool {
 	if strings.HasPrefix(path, "~/.agents") || strings.HasPrefix(path, "/root/.agents") {
