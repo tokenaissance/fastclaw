@@ -284,21 +284,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         {activeAgentId ? (
           <NavMain
             label="Agent"
-            items={[
-              ...AGENT_NAV(activeAgentId, pathname, hasOpenSession),
-              // Settings sits directly under New chat on agent routes
-              // (moved out of the footer) so the agent's own config is
-              // the first thing below the chat entry. Click-only: opens
-              // the dialog with the full agent tabs (userOnly=false).
-              {
-                title: "Settings",
-                icon: SettingsIcon,
-                onClick: () => {
-                  setSettingsUserOnly(false);
-                  setSettingsOpen(true);
-                },
-              },
-            ]}
+            items={AGENT_NAV(activeAgentId, pathname, hasOpenSession)}
           />
         ) : (
           <>
@@ -330,25 +316,20 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         <NavSessions agentId={activeAgentId} sessions={sessions} />
       </SidebarContent>
       <SidebarFooter>
-        {/* On agent routes Settings now lives under New chat (above), so
-            the footer entry only shows on platform routes — there it
-            opens in user-only mode (Account / General). */}
-        {!activeAgentId && (
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                tooltip="Settings"
-                onClick={() => {
-                  setSettingsUserOnly(true);
-                  setSettingsOpen(true);
-                }}
-              >
-                <SettingsIcon />
-                <span>Settings</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        )}
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip="Settings"
+              onClick={() => {
+                setSettingsUserOnly(!activeAgentId);
+                setSettingsOpen(true);
+              }}
+            >
+              <SettingsIcon />
+              <span>Settings</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
         <NavUser
           name={
             me?.user?.displayName ||

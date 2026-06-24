@@ -240,6 +240,15 @@ func toAnthropicMessages(msgs []Message) (string, []anthropicMessage) {
 			am.Content, _ = json.Marshal("")
 		}
 
+		if len(am.Content) == 0 {
+			// Some Anthropic-compatible providers (notably z.ai) reject
+			// `content: null` even though a degenerate empty assistant
+			// message can appear in historical sessions after an aborted
+			// or empty streamed turn. The schema accepts a string, so
+			// serialize the empty content explicitly instead of letting
+			// json.RawMessage's nil value become null.
+			am.Content, _ = json.Marshal("")
+		}
 		out = append(out, am)
 	}
 

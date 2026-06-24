@@ -153,6 +153,31 @@ func TestToAnthropicMessagesOrphanAssistantRawOnly(t *testing.T) {
 	}
 }
 
+func TestToAnthropicMessagesEmptyAssistantDoesNotEmitNullContent(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant"},
+		{Role: "user", Content: "are you there?"},
+	}
+
+	_, out := toAnthropicMessages(msgs)
+
+	if len(out) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %+v", len(out), out)
+	}
+	if out[1].Role != "assistant" {
+		t.Fatalf("message[1] role = %q, want assistant", out[1].Role)
+	}
+	if string(out[1].Content) != `""` {
+		t.Fatalf("message[1] content = %s, want JSON empty string", string(out[1].Content))
+	}
+	for i, am := range out {
+		if string(am.Content) == "null" || len(am.Content) == 0 {
+			t.Fatalf("message[%d] has null/empty content: %+v", i, am)
+		}
+	}
+}
+
 func allText(out []anthropicMessage) string {
 	var sb strings.Builder
 	for _, am := range out {

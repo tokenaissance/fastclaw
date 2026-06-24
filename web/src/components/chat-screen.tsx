@@ -1394,6 +1394,9 @@ export function ChatScreen() {
               loadSessions(selectedAgent);
               return;
             }
+            if (!content && !meta) {
+              break;
+            }
             // If the bubble was already streamed in via content_delta,
             // the final `content` carries the same text — just seal
             // the in-flight ID, optionally attach metadata, and skip

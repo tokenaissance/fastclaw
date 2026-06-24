@@ -2101,6 +2101,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		a.maybeRecoverToolCalls(resp)
 
 		if !resp.HasToolCalls() {
+			if strings.TrimSpace(resp.Content) == "" {
+				emptyMsg := "model returned an empty response"
+				emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": emptyMsg}})
+				emitEvent(ctx, ChatEvent{Type: "done"})
+				return emptyMsg
+			}
 			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
 			sess.Append(asst)
 			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})

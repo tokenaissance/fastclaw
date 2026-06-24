@@ -15,7 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Save, Check, Container } from "lucide-react";
+import { Save, Check, Clock, Container } from "lucide-react";
 import { getConfig, updateConfig, getMe, type ConfigResponse } from "@/lib/api";
 
 export default function RuntimeSettingsPage() {
@@ -24,6 +24,7 @@ export default function RuntimeSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
   const [sandboxBackend, setSandboxBackend] = useState("docker");
@@ -33,6 +34,7 @@ export default function RuntimeSettingsPage() {
   const [sandboxBoxliteImage, setSandboxBoxliteImage] = useState("");
   const [sandboxBoxliteKey, setSandboxBoxliteKey] = useState("");
   const [sandboxBoxliteURL, setSandboxBoxliteURL] = useState("");
+  const [defaultTimezone, setDefaultTimezone] = useState("");
 
   useEffect(() => {
     // Belt-and-suspenders gate: the layout already hides the nav item,
@@ -66,6 +68,7 @@ export default function RuntimeSettingsPage() {
           setSandboxE2BKey(cfg.sandbox?.e2bKey || "");
           setSandboxBoxliteKey(cfg.sandbox?.boxliteKey || "");
           setSandboxBoxliteURL(cfg.sandbox?.boxliteUrl || "");
+          setDefaultTimezone(cfg.prefs?.timezone || "");
         })
         .catch(() => {})
         .finally(() => setLoading(false));
@@ -74,6 +77,8 @@ export default function RuntimeSettingsPage() {
 
   const handleSave = async () => {
     setSaving(true);
+    setSaved(false);
+    setSaveError("");
     // Persist every backend's field so switching the dropdown after a
     // save still surfaces the value the user typed for that backend.
     // Also mirror the active backend's value into the legacy `image`
@@ -84,20 +89,33 @@ export default function RuntimeSettingsPage() {
         : sandboxBackend === "boxlite"
           ? sandboxBoxliteImage
           : sandboxDockerImage;
-    await updateConfig({
-      sandbox: {
-        enabled: sandboxEnabled,
-        backend: sandboxBackend,
-        image: activeImage || undefined,
-        dockerImage: sandboxDockerImage || undefined,
-        e2bTemplate: sandboxE2BTemplate || undefined,
-        boxliteSnapshot: sandboxBoxliteImage || undefined,
-        e2bKey: sandboxE2BKey || undefined,
-        boxliteKey: sandboxBoxliteKey || undefined,
-        boxliteUrl: sandboxBoxliteURL || undefined,
-      },
-    });
-    setSaving(false);
+    try {
+      const result = await updateConfig({
+        prefs: {
+          timezone: defaultTimezone.trim() || undefined,
+        },
+        sandbox: {
+          enabled: sandboxEnabled,
+          backend: sandboxBackend,
+          image: activeImage || undefined,
+          dockerImage: sandboxDockerImage || undefined,
+          e2bTemplate: sandboxE2BTemplate || undefined,
+          boxliteSnapshot: sandboxBoxliteImage || undefined,
+          e2bKey: sandboxE2BKey || undefined,
+          boxliteKey: sandboxBoxliteKey || undefined,
+          boxliteUrl: sandboxBoxliteURL || undefined,
+        },
+      });
+      if (result?.ok === false) {
+        setSaveError(result.error || "Save failed");
+        return;
+      }
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : "Save failed");
+      return;
+    } finally {
+      setSaving(false);
+    }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
@@ -140,8 +158,38 @@ export default function RuntimeSettingsPage() {
           )}
         </Button>
       </div>
+      {saveError && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {saveError}
+        </div>
+      )}
 
       <div className="rounded-lg border border-border bg-card">
+        <div className="p-5">
+          <div className="flex items-start gap-3">
+            <Clock className="mt-0.5 h-4 w-4 text-sky-500" />
+            <div className="grid flex-1 gap-4 sm:grid-cols-[1fr_260px] sm:items-start">
+              <div>
+                <h3 className="font-medium">Default timezone</h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  System preference used before falling back to the deployment
+                  TZ. Current deployment fallback: {config.meta?.serverTimezone || "Local"}.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="default-timezone">IANA timezone</Label>
+                <Input
+                  id="default-timezone"
+                  value={defaultTimezone}
+                  onChange={(e) => setDefaultTimezone(e.target.value)}
+                  placeholder="Asia/Shanghai"
+                  className="font-mono text-sm"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+        <Separator />
         <div className="p-5">
           <div className="flex items-center justify-between">
             <div>
