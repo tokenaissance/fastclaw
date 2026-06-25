@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
+	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
@@ -53,6 +54,45 @@ func (g *Gateway) ReloadAgents() error {
 	}
 	slog.Info("hot-reload: invalidated all loaded user spaces")
 	return nil
+}
+
+// ReloadSandbox rebuilds the gateway-wide sandbox executor pool from the
+// current system-scope sandbox config. It is called after the admin/settings
+// UI saves sandbox changes so exec tools can pick them up without a process
+// restart.
+func (g *Gateway) ReloadSandbox() error {
+	if g.store == nil {
+		return nil
+	}
+	cfg := readSystemSandboxCfg(g.store)
+	next := buildSystemSandboxPool(cfg, g.workspace)
+
+	g.mu.Lock()
+	prev := g.sandboxPool
+	g.sandboxPool = next
+	if g.projectRuntime != nil {
+		g.projectRuntime.SetSandboxPool(cfg.Backend, next)
+	}
+	evicted := 0
+	if g.users != nil {
+		evicted = g.users.setSystemSandboxPool(next)
+	}
+	g.mu.Unlock()
+
+	if prev != nil && prev != next {
+		prev.CloseAll()
+	}
+	slog.Info("hot-reload: sandbox executor pool rebuilt",
+		"backend", sandboxPoolBackend(next),
+		"evictedUserSpaces", evicted)
+	return nil
+}
+
+func sandboxPoolBackend(p sandbox.ExecutorPool) string {
+	if p == nil {
+		return ""
+	}
+	return p.Backend()
 }
 
 // reloadAgentForUser is a finer-grained invalidate used by setup handlers

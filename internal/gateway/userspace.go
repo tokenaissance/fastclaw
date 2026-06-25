@@ -959,6 +959,18 @@ func (r *userSpaceRegistry) setProjectRuntime(m *coderuntime.Manager) {
 	r.mu.Unlock()
 }
 
+// setSystemSandboxPool swaps the gateway-owned pool reference used for
+// future UserSpace loads, then drops already-loaded spaces so active agents
+// reattach to the new pool on their next request.
+func (r *userSpaceRegistry) setSystemSandboxPool(p sandbox.ExecutorPool) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.systemSandboxPool = p
+	evicted := len(r.spaces)
+	r.spaces = make(map[string]*userSpaceEntry)
+	return evicted
+}
+
 type userSpaceEntry struct {
 	space    *UserSpace
 	lastUsed time.Time

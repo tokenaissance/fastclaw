@@ -8,11 +8,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
+	webfetchprovider "github.com/fastclaw-ai/fastclaw/internal/toolproviders/webfetch"
 )
 
 type webFetchArgs struct {
@@ -25,8 +25,6 @@ const (
 	fetchTimeout   = 30 * time.Second
 	fetchUserAgent = "FastAgent/1.0 (AI Agent Web Fetcher)"
 )
-
-var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 
 // safeFetchClient is an http.Client whose dialer rejects private,
 // loopback, link-local, multicast, and CGNAT addresses — the SSRF
@@ -275,15 +273,17 @@ func webFetchTool(ctx context.Context, r *Registry, rawArgs json.RawMessage) (st
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 
-	// Read body with a limit to prevent memory issues
-	limitReader := io.LimitReader(resp.Body, int64(maxLen*3)) // read more than needed since HTML is verbose
+	// Read body with a limit to prevent memory issues. WeChat articles
+	// need a bounded larger window because the readable #js_content node
+	// can appear after a long script/config prelude.
+	limitReader := io.LimitReader(resp.Body, webfetchprovider.FetchReadLimit(args.URL, maxLen))
 	body, err := io.ReadAll(limitReader)
 	if err != nil {
 		return "", fmt.Errorf("read body: %w", err)
 	}
 
-	// Strip HTML tags
-	text := stripHTML(string(body))
+	// Strip HTML tags, using site-specific article extraction when needed.
+	text := webfetchprovider.HTMLToText(args.URL, string(body))
 
 	// Truncate to max length (UTF-8 safe: back up to a valid rune boundary).
 	if len(text) > maxLen {
@@ -311,34 +311,4 @@ func assertHTTPScheme(rawURL string) error {
 		return fmt.Errorf("scheme %q not allowed; use http or https", u.Scheme)
 	}
 	return nil
-}
-
-// stripHTML removes HTML tags and cleans up whitespace.
-func stripHTML(html string) string {
-	// Remove script and style elements entirely
-	scriptRe := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
-	html = scriptRe.ReplaceAllString(html, "")
-	styleRe := regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
-	html = styleRe.ReplaceAllString(html, "")
-
-	// Remove HTML tags
-	text := htmlTagRe.ReplaceAllString(html, " ")
-
-	// Decode common HTML entities
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&quot;", "\"")
-	text = strings.ReplaceAll(text, "&#39;", "'")
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
-
-	// Collapse whitespace
-	spaceRe := regexp.MustCompile(`[ \t]+`)
-	text = spaceRe.ReplaceAllString(text, " ")
-
-	// Collapse multiple newlines
-	nlRe := regexp.MustCompile(`\n{3,}`)
-	text = nlRe.ReplaceAllString(text, "\n\n")
-
-	return strings.TrimSpace(text)
 }

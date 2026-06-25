@@ -6,6 +6,8 @@ package webfetch
 
 import (
 	"fmt"
+	stdhtml "html"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -62,6 +64,61 @@ func truncate(text string, maxLen int) string {
 	return text[:maxLen] + "\n[...truncated]"
 }
 
+func isWeChatArticle(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "mp.weixin.qq.com" || strings.HasSuffix(host, ".mp.weixin.qq.com")
+}
+
+func FetchReadLimit(rawURL string, maxLen int) int64 {
+	if isWeChatArticle(rawURL) {
+		return 2 << 20
+	}
+	return int64(maxLen * 3)
+}
+
+func HTMLToText(rawURL, htmlBody string) string {
+	if isWeChatArticle(rawURL) {
+		if article := extractElementByID(htmlBody, "js_content"); article != "" {
+			return stripHTML(article)
+		}
+	}
+	return stripHTML(htmlBody)
+}
+
+func extractElementByID(htmlBody, id string) string {
+	re := regexp.MustCompile(`(?is)<([a-z0-9]+)\b[^>]*\bid\s*=\s*['"]` + regexp.QuoteMeta(id) + `['"][^>]*>`)
+	loc := re.FindStringSubmatchIndex(htmlBody)
+	if loc == nil {
+		return ""
+	}
+	tagName := strings.ToLower(htmlBody[loc[2]:loc[3]])
+	start := loc[0]
+	searchFrom := loc[1]
+	tagRe := regexp.MustCompile(`(?is)<\s*(/?)\s*` + regexp.QuoteMeta(tagName) + `\b[^>]*>`)
+	depth := 1
+	for _, m := range tagRe.FindAllStringSubmatchIndex(htmlBody[searchFrom:], -1) {
+		tagStart := searchFrom + m[0]
+		tagEnd := searchFrom + m[1]
+		closing := m[2] >= 0 && htmlBody[searchFrom+m[2]:searchFrom+m[3]] == "/"
+		selfClosing := strings.HasSuffix(strings.TrimSpace(htmlBody[tagStart:tagEnd]), "/>")
+		if closing {
+			depth--
+			if depth == 0 {
+				return htmlBody[start:tagEnd]
+			}
+			continue
+		}
+		if !selfClosing {
+			depth++
+		}
+	}
+	return ""
+}
+
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 
 // stripHTML removes script/style blocks, drops remaining HTML tags, and
@@ -81,6 +138,7 @@ func stripHTML(html string) string {
 	text = strings.ReplaceAll(text, "&quot;", "\"")
 	text = strings.ReplaceAll(text, "&#39;", "'")
 	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = stdhtml.UnescapeString(text)
 
 	spaceRe := regexp.MustCompile(`[ \t]+`)
 	text = spaceRe.ReplaceAllString(text, " ")

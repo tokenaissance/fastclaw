@@ -64,6 +64,10 @@ func (a *apiResolver) EnsureAgent(ctx context.Context, userID, agentID string) e
 // chat turn.
 func (a *apiResolver) ReloadAgents() error { return a.gw.ReloadAgents() }
 
+// ReloadSandbox rebuilds the gateway-owned sandbox executor pool after
+// system-scope sandbox settings change, avoiding a manual process restart.
+func (a *apiResolver) ReloadSandbox() error { return a.gw.ReloadSandbox() }
+
 // RegisterChannelFromConfig hot-starts a freshly-saved channel row.
 // Called by setup handlers after they persist a new bot config so the
 // adapter starts polling without a process restart.

@@ -583,8 +583,9 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var raw struct {
-		Prefs  *config.PrefsCfg `json:"prefs"`
-		Skills *struct {
+		Prefs   *config.PrefsCfg `json:"prefs"`
+		Sandbox *json.RawMessage `json:"sandbox"`
+		Skills  *struct {
 			AgentEntries map[string]map[string]config.SkillEntryCfg `json:"agentEntries"`
 		} `json:"skills"`
 	}
@@ -653,8 +654,25 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// agent loaded before the change keeps seeing the stale model and
 	// surfaces "no usable LLM provider" in chat.
 	sc, scopeID := s.scopeForSave(r)
+	if sc == scope.System && raw.Sandbox != nil {
+		if err := s.reloadSystemSandbox(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+	}
 	s.invalidateScope(sc, scopeID)
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) reloadSystemSandbox() error {
+	type sandboxReloader interface{ ReloadSandbox() error }
+	if s.userResolver == nil {
+		return nil
+	}
+	if r, ok := s.userResolver.(sandboxReloader); ok {
+		return r.ReloadSandbox()
+	}
+	return nil
 }
 
 // scopeForSave mirrors the scope-resolution logic in saveUserConfig so

@@ -16,9 +16,9 @@ import (
 // pick any other provider.
 type Direct struct{}
 
-func (Direct) Category() string       { return Category }
-func (Direct) Name() string           { return "direct" }
-func (Direct) CredentialFree() bool   { return true }
+func (Direct) Category() string     { return Category }
+func (Direct) Name() string         { return "direct" }
+func (Direct) CredentialFree() bool { return true }
 
 const (
 	directTimeout   = 30 * time.Second
@@ -57,11 +57,13 @@ func (d *Direct) Execute(ctx context.Context, req toolproviders.Request) (toolpr
 	}
 
 	// Read 3× the cap because HTML is verbose and stripping tags shrinks
-	// it substantially — same heuristic the legacy direct fetcher used.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(a.MaxLen*3)))
+	// it substantially. WeChat articles are much larger before the
+	// #js_content article body, so give those a bounded larger window and
+	// extract the article node before truncating.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, FetchReadLimit(a.URL, a.MaxLen)))
 	if err != nil {
 		return toolproviders.Response{}, toolproviders.Retry(fmt.Errorf("direct read: %w", err))
 	}
-	text := truncate(stripHTML(string(body)), a.MaxLen)
+	text := truncate(HTMLToText(a.URL, string(body)), a.MaxLen)
 	return toolproviders.Response{Text: text}, nil
 }

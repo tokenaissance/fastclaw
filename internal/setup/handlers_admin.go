@@ -187,12 +187,12 @@ type onboardRequest struct {
 	Password    string `json:"password"`
 	DisplayName string `json:"displayName,omitempty"`
 
-	Provider  string `json:"provider"`
-	APIBase   string `json:"apiBase"`
-	APIKey    string `json:"apiKey"`
-	APIType   string `json:"apiType,omitempty"`
-	AuthType  string `json:"authType,omitempty"`
-	Model     string `json:"model"`
+	Provider string `json:"provider"`
+	APIBase  string `json:"apiBase"`
+	APIKey   string `json:"apiKey"`
+	APIType  string `json:"apiType,omitempty"`
+	AuthType string `json:"authType,omitempty"`
+	Model    string `json:"model"`
 
 	AgentName string `json:"agentName,omitempty"`
 
@@ -314,6 +314,10 @@ func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
 			sandbox["boxlitePrefix"] = req.SandboxBoxlitePrefix
 		}
 		if err := scope.SaveSettingByScope(r.Context(), s.dataStore, scope.System, "", "sandbox", sandbox); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if err := s.reloadSystemSandbox(); err != nil {
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}

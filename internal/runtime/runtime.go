@@ -179,6 +179,16 @@ func NewManager(st store.Store, workspaceRoot, image string, policy *sandbox.Pol
 	}
 }
 
+// SetSandboxPool updates the borrowed turn-sandbox pool after system
+// sandbox settings are saved. Existing live runtimes keep running; new
+// pooled preview starts use the refreshed backend/pool.
+func (m *Manager) SetSandboxPool(backend string, pool sandbox.ExecutorPool) {
+	m.mu.Lock()
+	m.backend = backend
+	m.pool = pool
+	m.mu.Unlock()
+}
+
 // usesPool reports whether the preview should run through the shared
 // turn-sandbox pool (non-docker backend) rather than a dedicated docker
 // container. Requires a pool to borrow; without one we fall back to the
