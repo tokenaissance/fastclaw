@@ -1,9 +1,11 @@
 package setup
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -132,6 +134,56 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	acct, err := s.accounts.UpdateProfile(r.Context(), ident.UserID, req.DisplayName, req.AvatarURL)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "user": acct})
+}
+
+func (s *Server) handleUploadMyAvatar(w http.ResponseWriter, r *http.Request) {
+	ident, ok := auth.FromContext(r.Context())
+	if !ok || ident.ReadOnly() {
+		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "read-only"})
+		return
+	}
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "no file"})
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxAvatarBytes+1))
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	contentType = strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if !strings.HasPrefix(contentType, "image/") {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "avatar must be an image"})
+		return
+	}
+	avatarURL := "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data)
+	if len(avatarURL) > maxAvatarBytes {
+		jsonResponse(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "avatar too large (max 256KB)"})
+		return
+	}
+
+	current, err := s.accounts.Get(r.Context(), ident.UserID)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	acct, err := s.accounts.UpdateProfile(r.Context(), ident.UserID, current.DisplayName, avatarURL)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return

@@ -14,8 +14,10 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/api"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
+	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/push"
 	"github.com/fastclaw-ai/fastclaw/internal/runtime"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -79,6 +81,7 @@ type Server struct {
 	dataStore      store.Store
 	workspaceStore workspace.Store
 	webChan        *channels.WebChannel
+	pushClient     *push.APNSClient
 	// chatEvents fans live agent chat events out to subscribed SSE
 	// clients across browser tabs. Lazy-init on first use so older
 	// callers that didn't wire it explicitly still work.
@@ -135,6 +138,9 @@ func (s *Server) SetStore(st store.Store) {
 		s.accounts, _ = users.NewAccounts(st)
 		s.apikeys, _ = users.NewAPIKeys(st)
 	}
+	if s.pushClient == nil {
+		s.pushClient = push.NewAPNSClientFromEnv()
+	}
 }
 
 // SetWorkspaceStore installs the blob store used for agent-generated artifacts.
@@ -159,6 +165,11 @@ func (s *Server) SetAuth(resolver *auth.Resolver) {
 // agent replies live in the dashboard chat panel.
 func (s *Server) SetWebChannel(wc *channels.WebChannel) {
 	s.webChan = wc
+	if wc != nil {
+		wc.SetPushHandler(func(msg bus.OutboundMessage) {
+			go s.handleWebPushOutbound(msg)
+		})
+	}
 }
 
 // chatEventHub returns the lazy-initialized hub. Centralized so every
@@ -230,10 +241,15 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/logout", auth(s.handleLogout))
 	mux.HandleFunc("GET /api/me", auth(s.handleMe))
 	mux.HandleFunc("PUT /api/me", auth(s.handleUpdateMe))
+	mux.HandleFunc("POST /api/me/avatar", auth(s.handleUploadMyAvatar))
 	mux.HandleFunc("POST /api/me/password", auth(s.handleChangeMyPassword))
+	mux.HandleFunc("POST /api/push/devices", auth(s.handleSavePushDevice))
+	mux.HandleFunc("DELETE /api/push/devices/{token}", auth(s.handleDeletePushDevice))
 	mux.HandleFunc("POST /api/test-provider", opt(s.handleTestProvider))
 	mux.HandleFunc("POST /api/onboard", s.handleOnboard)
 	mux.HandleFunc("POST /api/register", s.handleRegister)
+	mux.HandleFunc("GET /api/public/agents", s.handlePublicAgents)
+	mux.HandleFunc("GET /api/public/skills", s.handlePublicSkills)
 	mux.HandleFunc("GET /api/admin/registration", admin(s.handleGetRegistration))
 	mux.HandleFunc("PUT /api/admin/registration", admin(s.handleSetRegistration))
 	mux.HandleFunc("GET /api/admin/chats", admin(s.handleAdminChats))
@@ -245,6 +261,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Chat
 	mux.HandleFunc("POST /api/chat", auth(s.handleChat))
 	mux.HandleFunc("POST /api/chat/stream", auth(s.handleChatStream))
+	mux.HandleFunc("POST /api/chat/team/stream", auth(s.handleTeamChatStream))
 	mux.HandleFunc("POST /api/chat/steer", auth(s.handleChatSteer))
 	mux.HandleFunc("GET /api/chats", auth(s.handleChats))
 	mux.HandleFunc("GET /api/chat/history", auth(s.handleChatHistory))

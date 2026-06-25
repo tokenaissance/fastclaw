@@ -1372,6 +1372,17 @@ func (d *DBStore) migrationSQL() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions (user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions (expires_at)`,
+		`CREATE TABLE IF NOT EXISTS push_devices (
+			user_id TEXT NOT NULL,
+			token TEXT NOT NULL,
+			platform TEXT NOT NULL DEFAULT 'ios',
+			environment TEXT NOT NULL DEFAULT '',
+			bundle_id TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, token)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices (user_id)`,
 		// type values: "admin" | "user" | "agent". The default 'agent'
 		// preserves the pre-tier behavior on existing rows — every legacy
 		// key was implicitly an "agent-scoped" key (explicit list in
@@ -2051,6 +2062,64 @@ func (d *DBStore) DeleteExpiredWebSessions(ctx context.Context, before time.Time
 	return err
 }
 
+// --- Mobile push devices ---
+
+func (d *DBStore) SavePushDevice(ctx context.Context, dev *PushDeviceRecord) error {
+	if dev == nil {
+		return errors.New("store: push device is nil")
+	}
+	if dev.UserID == "" || dev.Token == "" {
+		return errors.New("store: push device requires user_id and token")
+	}
+	now := time.Now().UTC()
+	if dev.CreatedAt.IsZero() {
+		dev.CreatedAt = now
+	}
+	dev.UpdatedAt = now
+	if d.dialect == "postgres" {
+		_, err := d.db.ExecContext(ctx,
+			`INSERT INTO push_devices (user_id, token, platform, environment, bundle_id, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 ON CONFLICT (user_id, token) DO UPDATE SET
+			   platform=$3, environment=$4, bundle_id=$5, updated_at=$7`,
+			dev.UserID, dev.Token, dev.Platform, dev.Environment, dev.BundleID, dev.CreatedAt, dev.UpdatedAt)
+		return err
+	}
+	_, err := d.db.ExecContext(ctx,
+		`INSERT INTO push_devices (user_id, token, platform, environment, bundle_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (user_id, token) DO UPDATE SET
+		   platform=excluded.platform, environment=excluded.environment, bundle_id=excluded.bundle_id, updated_at=excluded.updated_at`,
+		dev.UserID, dev.Token, dev.Platform, dev.Environment, dev.BundleID, dev.CreatedAt, dev.UpdatedAt)
+	return err
+}
+
+func (d *DBStore) DeletePushDevice(ctx context.Context, userID, token string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM push_devices WHERE user_id = %s AND token = %s`, d.ph(1), d.ph(2)),
+		userID, token)
+	return err
+}
+
+func (d *DBStore) ListPushDevices(ctx context.Context, userID string) ([]PushDeviceRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT user_id, token, platform, environment, bundle_id, created_at, updated_at FROM push_devices WHERE user_id = %s ORDER BY updated_at DESC`, d.ph(1)),
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]PushDeviceRecord, 0)
+	for rows.Next() {
+		var dev PushDeviceRecord
+		if err := rows.Scan(&dev.UserID, &dev.Token, &dev.Platform, &dev.Environment, &dev.BundleID, &dev.CreatedAt, &dev.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, dev)
+	}
+	return out, rows.Err()
+}
+
 // --- API keys ---
 
 func (d *DBStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecord, error) {
@@ -2189,6 +2258,16 @@ func (d *DBStore) ListAgents(ctx context.Context, ownerUserID string) ([]AgentRe
 	rows, err := d.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT `+agentSelectCols+` FROM agents WHERE user_id = %s ORDER BY created_at DESC`, d.ph(1)),
 		ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgents(rows)
+}
+
+func (d *DBStore) ListPublicAgents(ctx context.Context) ([]AgentRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT `+agentSelectCols+` FROM agents WHERE is_public = TRUE ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}

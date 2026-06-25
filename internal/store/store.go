@@ -42,6 +42,11 @@ type Store interface {
 	DeleteWebSession(ctx context.Context, sid string) error
 	DeleteExpiredWebSessions(ctx context.Context, before time.Time) error
 
+	// --- Mobile push devices (per user) ---
+	SavePushDevice(ctx context.Context, d *PushDeviceRecord) error
+	DeletePushDevice(ctx context.Context, userID, token string) error
+	ListPushDevices(ctx context.Context, userID string) ([]PushDeviceRecord, error)
+
 	// --- API keys (per user) ---
 	ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecord, error)
 	GetAPIKey(ctx context.Context, id string) (*APIKeyRecord, error)
@@ -57,6 +62,7 @@ type Store interface {
 
 	// --- Agents (atomic; agents.id is globally unique) ---
 	ListAgents(ctx context.Context, ownerUserID string) ([]AgentRecord, error)
+	ListPublicAgents(ctx context.Context) ([]AgentRecord, error)
 	GetAgent(ctx context.Context, agentID string) (*AgentRecord, error)
 	SaveAgent(ctx context.Context, agent *AgentRecord) error
 	DeleteAgent(ctx context.Context, agentID string) error
@@ -375,6 +381,17 @@ type WebSessionRecord struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
+// PushDeviceRecord stores one mobile push destination for a user.
+type PushDeviceRecord struct {
+	UserID      string    `json:"userId"`
+	Token       string    `json:"token"`
+	Platform    string    `json:"platform"`
+	Environment string    `json:"environment"`
+	BundleID    string    `json:"bundleId,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 // APIKeyRecord is one row of the apikeys table. KeyHash is SHA256(token);
 // the plaintext is shown to the caller exactly once at create/rotate.
 //
@@ -617,15 +634,15 @@ type ConfigRecord struct {
 
 // ChannelRecord is one row of the channels table — a bound IM bot.
 type ChannelRecord struct {
-	ID             string                 `json:"id"`
-	UserID         string                 `json:"userId"`          // who bound this channel
-	AgentID        string                 `json:"agentId"`         // which agent it routes to
-	Type           string                 `json:"type"`            // wechat / telegram / discord / slack / line / feishu
-	AccountID      string                 `json:"accountId"`       // bot unique identifier (credential_key equivalent)
-	Enabled        bool                   `json:"enabled"`
-	BotToken       string                 `json:"botToken,omitempty"`
-	BaseURL        string                 `json:"baseUrl,omitempty"`
-	PlatformUserID string                 `json:"platformUserId,omitempty"` // scanner's platform ID (WeChat openID)
+	ID             string `json:"id"`
+	UserID         string `json:"userId"`    // who bound this channel
+	AgentID        string `json:"agentId"`   // which agent it routes to
+	Type           string `json:"type"`      // wechat / telegram / discord / slack / line / feishu
+	AccountID      string `json:"accountId"` // bot unique identifier (credential_key equivalent)
+	Enabled        bool   `json:"enabled"`
+	BotToken       string `json:"botToken,omitempty"`
+	BaseURL        string `json:"baseUrl,omitempty"`
+	PlatformUserID string `json:"platformUserId,omitempty"` // scanner's platform ID (WeChat openID)
 	// SharedIdentity, when true, makes all inbound messages on this
 	// channel use the channel owner's user_id as the chatter identity
 	// instead of minting a per-platform u_xxx chatter. This lets the
@@ -633,7 +650,7 @@ type ChannelRecord struct {
 	// (e.g. WeChat + Feishu + Telegram all resolving as the same user).
 	// Default false — each platform sender gets an isolated chatter.
 	SharedIdentity bool                   `json:"sharedIdentity"`
-	Data           map[string]interface{} `json:"data,omitempty"`           // extra config (accounts map, etc.)
+	Data           map[string]interface{} `json:"data,omitempty"` // extra config (accounts map, etc.)
 	CreatedAt      time.Time              `json:"createdAt"`
 	UpdatedAt      time.Time              `json:"updatedAt"`
 }

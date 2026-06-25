@@ -24,6 +24,7 @@ import (
 type WebChannel struct {
 	mu          sync.RWMutex
 	subscribers map[string][]chan bus.OutboundMessage
+	pushHandler func(bus.OutboundMessage)
 }
 
 // NewWebChannel returns a fresh WebChannel with no subscribers.
@@ -83,6 +84,15 @@ func (w *WebChannel) Start(ctx context.Context) error {
 	return nil
 }
 
+// SetPushHandler installs an optional fallback invoked when a web
+// outbound message has no live SSE subscribers. This is used by mobile
+// APNs delivery for cron/async replies while the app is backgrounded.
+func (w *WebChannel) SetPushHandler(fn func(bus.OutboundMessage)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pushHandler = fn
+}
+
 // Send is unused for the web channel — outbound deliveries always
 // arrive via SendMessage which carries the full OutboundMessage shape.
 // Implemented to satisfy the Channel interface; a stray caller would
@@ -102,7 +112,11 @@ func (w *WebChannel) SendMessage(msg bus.OutboundMessage) error {
 	key := webKey(msg.AgentID, msg.ChatID)
 	w.mu.RLock()
 	subs := append([]chan bus.OutboundMessage(nil), w.subscribers[key]...)
+	pushHandler := w.pushHandler
 	w.mu.RUnlock()
+	if len(subs) == 0 && pushHandler != nil && msg.Text != "" {
+		pushHandler(msg)
+	}
 	for _, ch := range subs {
 		select {
 		case ch <- msg:
