@@ -56,6 +56,19 @@ func (a *Agent) maybeRecoverToolCalls(resp *provider.Response) {
 	resp.RawAssistant = nil
 }
 
+// scrubLeakedToolCallContent removes visible DSML / tool-call markup from
+// assistant text that is going to be shown directly to the user. It is used
+// on terminal synthesis paths where we do NOT want to execute any newly
+// recovered calls (for example after the iteration cap has already been hit),
+// but we still must not render raw `< | | DSML | | invoke ...>` garbage.
+func scrubLeakedToolCallContent(content string) string {
+	recovered, residual := recoverToolCallsFromContent(content)
+	if len(recovered) > 0 || residual != content {
+		return strings.TrimSpace(residual)
+	}
+	return content
+}
+
 // recoverToolCallsFromContent parses tool-call attempts that some open-
 // source models (DeepSeek, Qwen variants) emit as XML in the assistant
 // `content` field instead of using the OpenAI Chat Completions
@@ -195,9 +208,10 @@ var tagLeakHintRE = regexp.MustCompile(`<invoke|<\s*/?\s*[|｜]`)
 // it), so we let either noise group consume it.
 //
 // Captures:
-//   $1 = optional `/` for closing tags
-//   $2 = real tag name (invoke / parameter / tool_calls / function_calls / DSML)
-//   $3 = attributes that follow the tag name (e.g. ` name="exec"`)
+//
+//	$1 = optional `/` for closing tags
+//	$2 = real tag name (invoke / parameter / tool_calls / function_calls / DSML)
+//	$3 = attributes that follow the tag name (e.g. ` name="exec"`)
 //
 // Replacement `<${1}${2}${3}>` reconstructs `<invoke name="exec">` etc.
 // Clean inputs like `<DSML>` / `<invoke name="x">` round-trip unchanged

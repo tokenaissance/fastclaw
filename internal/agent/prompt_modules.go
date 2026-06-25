@@ -654,7 +654,19 @@ tool. camoufox-cli is the ONLY browser tool in this sandbox. Do NOT run
 ## Web tools
 
 - If the user gives you a URL, web_fetch it directly — don't web_search first.
+- If the user asks you to search/find/look up something, or asks for nearby
+  places, events, news, reviews, weather, prices, availability, "latest",
+  "recent", or anything else where no exact page URL was provided, call
+  web_search FIRST. Treat Chinese phrasing like "搜一下", "找一下",
+  "附近有什么", "有什么活动", "最近", and "最新" as search intent.
+- Do NOT web_fetch search result pages such as google.com/search,
+  bing.com/search, baidu.com/s, or duckduckgo.com/?q=. Put the query into
+  web_search instead, then web_fetch only a concrete result URL if needed.
 - If web_search snippets already answer the question, reply from those — don't fetch the page.
+- If web_fetch on a concrete page fails with 401/403/429, captcha,
+  anti-bot, "enable JavaScript", or an empty/blocked page, fall back to
+  camoufox-cli in the sandbox: load_skill("camoufox-cli"), open the same
+  URL, wait for the page, and extract/screenshot the visible content.
 
 ## Forbidden actions
 
@@ -842,6 +854,15 @@ Four failure modes that cost rounds:
    the https scheme and fetch the root. Skipping straight to fetch
    saves a full round and is what the user expected when they handed
    you the address.
+   For search intent — "search/find/look up", "nearby", "events",
+   "news", "reviews", "weather", "prices", "availability", "latest",
+   "recent", or Chinese phrasing like "搜一下", "找一下",
+   "附近有什么", "有什么活动", "最近", "最新" — call web_search FIRST
+   unless the user gave you an exact page URL. Do NOT synthesize a
+   search-engine URL and web_fetch it. Search result URLs such as
+   google.com/search, bing.com/search, baidu.com/s, and
+   duckduckgo.com/?q= are not sources; they are failed web_search
+   substitutes.
    For URLs you DON't have — questions where the user describes a
    page in natural language ("the latest Tencent earnings report") —
    call web_search first to discover the URL, then web_fetch it.
@@ -853,6 +874,14 @@ Four failure modes that cost rounds:
    A web_fetch on a guessed URL that 404s costs a round AND poisons
    your remaining budget — the runtime refuses retries of the same
    failed URL within this turn, so swap source, not just the path.
+
+   Browser fallback: if web_fetch fails on a concrete, non-search-result
+   page with 401/403/429, captcha, anti-bot, "enable JavaScript", or an
+   empty/blocked body, do NOT keep retrying web_fetch. Load the
+   camoufox-cli skill and use the sandbox browser against the SAME URL
+   (open → wait → extract visible text or screenshot). This fallback is
+   for browser-required pages only; if the URL itself was guessed or is
+   a search results page, go back to web_search instead.
 
 2. **Stop when you have enough.** If web_search snippets already
    contain the specific facts the user asked about (dates, numbers,

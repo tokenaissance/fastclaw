@@ -729,6 +729,14 @@ func (a *Agent) LastUsage() provider.Usage { return a.lastUsage }
 // HandleMessage path. Providers that don't actually stream still work
 // — they just deliver one big chunk on Done.
 func (a *Agent) streamChatToResponse(ctx context.Context, messages []provider.Message, tools []provider.Tool) (*provider.Response, error) {
+	return a.streamChatToResponseWithOptions(ctx, messages, tools, true)
+}
+
+func (a *Agent) streamChatToResponseQuiet(ctx context.Context, messages []provider.Message, tools []provider.Tool) (*provider.Response, error) {
+	return a.streamChatToResponseWithOptions(ctx, messages, tools, false)
+}
+
+func (a *Agent) streamChatToResponseWithOptions(ctx context.Context, messages []provider.Message, tools []provider.Tool, emitDeltas bool) (*provider.Response, error) {
 	sr, err := a.provider.ChatStream(ctx, messages, tools, a.model, a.maxTokens, a.temperature)
 	if err != nil {
 		return nil, err
@@ -748,15 +756,17 @@ func (a *Agent) streamChatToResponse(ctx context.Context, messages []provider.Me
 		}
 		if chunk.Content != "" {
 			contentBuilder.WriteString(chunk.Content)
-			// Push the incremental delta. The web chat panel
-			// appends it to the bubble in progress; consumers
-			// that only know about the legacy `content` event
-			// ignore unknown types and rely on the final
-			// emit (caller's responsibility) instead.
-			emitEvent(ctx, ChatEvent{
-				Type: "content_delta",
-				Data: map[string]any{"delta": chunk.Content},
-			})
+			if emitDeltas {
+				// Push the incremental delta. The web chat panel
+				// appends it to the bubble in progress; consumers
+				// that only know about the legacy `content` event
+				// ignore unknown types and rely on the final
+				// emit (caller's responsibility) instead.
+				emitEvent(ctx, ChatEvent{
+					Type: "content_delta",
+					Data: map[string]any{"delta": chunk.Content},
+				})
+			}
 		}
 		if chunk.Done {
 			toolCalls = chunk.ToolCalls
@@ -2381,9 +2391,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		finalMessages = privacy.ScrubMessages(finalMessages)
 	}
 	finalContent := ""
-	finalResp, finalErr := a.streamChatToResponse(ctx, finalMessages, nil)
+	finalResp, finalErr := a.streamChatToResponseQuiet(ctx, finalMessages, nil)
 	if finalErr == nil {
-		finalContent = finalResp.Content
+		finalContent = scrubLeakedToolCallContent(finalResp.Content)
 		a.meterTokens(ctx, sess.Key(), finalResp.Usage, 0)
 	}
 	if finalContent == "" {

@@ -184,3 +184,25 @@ func TestRecoverToolCallsFromContent(t *testing.T) {
 		})
 	}
 }
+
+func TestScrubLeakedToolCallContentForDisplay(t *testing.T) {
+	in := `< | | DSML | | tool_calls>
+< | | DSML | | invoke name="exec">
+< | | DSML | | parameter name="command" string="true">curl -sL "https://www.baidu.com/s?wd=idoubi"</ | | DSML | | parameter>
+< | | DSML | | parameter name="timeout" string="false">15</ | | DSML | | parameter>
+</ | | DSML | | invoke>
+</ | | DSML | | tool_calls>`
+	if got := scrubLeakedToolCallContent(in); got != "" {
+		t.Fatalf("scrubbed display content = %q; want empty", got)
+	}
+
+	withPreamble := "I'll check. " + in
+	got := scrubLeakedToolCallContent(withPreamble)
+	if strings.Contains(got, "DSML") || strings.Contains(got, "tool_calls") ||
+		strings.Contains(got, "invoke") || strings.Contains(got, "parameter") {
+		t.Fatalf("scrubbed display content still leaks tool markup: %q", got)
+	}
+	if strings.TrimSpace(got) != "I'll check." {
+		t.Fatalf("scrubbed display content = %q; want preamble only", got)
+	}
+}

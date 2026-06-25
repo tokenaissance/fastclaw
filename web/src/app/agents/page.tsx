@@ -99,6 +99,8 @@ export default function AgentsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AgentDetail | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [saving, setSaving] = useState(false);
 
   // Bumped after avatar upload so <img> re-fetches the new file.
@@ -260,9 +262,17 @@ export default function AgentsPage() {
 
   const handleDelete = async () => {
     if (!deleteId) return;
-    await deleteAgent(deleteId);
-    setDeleteId(null);
-    fetchAgents();
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteAgent(deleteId);
+      setDeleteId(null);
+      fetchAgents();
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete agent");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -706,7 +716,15 @@ export default function AgentsPage() {
       </Dialog>
 
       {/* Delete Confirmation */}
-      <AlertDialog open={!!deleteId} onOpenChange={() => setDeleteId(null)}>
+      <AlertDialog
+        open={!!deleteId}
+        onOpenChange={(open) => {
+          if (!open && !deleting) {
+            setDeleteId(null);
+            setDeleteError(null);
+          }
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Agent</AlertDialogTitle>
@@ -715,13 +733,20 @@ export default function AgentsPage() {
               This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {deleteError && (
+            <p className="text-sm text-destructive">{deleteError}</p>
+          )}
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={handleDelete}
+              onClick={(e) => {
+                e.preventDefault();
+                handleDelete();
+              }}
+              disabled={deleting}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Delete
+              {deleting ? "Deleting..." : "Delete"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
