@@ -257,6 +257,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	ag.agentID = rc.ID
 	if m.opts.meter != nil {
 		ag.SetMeter(m.opts.meter)
+		tools.RegisterBillingTools(ag.registry, m.opts.meter, m.opts.quotaStore)
 	}
 	if m.opts.quotaStore != nil {
 		ag.SetQuotaStore(m.opts.quotaStore)

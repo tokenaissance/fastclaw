@@ -1,5 +1,17 @@
 package bus
 
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
 // Source identifies what produced an InboundMessage. The default
 // (empty string) means an end-user typed it through a chat surface
 // (IM, web, OpenAI-compat API, webhook, plugin) — that's the most
@@ -38,11 +50,11 @@ type InboundMessage struct {
 	// jobs, web chat, sub-agent spawns) — bypasses binding lookup +
 	// default-agent fallback in routeDM. Empty for IM-channel messages
 	// where the gateway has to figure out the agent from bindings.
-	AgentID      string
-	MessageID    string   // unique message identifier within the chat
-	Text         string   // message text
-	PeerKind     string   // "group" or "dm"
-	SenderName   string   // display name of the sender
+	AgentID    string
+	MessageID  string // unique message identifier within the chat
+	Text       string // message text
+	PeerKind   string // "group" or "dm"
+	SenderName string // display name of the sender
 	// SenderAvatarURL is the platform-side avatar URL for the message
 	// sender, when the channel can provide one (Discord serves
 	// `cdn.discordapp.com/avatars/<user_id>/<hash>.png`; Telegram/Slack
@@ -51,11 +63,11 @@ type InboundMessage struct {
 	// never sees it — so the web chat panel can render an avatar +
 	// nickname header on each IM-routed user bubble.
 	SenderAvatarURL string
-	Mentions     []string // @usernames mentioned in the message
-	IsBotMessage bool     // true if the message was sent by a bot
-	PhotoURL     string   // URL of attached photo (if any) — single-image legacy field
-	PhotoURLs    []string // URLs of attached photos. Independent of PhotoURL so old single-image callers (Telegram bridge etc.) keep working untouched; new web-chat path uses this for multi-image attachments.
-	ReplyToMsgID string   // message ID being replied to
+	Mentions        []string // @usernames mentioned in the message
+	IsBotMessage    bool     // true if the message was sent by a bot
+	PhotoURL        string   // URL of attached photo (if any) — single-image legacy field
+	PhotoURLs       []string // URLs of attached photos. Independent of PhotoURL so old single-image callers (Telegram bridge etc.) keep working untouched; new web-chat path uses this for multi-image attachments.
+	ReplyToMsgID    string   // message ID being replied to
 	// Params is a freeform structured-parameter blob supplied by the
 	// calling client (typically a third-party app via the chat
 	// completions API's `params` field). The agent loop renders it as
@@ -130,16 +142,245 @@ type OutboundMessage struct {
 	AllowSplit bool
 }
 
-// MessageBus is an async message queue backed by Go channels.
+// MessageBus is an async message queue. By default it is backed by Go
+// channels. When constructed with Redis, producers still write to Inbound /
+// Outbound, but non-local traffic is bridged through Redis Streams so multiple
+// FastAgent replicas share one delivery center.
 type MessageBus struct {
 	Inbound  chan InboundMessage
 	Outbound chan OutboundMessage
+
+	inboundConsume  chan InboundMessage
+	outboundConsume chan OutboundMessage
+	redis           *redisBridge
 }
 
 // New creates a new MessageBus with buffered channels.
 func New() *MessageBus {
+	inbound := make(chan InboundMessage, 100)
+	outbound := make(chan OutboundMessage, 100)
 	return &MessageBus{
-		Inbound:  make(chan InboundMessage, 100),
-		Outbound: make(chan OutboundMessage, 100),
+		Inbound:         inbound,
+		Outbound:        outbound,
+		inboundConsume:  inbound,
+		outboundConsume: outbound,
 	}
+}
+
+type RedisConfig struct {
+	Client   *redis.Client
+	Prefix   string
+	Group    string
+	Consumer string
+}
+
+// NewRedis creates a MessageBus that uses Redis Streams for shared inbound and
+// outbound delivery. Web/API traffic stays local because browser SSE and
+// HTTP callers are tied to the current process.
+func NewRedis(cfg RedisConfig) *MessageBus {
+	inbound := make(chan InboundMessage, 100)
+	outbound := make(chan OutboundMessage, 100)
+	inboundConsume := make(chan InboundMessage, 100)
+	outboundConsume := make(chan OutboundMessage, 100)
+	prefix := strings.Trim(cfg.Prefix, ":")
+	if prefix == "" {
+		prefix = "fastagent"
+	}
+	group := cfg.Group
+	if group == "" {
+		group = "fastagent"
+	}
+	consumer := cfg.Consumer
+	if consumer == "" {
+		consumer = fmt.Sprintf("consumer-%d", time.Now().UnixNano())
+	}
+	return &MessageBus{
+		Inbound:         inbound,
+		Outbound:        outbound,
+		inboundConsume:  inboundConsume,
+		outboundConsume: outboundConsume,
+		redis: &redisBridge{
+			client:         cfg.Client,
+			prefix:         prefix,
+			group:          group,
+			consumer:       consumer,
+			inboundKey:     prefix + ":bus:inbound",
+			outboundKey:    prefix + ":bus:outbound",
+			inboundLocal:   inboundConsume,
+			outboundLocal:  outboundConsume,
+			inboundSource:  inbound,
+			outboundSource: outbound,
+		},
+	}
+}
+
+func (b *MessageBus) InboundConsumer() <-chan InboundMessage {
+	if b == nil || b.inboundConsume == nil {
+		return nil
+	}
+	return b.inboundConsume
+}
+
+func (b *MessageBus) OutboundConsumer() <-chan OutboundMessage {
+	if b == nil || b.outboundConsume == nil {
+		return nil
+	}
+	return b.outboundConsume
+}
+
+func (b *MessageBus) Start(ctx context.Context) error {
+	if b == nil || b.redis == nil {
+		return nil
+	}
+	return b.redis.start(ctx)
+}
+
+type redisBridge struct {
+	client         *redis.Client
+	prefix         string
+	group          string
+	consumer       string
+	inboundKey     string
+	outboundKey    string
+	inboundLocal   chan InboundMessage
+	outboundLocal  chan OutboundMessage
+	inboundSource  chan InboundMessage
+	outboundSource chan OutboundMessage
+}
+
+func (r *redisBridge) start(ctx context.Context) error {
+	if r.client == nil {
+		return errors.New("redis bus requires client")
+	}
+	for _, key := range []string{r.inboundKey, r.outboundKey} {
+		if err := r.client.XGroupCreateMkStream(ctx, key, r.group, "0").Err(); err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
+			return fmt.Errorf("create redis stream group %s: %w", key, err)
+		}
+	}
+	go r.publishInbound(ctx)
+	go r.publishOutbound(ctx)
+	go r.consumeInbound(ctx)
+	go r.consumeOutbound(ctx)
+	slog.Info("redis message bus enabled", "prefix", r.prefix, "group", r.group, "consumer", r.consumer)
+	return nil
+}
+
+func (r *redisBridge) publishInbound(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-r.inboundSource:
+			if localOnly(msg.Channel) {
+				deliver(ctx, r.inboundLocal, msg)
+				continue
+			}
+			if err := r.xadd(ctx, r.inboundKey, msg); err != nil {
+				slog.Error("redis inbound enqueue failed", "channel", msg.Channel, "account", msg.AccountID, "error", err)
+			}
+		}
+	}
+}
+
+func (r *redisBridge) publishOutbound(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-r.outboundSource:
+			if localOnly(msg.Channel) {
+				deliver(ctx, r.outboundLocal, msg)
+				continue
+			}
+			if err := r.xadd(ctx, r.outboundKey, msg); err != nil {
+				slog.Error("redis outbound enqueue failed", "channel", msg.Channel, "account", msg.AccountID, "error", err)
+			}
+		}
+	}
+}
+
+func (r *redisBridge) xadd(ctx context.Context, key string, msg any) error {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return r.client.XAdd(ctx, &redis.XAddArgs{
+		Stream: key,
+		MaxLen: 10000,
+		Approx: true,
+		Values: map[string]any{"payload": payload},
+	}).Err()
+}
+
+func (r *redisBridge) consumeInbound(ctx context.Context) {
+	r.consume(ctx, r.inboundKey, func(payload []byte) error {
+		var msg InboundMessage
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			return err
+		}
+		deliver(ctx, r.inboundLocal, msg)
+		return nil
+	})
+}
+
+func (r *redisBridge) consumeOutbound(ctx context.Context) {
+	r.consume(ctx, r.outboundKey, func(payload []byte) error {
+		var msg OutboundMessage
+		if err := json.Unmarshal(payload, &msg); err != nil {
+			return err
+		}
+		deliver(ctx, r.outboundLocal, msg)
+		return nil
+	})
+}
+
+func (r *redisBridge) consume(ctx context.Context, stream string, handle func([]byte) error) {
+	for ctx.Err() == nil {
+		res, err := r.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    r.group,
+			Consumer: r.consumer,
+			Streams:  []string{stream, ">"},
+			Count:    10,
+			Block:    5 * time.Second,
+		}).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) || ctx.Err() != nil {
+				continue
+			}
+			slog.Warn("redis stream read failed", "stream", stream, "error", err)
+			continue
+		}
+		for _, xs := range res {
+			for _, xm := range xs.Messages {
+				raw, ok := xm.Values["payload"]
+				if !ok {
+					_ = r.client.XAck(ctx, stream, r.group, xm.ID).Err()
+					continue
+				}
+				payload, ok := raw.(string)
+				if !ok {
+					_ = r.client.XAck(ctx, stream, r.group, xm.ID).Err()
+					continue
+				}
+				if err := handle([]byte(payload)); err != nil {
+					slog.Error("redis stream payload failed", "stream", stream, "id", xm.ID, "error", err)
+					continue
+				}
+				if err := r.client.XAck(ctx, stream, r.group, xm.ID).Err(); err != nil {
+					slog.Warn("redis stream ack failed", "stream", stream, "id", xm.ID, "error", err)
+				}
+			}
+		}
+	}
+}
+
+func deliver[T any](ctx context.Context, ch chan T, msg T) {
+	select {
+	case ch <- msg:
+	case <-ctx.Done():
+	}
+}
+
+func localOnly(channel string) bool {
+	return channel == "" || channel == "web" || channel == "api"
 }

@@ -331,6 +331,30 @@ func agentsFilesCmd() *cobra.Command {
 			return err
 		},
 	})
+	cmd.AddCommand(&cobra.Command{
+		Use:     "delete <name> <filename>",
+		Aliases: []string{"rm"},
+		Short:   "Delete a system file saved for an agent",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := openStoreFromEnv()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			ctx := context.Background()
+			rec, err := agentcli.Resolve(ctx, st, args[0])
+			if err != nil {
+				return err
+			}
+			if err := st.DeleteAgentFile(ctx, rec.ID, rec.UserID, args[1]); err != nil {
+				return err
+			}
+			fmt.Printf("Deleted %s\n", args[1])
+			notifyGatewayReload()
+			return nil
+		},
+	})
 	return cmd
 }
 

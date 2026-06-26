@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 )
 
 // slashResult holds the result of a slash command.
@@ -330,7 +332,11 @@ func (a *Agent) slashUsage(msg bus.InboundMessage) slashResult {
 		}
 	}
 
-	reply := fmt.Sprintf("📊 Session Usage\n"+
+	reply := a.billingUsageText(context.Background())
+	if reply != "" {
+		reply += "\n\n"
+	}
+	reply += fmt.Sprintf("📊 Session Usage\n"+
 		"User turns:      %d\n"+
 		"Assistant turns: %d\n"+
 		"Tool calls:      %d\n"+
@@ -356,6 +362,71 @@ func (a *Agent) slashUsage(msg bus.InboundMessage) slashResult {
 	}
 
 	return slashResult{handled: true, reply: reply}
+}
+
+func (a *Agent) billingUsageText(ctx context.Context) string {
+	if a.meter == nil {
+		return ""
+	}
+	userID := a.ownerUserID
+	if userID == "" {
+		return ""
+	}
+	if a.quotaStore != nil {
+		if _, qerr := a.quotaStore.GetQuota(ctx, userID); qerr == nil {
+			if status, err := usage.CheckQuota(ctx, a.quotaStore, a.meter, userID); err == nil && status != nil {
+				return fmt.Sprintf("💳 Billing Usage\n"+
+					"Billing user:   %s\n"+
+					"Tokens:         %d / %s\n"+
+					"Requests:       %d / %s\n"+
+					"Remaining:      %s tokens, %s requests\n"+
+					"Allowed:        %t\n"+
+					"Resets at:      %s",
+					userID,
+					status.TokensUsed, usageLimitText(status.MonthlyTokenLimit),
+					status.RequestsUsed, usageLimitText(status.MonthlyRequestLimit),
+					remainingText(status.MonthlyTokenLimit, status.TokensUsed),
+					remainingText(status.MonthlyRequestLimit, status.RequestsUsed),
+					status.Allowed, emptyDash(status.ResetsAt))
+			}
+		}
+	}
+	totals, err := a.meter.TotalsForUser(ctx, userID, usage.LastN(30))
+	if err != nil {
+		return ""
+	}
+	tokens := totals.Input + totals.Output + totals.CacheRead + totals.CacheCreation
+	return fmt.Sprintf("💳 Billing Usage\n"+
+		"Billing user:   %s\n"+
+		"Tokens:         %d used in last 30 days\n"+
+		"Requests:       %d in last 30 days\n"+
+		"Quota:          unlimited / not configured",
+		userID, tokens, totals.Requests)
+}
+
+func usageLimitText(limit int64) string {
+	if limit <= 0 {
+		return "unlimited"
+	}
+	return fmt.Sprintf("%d", limit)
+}
+
+func remainingText(limit, used int64) string {
+	if limit <= 0 {
+		return "unlimited"
+	}
+	left := limit - used
+	if left < 0 {
+		left = 0
+	}
+	return fmt.Sprintf("%d", left)
+}
+
+func emptyDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func (a *Agent) slashInsights(msg bus.InboundMessage, days int) slashResult {

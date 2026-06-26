@@ -355,6 +355,13 @@ func (r *Registry) SetOwnerUserID(userID string) {
 	r.userID = userID
 }
 
+// OwnerUserID returns the boot-time UserSpace owner. Billing quota is
+// enforced against this account, so billing tools use it instead of the
+// per-turn chatter when the two differ on IM channels.
+func (r *Registry) OwnerUserID() string {
+	return r.userID
+}
+
 // SetChatterUserID overrides the per-user file routing target for the
 // in-flight turn. Called by the agent loop at the top of HandleMessage /
 // HandleMessageStream with the resolved chatterUID so per-sender USER.md

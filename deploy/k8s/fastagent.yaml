@@ -57,6 +57,8 @@ stringData:
 
   # Set when webhook billing is enabled.
   # FASTAGENT_WEBHOOK_TOKEN: "REPLACE_WITH_WEBHOOK_TOKEN"
+  # Optional Redis auth. Configure when your Redis requires AUTH.
+  # FASTAGENT_REDIS_PASSWORD: "REPLACE_WITH_REDIS_PASSWORD"
 
 ---
 # =================== EDIT HERE (object store provider) ==================
@@ -127,6 +129,16 @@ data:
   # Uncomment and set the webhook URL for usage billing integration.
   # FASTAGENT_WEBHOOK_URL: "https://tokenaissance.com/api/fastagent/webhooks/usage"
 
+  # ─── Redis (recommended for multi-replica IM bots) ───
+  # When enabled, FastAgent uses Redis for:
+  #   1. cross-replica channel leases (only one pod long-polls each bot)
+  #   2. shared Redis Stream inbound/outbound delivery for IM/cron traffic
+  # Web/API traffic stays process-local so dashboard SSE keeps working.
+  # FASTAGENT_REDIS_ENABLED: "true"
+  # FASTAGENT_REDIS_ADDR: "redis.fastagent.svc.cluster.local:6379"
+  # FASTAGENT_REDIS_DB: "0"
+  # FASTAGENT_REDIS_PREFIX: "fastagent"
+
   # ─── Sandbox (optional) ───
   # k8s pods don't have a docker daemon, so the only sandbox backend
   # is E2B (remote) — or leave it disabled. To enable: set the
@@ -166,6 +178,7 @@ spec:
             - { name: FASTAGENT_OBJECT_STORE_SECRETKEY,  valueFrom: { secretKeyRef: { name: fastagent-secrets, key: OBJECT_STORE_SECRETKEY } } }
             # - { name: E2B_API_KEY, valueFrom: { secretKeyRef: { name: fastagent-secrets, key: E2B_API_KEY } } }
             # - { name: FASTAGENT_WEBHOOK_TOKEN, valueFrom: { secretKeyRef: { name: fastagent-secrets, key: FASTAGENT_WEBHOOK_TOKEN } } }
+            # - { name: FASTAGENT_REDIS_PASSWORD, valueFrom: { secretKeyRef: { name: fastagent-secrets, key: FASTAGENT_REDIS_PASSWORD } } }
           volumeMounts:
             - { name: data, mountPath: /data/.fastagent }
           # /healthz and /readyz skip the auth middleware so kubelet can probe

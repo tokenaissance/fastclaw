@@ -3,6 +3,7 @@ module github.com/fastclaw-ai/fastclaw
 go 1.25.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.34.0
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/codeany-ai/open-agent-sdk-go v0.1.0
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
@@ -11,6 +12,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/larksuite/oapi-sdk-go/v3 v3.6.1
 	github.com/minio/minio-go/v7 v7.0.100
+	github.com/redis/go-redis/v9 v9.17.0
 	github.com/slack-go/slack v0.19.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.46.0
@@ -19,6 +21,9 @@ require (
 )
 
 require (
+	github.com/alicebob/gopher-json v0.0.0-20230218143504-906a9b012302 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
@@ -40,6 +45,7 @@ require (
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect

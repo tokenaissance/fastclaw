@@ -2474,8 +2474,10 @@ func (d *DBStore) ListSessions(ctx context.Context, userID, agentID string) ([]S
 	// channel binding in the web dashboard sidebar.
 	rows, err := d.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT session_key, user_id, channel, account_id, chat_id, project_id, title, message_count, updated_at, COALESCE(chatter_user_id,'') FROM sessions
-			WHERE agent_id = %s AND user_id IN (
-				SELECT id FROM users WHERE id = %s OR owner_user_id = %s
+			WHERE agent_id = %s AND (
+				user_id = %s OR user_id IN (
+					SELECT id FROM users WHERE owner_user_id = %s
+				)
 			) ORDER BY updated_at DESC`, d.ph(1), d.ph(2), d.ph(3)),
 		agentID, userID, userID)
 	if err != nil {

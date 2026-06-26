@@ -190,6 +190,12 @@ database and is edited through the dashboard or `fastagent agents config`.
 | `FASTAGENT_STORAGE_TYPE` | `sqlite` | `sqlite` or `postgres`. |
 | `FASTAGENT_STORAGE_DSN` | empty | Postgres DSN, e.g. `postgres://u:p@host:5432/db?sslmode=disable`. Empty = sqlite at `$FASTAGENT_HOME/fastagent.db`. |
 | `FASTAGENT_STORAGE_AUTO_MIGRATE` | `true` | Apply schema migrations on boot. |
+| `FASTAGENT_REDIS_ENABLED` | `false` | Enable Redis-backed channel leases and Redis Stream message bus. Setting `FASTAGENT_REDIS_ADDR` also enables it. |
+| `FASTAGENT_REDIS_ADDR` | `127.0.0.1:6379` when enabled | Redis address used by multi-replica channel locks and shared inbound/outbound delivery streams. |
+| `FASTAGENT_REDIS_USERNAME` | empty | Redis ACL username, if required. |
+| `FASTAGENT_REDIS_PASSWORD` | empty | Redis password, if required. |
+| `FASTAGENT_REDIS_DB` | `0` | Redis logical database number. |
+| `FASTAGENT_REDIS_PREFIX` | `fastagent` | Prefix for Redis stream and lease keys. |
 | `FASTAGENT_SANDBOX_ENABLED` | dashboard | Override the Settings → Runtime toggle. |
 | `FASTAGENT_SANDBOX_BACKEND` | dashboard | `docker` or `e2b`. |
 | `FASTAGENT_SANDBOX_IMAGE` | dashboard | Docker image (Docker backend) or template id (E2B). |

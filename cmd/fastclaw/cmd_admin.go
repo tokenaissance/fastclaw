@@ -23,6 +23,8 @@ func adminCmd() *cobra.Command {
 	cmd.AddCommand(adminResetPasswordCmd())
 	cmd.AddCommand(adminGrantRoleCmd())
 	cmd.AddCommand(adminListUsersCmd())
+	cmd.AddCommand(adminUpdateUserCmd())
+	cmd.AddCommand(adminDeleteUserCmd())
 	return cmd
 }
 
@@ -161,4 +163,75 @@ func adminListUsersCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func adminUpdateUserCmd() *cobra.Command {
+	var login, displayName, role, status string
+	var quota int64
+	var setQuota bool
+	cmd := &cobra.Command{
+		Use:   "update-user",
+		Short: "Update a user's display name, role, status, or agent quota",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := openStoreFromEnv()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			ctx := context.Background()
+			accts, _ := users.NewAccounts(st)
+			rec, err := st.GetUserByLogin(ctx, login)
+			if err != nil {
+				return err
+			}
+			var quotaPtr *int64
+			if setQuota {
+				quotaPtr = &quota
+			}
+			acct, err := accts.Update(ctx, rec.ID, displayName, role, status, quotaPtr)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("updated user %s role=%s status=%s quota=%d id=%s\n", acct.Username, acct.Role, acct.Status, acct.AgentQuota, acct.ID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&login, "user", "", "username or email (required)")
+	cmd.Flags().StringVar(&displayName, "display-name", "", "display name")
+	cmd.Flags().StringVar(&role, "role", "", "'super_admin' or 'user'")
+	cmd.Flags().StringVar(&status, "status", "", "'active' or 'disabled'")
+	cmd.Flags().Int64Var(&quota, "agent-quota", 0, "agent quota; -1 for unlimited")
+	cmd.Flags().BoolVar(&setQuota, "set-agent-quota", false, "write --agent-quota instead of leaving it unchanged")
+	cmd.MarkFlagRequired("user")
+	return cmd
+}
+
+func adminDeleteUserCmd() *cobra.Command {
+	var login string
+	cmd := &cobra.Command{
+		Use:     "delete-user",
+		Aliases: []string{"rm-user"},
+		Short:   "Delete a user account",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := openStoreFromEnv()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			ctx := context.Background()
+			accts, _ := users.NewAccounts(st)
+			rec, err := st.GetUserByLogin(ctx, login)
+			if err != nil {
+				return err
+			}
+			if err := accts.Delete(ctx, rec.ID); err != nil {
+				return err
+			}
+			fmt.Printf("deleted user %s (%s)\n", rec.Username, rec.ID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&login, "user", "", "username or email (required)")
+	cmd.MarkFlagRequired("user")
+	return cmd
 }

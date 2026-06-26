@@ -116,7 +116,7 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "undo", description: "Undo last turn" },
   { name: "compact", description: "Compress context window" },
   { name: "status", description: "Agent status & memory info" },
-  { name: "usage", description: "Session token/turn stats" },
+  { name: "usage", description: "Billing usage and session stats" },
   { name: "insights", description: "Activity insights (last N days)" },
   { name: "personality", description: "List or switch personality" },
   { name: "model", description: "Show or switch LLM model" },
@@ -124,6 +124,13 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: "help", description: "Show command help" },
   { name: "version", description: "Show version" },
 ];
+const READ_ONLY_SLASH_COMMANDS = new Set([
+  "help",
+  "status",
+  "usage",
+  "insights",
+  "version",
+]);
 type SlashItem =
   | ({ kind: "command" } & SlashCommand)
   | ({ kind: "skill" } & SkillInfo);
@@ -575,6 +582,11 @@ export function ChatScreen() {
   // producing a duplicate bubble. The ref is reset to null at startNewGroup
   // and when a tool_call rolls the bubble into a tool-group.
   const streamingMsgIdRef = useRef<string | null>(null);
+  // First-send navigation (`/chat/` -> `/chat/<sid>/`) triggers the
+  // history-loading effect while the POST stream is still in flight.
+  // Keep that fetch from clearing optimistic bubbles or advancing the
+  // seq cursor past events the POST handler is about to render.
+  const inFlightSendSessionRef = useRef<string | null>(null);
   // AbortController for the in-flight chat stream so the Stop button can
   // cancel both the upload and the SSE connection. Reset on every new turn.
   const abortRef = useRef<AbortController | null>(null);
@@ -722,6 +734,27 @@ export function ChatScreen() {
     [input],
   );
 
+  const getBuiltInSlashCommandName = useCallback((value: string) => {
+    const trimmed = value.trim();
+    const match = /^\/([\w-]+)(?:\s|$)/.exec(trimmed);
+    if (!match) return "";
+    return BUILTIN_COMMANDS.some((c) => c.name === match[1]) ? match[1] : "";
+  }, []);
+
+  const isReadOnlySafeSlashCommand = useCallback(
+    (value: string) => READ_ONLY_SLASH_COMMANDS.has(getBuiltInSlashCommandName(value)),
+    [getBuiltInSlashCommandName],
+  );
+
+  const isExactBuiltInSlashCommand = useCallback(
+    (value: string) => {
+      const trimmed = value.trim();
+      const match = /^\/([\w-]+)$/.exec(trimmed);
+      return !!match && getBuiltInSlashCommandName(trimmed) === match[1];
+    },
+    [getBuiltInSlashCommandName],
+  );
+
   // Load sessions when agent changes
   const loadSessions = useCallback((agentId: string) => {
     getChatSessions(agentId)
@@ -782,6 +815,13 @@ export function ChatScreen() {
       if (typeof data.type === "string") {
         const seq = typeof data.seq === "number" ? data.seq : -1;
         if (seq >= 0 && seq <= maxSeqRef.current) return; // already rendered via POST stream
+        // While the foreground POST /api/chat/stream is active for this
+        // session, let that callback own rendering. Otherwise this
+        // parallel subscribe connection can win the race, create a
+        // transient slash bubble, then reload history on `done`; slash
+        // replies are event-only, so that reload clears the visible
+        // answer and makes the send look like it did nothing.
+        if (inFlightSendSessionRef.current === sessionId) return;
         // CAREFUL: do NOT bump maxSeqRef before the switch. This handler
         // intentionally drops tool_call / tool_result during catch-up
         // (the post-`done` history reload renders them properly) — but
@@ -993,13 +1033,16 @@ export function ChatScreen() {
     const s = sessions.find((x) => x.id === sessionId);
     return s?.channel || "web";
   }, [sessions, sessionId]);
-  // isReadOnlyChannel locks the composer for IM-bound sessions (replies
-  // must come from the upstream channel). isActAsView locks it when a
-  // super_admin opened this URL to inspect another user's chat. Both
-  // collapse to the same disabled state on the textarea / send button;
-  // the banners differ so the user knows *why*.
+  // Read-only channel / actAs views keep the textarea editable so the
+  // user can type local query slashes such as /usage, while the send
+  // gate below blocks normal messages and mutating slash commands.
   const isReadOnlyChannel = currentChannel !== "web";
   const isReadOnlyView = isReadOnlyChannel || isActAsView;
+  const inputIsReadOnlySafeSlashCommand = isReadOnlySafeSlashCommand(input);
+  const canUseComposer = !!selectedAgent;
+  const canSendComposer =
+    canUseComposer && (!isReadOnlyView || inputIsReadOnlySafeSlashCommand);
+  const canAttach = !!selectedAgent && !sending && !isReadOnlyView;
 
   const handleRenameTitle = useCallback(
     async (next: string) => {
@@ -1067,6 +1110,7 @@ export function ChatScreen() {
   // hanging it off the last agent message.
   useEffect(() => {
     if (!selectedAgent || !sessionId) return;
+    const sessionHasActivePost = inFlightSendSessionRef.current === sessionId;
     // Reset dedup state when session changes — events from a previous
     // session must not bias the new session's seq filter, and any
     // transient placeholder is no longer relevant.
@@ -1092,10 +1136,14 @@ export function ChatScreen() {
     getChatHistoryWithCursor(selectedAgent, sessionId)
       .then(async ({ history, latestEventSeq }) => {
         if (aborted) return;
-        if (latestEventSeq > maxSeqRef.current) maxSeqRef.current = latestEventSeq;
+        if (!sessionHasActivePost && latestEventSeq > maxSeqRef.current) {
+          maxSeqRef.current = latestEventSeq;
+        }
         subscribeSinceRef.current = latestEventSeq;
         if (!history || history.length === 0) {
-          setMessages([]);
+          if (!sessionHasActivePost) {
+            setMessages([]);
+          }
           setLoadedSessionId(sessionId);
           return;
         }
@@ -1126,7 +1174,9 @@ export function ChatScreen() {
       })
       .catch(() => {
         if (aborted) return;
-        setMessages([]);
+        if (!sessionHasActivePost) {
+          setMessages([]);
+        }
         // History fetch failed — open the SSE anyway so live events
         // still flow, but use seq=0 instead of -1 so we don't trigger a
         // full server-side replay as a side effect.
@@ -1196,8 +1246,17 @@ export function ChatScreen() {
     // used by the steer 409 fallback (server confirmed no active turn).
     const composerText = (overrideText ?? input).trim();
     const text = composerText;
+    const slashAllowedInReadOnlyView = isReadOnlySafeSlashCommand(text);
     // Allow sending with attachments only (no text), but require at least one.
-    if ((!text && attachments.length === 0) || !selectedAgent || (sending && !force)) return;
+    if (
+      (!text && attachments.length === 0) ||
+      !selectedAgent ||
+      (sending && !force) ||
+      (isReadOnlyView && !slashAllowedInReadOnlyView)
+    ) {
+      return;
+    }
+    setSlashOpen(false);
 
     // `/project/<pid>` is the lazy-create marker the sidebar dropped
     // us at. Captured here so it can ride the first chat request body;
@@ -1217,6 +1276,7 @@ export function ChatScreen() {
     // useSearchParams (and the sidebar's navigateOnce dedupe that
     // derives from them) still see the new URL.
     const target = `/agents/${selectedAgent}/chat/${sessionId}/`;
+    inFlightSendSessionRef.current = sessionId;
     if (pathname !== target) {
       window.history.replaceState(null, "", target);
     }
@@ -1699,6 +1759,9 @@ export function ChatScreen() {
         });
       }
     } finally {
+      if (inFlightSendSessionRef.current === sessionId) {
+        inFlightSendSessionRef.current = null;
+      }
       abortRef.current = null;
       setSending(false);
       // Belt-and-suspenders: the subagent's done event clears this on
@@ -1707,7 +1770,7 @@ export function ChatScreen() {
       setSubagentProgress(null);
       textareaRef.current?.focus();
     }
-  }, [input, attachments, selectedAgent, sessionId, sending, loadSessions, pathname, router, urlProjectId]);
+  }, [input, attachments, selectedAgent, sessionId, sending, isReadOnlyView, isReadOnlySafeSlashCommand, loadSessions, pathname, router, urlProjectId]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
@@ -1773,7 +1836,7 @@ export function ChatScreen() {
 
     // Slash menu keyboard handling takes precedence when open: arrows move
     // the selection, Enter confirms, Escape closes without sending.
-    if (slashOpen && filteredItems.length > 0) {
+    if (slashOpen && filteredItems.length > 0 && !isExactBuiltInSlashCommand(input)) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSlashIndex((i) => (i + 1) % filteredItems.length);
@@ -2303,8 +2366,10 @@ export function ChatScreen() {
                 <span className="font-medium text-foreground">
                   {channelLabel(currentChannel)}
                 </span>
-                . Reply from there — messages typed here won't reach the user on
-                the other side.
+                . Reply from there — slash commands like{" "}
+                <span className="font-mono text-foreground">/usage</span> can
+                run here, but normal messages typed here won't reach the user
+                on the other side.
               </div>
             )}
             {isActAsView && !isReadOnlyChannel && (
@@ -2401,12 +2466,12 @@ export function ChatScreen() {
                       isActAsView
                         ? "Read-only — viewing another user's chat"
                         : isReadOnlyChannel
-                          ? `Read-only — reply from ${channelLabel(currentChannel)}`
+                          ? `Slash commands only — reply from ${channelLabel(currentChannel)}`
                           : selectedAgent
                             ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
                             : "Select an agent first"
                     }
-                    disabled={!selectedAgent || isReadOnlyView}
+                    disabled={!canUseComposer}
                     rows={3}
                     className="block w-full resize-none bg-transparent text-[15px] placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
                     style={{ maxHeight: 240, minHeight: 72 }}
@@ -2415,7 +2480,7 @@ export function ChatScreen() {
                     <div className="flex items-center gap-2 min-w-0">
                       <label
                         className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-border text-muted-foreground transition-colors ${
-                          !selectedAgent || sending || isReadOnlyView
+                          !canAttach
                             ? "opacity-50 cursor-not-allowed"
                             : "hover:bg-muted hover:text-foreground cursor-pointer"
                         }`}
@@ -2428,7 +2493,7 @@ export function ChatScreen() {
                           multiple
                           className="sr-only"
                           onChange={handleFilePick}
-                          disabled={!selectedAgent || sending || isReadOnlyView}
+                          disabled={!canAttach}
                         />
                       </label>
                       {urlProjectId && projectInfo && (
@@ -2454,8 +2519,11 @@ export function ChatScreen() {
                       </Button>
                     ) : (
                       <Button
-                        onClick={() => handleSend()}
-                        disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyView}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          handleSend();
+                        }}
+                        disabled={(!input.trim() && attachments.length === 0) || !canSendComposer}
                         size="icon"
                         className="h-9 w-9 shrink-0 rounded-full"
                         aria-label="Send message"
@@ -2469,7 +2537,7 @@ export function ChatScreen() {
                 <div className="flex items-center gap-2">
                   <label
                     className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors ${
-                      !selectedAgent || sending || isReadOnlyView
+                      !canAttach
                         ? "opacity-50 cursor-not-allowed"
                         : "hover:bg-muted hover:text-foreground cursor-pointer"
                     }`}
@@ -2482,7 +2550,7 @@ export function ChatScreen() {
                       multiple
                       className="sr-only"
                       onChange={handleFilePick}
-                      disabled={!selectedAgent || sending || isReadOnlyView}
+                      disabled={!canAttach}
                     />
                   </label>
                   <textarea
@@ -2495,12 +2563,12 @@ export function ChatScreen() {
                       isActAsView
                         ? "Read-only — viewing another user's chat"
                         : isReadOnlyChannel
-                          ? `Read-only — reply from ${channelLabel(currentChannel)}`
+                          ? `Slash commands only — reply from ${channelLabel(currentChannel)}`
                           : selectedAgent
                             ? `Message ${agentName || selectedAgent}... ("/" to pick a skill)`
                             : "Select an agent first"
                     }
-                    disabled={!selectedAgent || isReadOnlyView}
+                    disabled={!canUseComposer}
                     rows={1}
                     className="flex-1 resize-none bg-transparent text-[15px] leading-8 placeholder:text-muted-foreground/50 outline-none disabled:opacity-50"
                     style={{ maxHeight: 200, minHeight: 32 }}
@@ -2516,8 +2584,11 @@ export function ChatScreen() {
                     </Button>
                   ) : (
                     <Button
-                      onClick={() => handleSend()}
-                      disabled={(!input.trim() && attachments.length === 0) || !selectedAgent || isReadOnlyView}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        handleSend();
+                      }}
+                      disabled={(!input.trim() && attachments.length === 0) || !canSendComposer}
                       size="icon"
                       className="h-8 w-8 shrink-0 rounded-lg"
                       aria-label="Send message"

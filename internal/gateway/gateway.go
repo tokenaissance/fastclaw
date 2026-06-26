@@ -29,6 +29,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/cron"
 	"github.com/fastclaw-ai/fastclaw/internal/plugin"
+	"github.com/fastclaw-ai/fastclaw/internal/rediscoord"
 	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
@@ -43,6 +44,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 	"github.com/fastclaw-ai/fastclaw/internal/webhook"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
+	"github.com/redis/go-redis/v9"
 )
 
 var toolProviderRegistry = func() *toolproviders.Registry {
@@ -250,7 +252,32 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 	if env == nil {
 		env = &config.EnvConfig{}
 	}
+	holderID := uuid.NewString()
+	slog.Info("gateway holder id", "id", holderID)
+
+	var redisClient *redis.Client
 	mb := bus.New()
+	if env.Redis.Enabled {
+		addr := strings.TrimSpace(env.Redis.Addr)
+		if addr == "" {
+			addr = "127.0.0.1:6379"
+		}
+		redisClient = redis.NewClient(&redis.Options{
+			Addr:     addr,
+			Username: env.Redis.Username,
+			Password: env.Redis.Password,
+			DB:       env.Redis.DB,
+		})
+		if err := redisClient.Ping(context.Background()).Err(); err != nil {
+			return nil, fmt.Errorf("connect redis: %w", err)
+		}
+		mb = bus.NewRedis(bus.RedisConfig{
+			Client:   redisClient,
+			Prefix:   redisPrefix(env.Redis.Prefix),
+			Group:    "fastagent-gateway",
+			Consumer: holderID,
+		})
+	}
 
 	homeDir, _ := config.HomeDir()
 	st, err := store.New(&store.StorageConfig{
@@ -321,15 +348,16 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 
 	ws := wsInner
 
-	// holderID is the per-process identifier stamped into
-	// channel_leases.holder_id. Stable for the lifetime of this
-	// gateway so renewals keep matching the row; a peer process
-	// generates its own and can only steal the lease once ours
-	// expires. Logged at boot so ops can correlate "who is currently
-	// driving this WeChat bot" with a specific replica.
-	holderID := uuid.NewString()
-	slog.Info("gateway holder id", "id", holderID)
-	chanMgr := channels.NewManagerWithLeaser(mb, storeLeaser{st: st}, holderID)
+	// holderID is the per-process identifier used by the cross-replica
+	// channel lease. Redis is preferred when configured; otherwise the
+	// historical DB-backed lease keeps single-instance / no-Redis deploys
+	// working unchanged.
+	var leaser channels.Leaser = storeLeaser{st: st}
+	if redisClient != nil {
+		leaser = rediscoord.NewLeaser(redisClient, redisPrefix(env.Redis.Prefix))
+		slog.Info("redis channel leaser enabled", "prefix", redisPrefix(env.Redis.Prefix))
+	}
+	chanMgr := channels.NewManagerWithLeaser(mb, leaser, holderID)
 	// Always-on web channel: routes cron-fired (and any other
 	// async-emitted) outbound messages to the dashboard's SSE
 	// subscribers so the user sees the agent's reply live instead of
@@ -604,15 +632,19 @@ func (g *Gateway) Run() error {
 			case <-ctx.Done():
 				return
 			case <-reloadCh:
-				slog.Info("received reload signal, reloading agents")
+				slog.Info("received reload signal, reloading agents and scheduled jobs")
 				if err := g.ReloadAgents(); err != nil {
 					slog.Warn("agent reload failed", "error", err)
 				}
+				cron.NotifyJobCreated()
 			}
 		}
 	}()
 
 	var wg sync.WaitGroup
+	if err := g.bus.Start(ctx); err != nil {
+		return fmt.Errorf("start message bus: %w", err)
+	}
 	wg.Add(1)
 	go func() { defer wg.Done(); g.users.startEvictor(ctx) }()
 	wg.Add(1)
@@ -697,6 +729,14 @@ func makeStoreFirstAgentFileLoader(st store.Store) func(string, string) (config.
 func defaultStr(v, fallback string) string {
 	if v == "" {
 		return fallback
+	}
+	return v
+}
+
+func redisPrefix(v string) string {
+	v = strings.Trim(v, ":")
+	if v == "" {
+		return "fastagent"
 	}
 	return v
 }
@@ -815,7 +855,7 @@ func registerChannelsFromStore(st store.Store, mb *bus.MessageBus, chanMgr *chan
 }
 
 // allChannelRows returns every channel row regardless of ownership —
-// system rows ('','') plus per-user, per-agent, and per-(user, agent)
+// system rows ("", "") plus per-user, per-agent, and per-(user, agent)
 // rows. The boot path needs the union so each owner's adapter is
 // hot-started; per-row routing is decided later at message-receipt
 // time via LookupChannelByCredential.

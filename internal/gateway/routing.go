@@ -37,7 +37,7 @@ func (g *Gateway) processInbound(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-g.bus.Inbound:
+		case msg := <-g.bus.InboundConsumer():
 			ownerID := msg.OwnerUserID
 			var sharedIdentity bool
 			if ownerID == "" {

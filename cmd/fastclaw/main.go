@@ -114,6 +114,11 @@ func main() {
 	rootCmd.AddCommand(apikeyCmd())
 	rootCmd.AddCommand(agentsCmd())
 	rootCmd.AddCommand(sessionCmd())
+	rootCmd.AddCommand(cronCmd())
+	rootCmd.AddCommand(channelsCmd())
+	rootCmd.AddCommand(toolsCmd())
+	rootCmd.AddCommand(usageCmd())
+	rootCmd.AddCommand(projectsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
