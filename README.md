@@ -142,6 +142,7 @@ table and is edited through the dashboard or `fastagent agents config`.
 
 ### API
 - OpenAI-compatible `/v1/chat/completions` (streaming)
+- Upstream app integration contract: [`docs/upstream-api.md`](docs/upstream-api.md)
 - Web chat `/api/chat/stream` (SSE)
 - Live agent push via `/api/chat/subscribe` (SSE) — surfaces cron-fired and other async replies into the open chat panel without a refresh
 - Session management `/api/chat/sessions`
