@@ -52,13 +52,14 @@ type apiMessage struct {
 }
 
 type chatRequest struct {
-	Model         string            `json:"model"`
-	Messages      []json.RawMessage `json:"messages"`
-	Tools         []Tool            `json:"tools,omitempty"`
-	MaxTokens     int               `json:"max_tokens,omitempty"`
-	Temperature   float64           `json:"temperature,omitempty"`
-	Stream        bool              `json:"stream"`
-	StreamOptions *streamOptions    `json:"stream_options,omitempty"`
+	Model               string            `json:"model"`
+	Messages            []json.RawMessage `json:"messages"`
+	Tools               []Tool            `json:"tools,omitempty"`
+	MaxTokens           int               `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int               `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64          `json:"temperature,omitempty"`
+	Stream              bool              `json:"stream"`
+	StreamOptions       *streamOptions    `json:"stream_options,omitempty"`
 }
 
 // streamOptions.include_usage tells OpenAI-compat APIs to emit one final
@@ -242,13 +243,24 @@ type sseResponse struct {
 	Usage   *sseUsage   `json:"usage,omitempty"` // present only on the final chunk when include_usage=true
 }
 
-func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool) (*http.Request, error) {
+type openAIRequestMode struct {
+	maxCompletionTokens bool
+	omitTemperature     bool
+}
+
+func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool, mode openAIRequestMode) (*http.Request, error) {
 	req := chatRequest{
-		Model:       StripProviderPrefix(model),
-		Messages:    toAPIMessages(messages),
-		MaxTokens:   maxTokens,
-		Temperature: temperature,
-		Stream:      stream,
+		Model:    StripProviderPrefix(model),
+		Messages: toAPIMessages(messages),
+		Stream:   stream,
+	}
+	if !mode.omitTemperature {
+		req.Temperature = &temperature
+	}
+	if mode.maxCompletionTokens {
+		req.MaxCompletionTokens = maxTokens
+	} else {
+		req.MaxTokens = maxTokens
 	}
 	if stream {
 		// include_usage adds a terminal chunk carrying the call's token
@@ -278,41 +290,20 @@ func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, t
 }
 
 func (p *OpenAIProvider) Chat(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*Response, error) {
-	httpReq, err := p.buildRequest(ctx, messages, tools, model, maxTokens, temperature, true)
+	resp, err := p.doChatRequest(ctx, messages, tools, model, maxTokens, temperature, true)
 	if err != nil {
 		return nil, err
 	}
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
-	}
 
 	return p.parseSSE(resp.Body)
 }
 
 // ChatStream returns a StreamReader that yields chunks as they arrive from the LLM.
 func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*StreamReader, error) {
-	httpReq, err := p.buildRequest(ctx, messages, tools, model, maxTokens, temperature, true)
+	resp, err := p.doChatRequest(ctx, messages, tools, model, maxTokens, temperature, true)
 	if err != nil {
 		return nil, err
-	}
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	ch := make(chan StreamChunk, 64)
@@ -445,6 +436,58 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 	}()
 
 	return reader, nil
+}
+
+func (p *OpenAIProvider) doChatRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool) (*http.Response, error) {
+	mode := openAIRequestMode{}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		httpReq, err := p.buildRequest(ctx, messages, tools, model, maxTokens, temperature, stream, mode)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := p.client.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		body := string(respBody)
+		lastErr = fmt.Errorf("API error %d: %s", resp.StatusCode, body)
+
+		if !mode.maxCompletionTokens && shouldRetryWithMaxCompletionTokens(resp.StatusCode, body) {
+			mode.maxCompletionTokens = true
+			continue
+		}
+		if !mode.omitTemperature && shouldRetryWithoutTemperature(resp.StatusCode, body) {
+			mode.omitTemperature = true
+			continue
+		}
+
+		return nil, lastErr
+	}
+	return nil, lastErr
+}
+
+func shouldRetryWithMaxCompletionTokens(status int, body string) bool {
+	if status < 400 || status >= 500 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "max_tokens") && strings.Contains(lower, "max_completion_tokens")
+}
+
+func shouldRetryWithoutTemperature(status int, body string) bool {
+	if status < 400 || status >= 500 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "temperature") && strings.Contains(lower, "only the default")
 }
 
 func (p *OpenAIProvider) parseSSE(reader io.Reader) (*Response, error) {

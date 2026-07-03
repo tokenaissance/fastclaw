@@ -780,27 +780,60 @@ func (s *Server) handleTestStoredProvider(w http.ResponseWriter, r *http.Request
 func runProviderTest(ctx context.Context, req testProviderRequest) map[string]any {
 	base := provider.NormalizeAPIBase(req.APIBase, req.APIType)
 	var testURL string
-	var body io.Reader
+	var payload string
 	if req.APIType == "anthropic-messages" {
 		testURL = base + "/v1/messages"
 		model := req.Model
 		if model == "" {
 			model = "claude-sonnet-4-20250514"
 		}
-		payload := fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
-		body = strings.NewReader(payload)
+		payload = fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
 	} else {
 		testURL = base + "/chat/completions"
 		model := req.Model
 		if model == "" {
 			model = "gpt-4o-mini"
 		}
-		payload := fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
-		body = strings.NewReader(payload)
+		payload = openAIProviderTestPayload(model, false)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", testURL, body)
+	respBody, statusCode, err := sendProviderTestRequest(ctx, req, testURL, payload)
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	if req.APIType != "anthropic-messages" && statusCode >= 400 && shouldRetryProviderTestWithMaxCompletionTokens(respBody) {
+		model := req.Model
+		if model == "" {
+			model = "gpt-4o-mini"
+		}
+		respBody, statusCode, err = sendProviderTestRequest(ctx, req, testURL, openAIProviderTestPayload(model, true))
+		if err != nil {
+			return map[string]any{"ok": false, "error": err.Error()}
+		}
+	}
+
+	if statusCode < 200 || statusCode >= 300 {
+		return map[string]any{
+			"ok":    false,
+			"error": fmt.Sprintf("HTTP %d: %s", statusCode, truncate(strings.TrimSpace(string(respBody)), 240)),
+		}
+	}
+	if err := validateProviderTestBody(req.APIType, respBody); err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	return map[string]any{"ok": true}
+}
+
+func openAIProviderTestPayload(model string, maxCompletionTokens bool) string {
+	if maxCompletionTokens {
+		return fmt.Sprintf(`{"model":"%s","max_completion_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+	}
+	return fmt.Sprintf(`{"model":"%s","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, model)
+}
+
+func sendProviderTestRequest(ctx context.Context, req testProviderRequest, testURL, payload string) ([]byte, int, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", testURL, strings.NewReader(payload))
+	if err != nil {
+		return nil, 0, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if req.APIType == "anthropic-messages" {
@@ -814,20 +847,16 @@ func runProviderTest(ctx context.Context, req testProviderRequest) map[string]an
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return map[string]any{"ok": false, "error": err.Error()}
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return map[string]any{
-			"ok":    false,
-			"error": fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(respBody)), 240)),
-		}
-	}
-	if err := validateProviderTestBody(req.APIType, respBody); err != nil {
-		return map[string]any{"ok": false, "error": err.Error()}
-	}
-	return map[string]any{"ok": true}
+	return respBody, resp.StatusCode, nil
+}
+
+func shouldRetryProviderTestWithMaxCompletionTokens(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "max_tokens") && strings.Contains(lower, "max_completion_tokens")
 }
 
 // validateProviderTestBody confirms the 2xx body is a real Messages /
