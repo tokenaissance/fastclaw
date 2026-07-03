@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // fakeMemoryStore is a deterministic in-memory MemoryStore for the
@@ -61,6 +63,25 @@ func (f *fakeMemoryStore) SaveWorkspaceFile(ctx context.Context, agentID, userID
 	return nil
 }
 
+// ListKnowledgeDocs makes the fake satisfy knowledgeDocLister so the
+// prompt's knowledge section renders from uploaded knowledge/* rows.
+// Sorted for deterministic [K#] ordering, matching the DBStore query.
+func (f *fakeMemoryStore) ListKnowledgeDocs(ctx context.Context, agentID, userID string) ([]store.KnowledgeDoc, error) {
+	prefix := agentID + "|" + userID + "|knowledge/"
+	var out []store.KnowledgeDoc
+	for key, data := range f.files {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		out = append(out, store.KnowledgeDoc{
+			Path:    strings.TrimPrefix(key, agentID+"|"+userID+"|"),
+			Content: string(data),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
 const (
 	testAgentID = "agt_test"
 	ownerUID    = "u_owner"
@@ -112,6 +133,7 @@ func TestChatbotPrompt_EmptyChatter(t *testing.T) {
 func TestChatbotPrompt_PopulatedChatter(t *testing.T) {
 	store := newFakeMemoryStore()
 	store.put(testAgentID, ownerUID, "SOUL.md", "# DTJ Soul")
+	store.put(testAgentID, ownerUID, "knowledge/faq.md", "# FAQ\n- Plan: Pro includes web search")
 	store.put(testAgentID, chatterUID, "USER.md", "# Current Chatter\n- Name: 品冠")
 	store.put(testAgentID, chatterUID, "MEMORY.md", "# Memory Log\n- 用户在做产品")
 	cb := newChatbotBuilder(store)
@@ -128,6 +150,66 @@ func TestChatbotPrompt_PopulatedChatter(t *testing.T) {
 	mustContain(t, prompt, "用户在做产品")
 	mustContain(t, prompt, "Treat as factual and current")
 	mustNotContain(t, prompt, "(empty — nothing recorded yet for this chatter")
+
+	// Agent knowledge is owner-uploaded reference material, distinct
+	// from chatter memory and persona files. A small corpus is injected
+	// in full — no query dependence, stable across turns.
+	mustContain(t, prompt, `<agent_knowledge_base mode="full">`)
+	mustContain(t, prompt, "source_id: K1")
+	mustContain(t, prompt, "file: faq.md")
+	mustContain(t, prompt, "path: knowledge/faq.md")
+	mustContain(t, prompt, "cite it inline with the source_id")
+	mustContain(t, prompt, "Plan: Pro includes web search")
+}
+
+func TestChatbotPrompt_KnowledgeSourceIDsFollowUploadOrder(t *testing.T) {
+	store := newFakeMemoryStore()
+	store.put(testAgentID, ownerUID, "KNOWLEDGE.md", "pinned owner notes")
+	store.put(testAgentID, ownerUID, "knowledge/aaa-faq.md", "faq body")
+	store.put(testAgentID, ownerUID, "knowledge/bbb-pricing.md", "pricing body")
+	cb := newChatbotBuilder(store)
+
+	prompt := cb.BuildSystemPromptAs(chatterUID, cb.memory.WithUserID(chatterUID))
+
+	// Pinned KNOWLEDGE.md is K1, uploaded files follow in path order.
+	mustContain(t, prompt, "## [K1] KNOWLEDGE.md")
+	mustContain(t, prompt, "pinned owner notes")
+	mustContain(t, prompt, "source_id: K2\nfile: aaa-faq.md\npath: knowledge/aaa-faq.md")
+	mustContain(t, prompt, "source_id: K3\nfile: bbb-pricing.md\npath: knowledge/bbb-pricing.md")
+
+	// And the extraction side agrees with what was injected — this pair
+	// is the contract the web citation badges depend on.
+	sources := extractKnowledgeCitationSources(prompt)
+	if len(sources) != 3 {
+		t.Fatalf("extracted %d sources, want 3: %+v", len(sources), sources)
+	}
+	if sources[1].ID != "K2" || sources[1].File != "aaa-faq.md" || sources[1].Path != "knowledge/aaa-faq.md" {
+		t.Fatalf("unexpected source[1]: %+v", sources[1])
+	}
+}
+
+func TestChatbotPrompt_LargeKnowledgeSwitchesToIndexMode(t *testing.T) {
+	store := newFakeMemoryStore()
+	big := strings.Repeat("知识库内容 knowledge body. ", 2000) // ~48k chars, over the full-inject budget
+	store.put(testAgentID, ownerUID, "knowledge/aaa-handbook.md", big)
+	store.put(testAgentID, ownerUID, "knowledge/bbb-faq.md", "small faq body")
+	cb := newChatbotBuilder(store)
+
+	prompt := cb.BuildSystemPromptAs(chatterUID, cb.memory.WithUserID(chatterUID))
+
+	mustContain(t, prompt, `<agent_knowledge_base mode="index">`)
+	mustContain(t, prompt, "knowledge_search")
+	mustContain(t, prompt, "- aaa-handbook.md")
+	mustContain(t, prompt, "- bbb-faq.md")
+	// The corpus body must NOT be inlined in index mode.
+	mustNotContain(t, prompt, "small faq body")
+	if len(prompt) > 20000+len(big)/10 {
+		t.Fatalf("index-mode prompt looks like it inlined the corpus (len=%d)", len(prompt))
+	}
+	// No [K#] source blocks in index mode → no citation metadata.
+	if sources := extractKnowledgeCitationSources(prompt); len(sources) != 0 {
+		t.Fatalf("index mode should not emit citation sources, got %+v", sources)
+	}
 }
 
 func TestChatbotPrompt_NoMemorySearchEscapeHatch(t *testing.T) {

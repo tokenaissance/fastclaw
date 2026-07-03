@@ -206,6 +206,10 @@ type Store interface {
 	SaveAgentFile(ctx context.Context, agentID, userID, filename string, data []byte) error
 	DeleteAgentFile(ctx context.Context, agentID, userID, filename string) error
 	ListAgentFiles(ctx context.Context, agentID, userID string) ([]string, error)
+	SaveAgentKnowledgeChunks(ctx context.Context, agentID, userID, path, hash string, chunks []string) error
+	DeleteAgentKnowledgeChunks(ctx context.Context, agentID, userID, path string) error
+	SearchAgentKnowledgeChunks(ctx context.Context, agentID, userID, query string, limit int) ([]KnowledgeChunkRecord, error)
+	ListAgentKnowledgeDocs(ctx context.Context, agentID, userID string) ([]KnowledgeDoc, error)
 
 	// --- Configs (providers / channels / settings live here) ---
 	//
@@ -432,6 +436,27 @@ type AgentRecord struct {
 	IsPublic  bool                   `json:"isPublic"`
 	CreatedAt time.Time              `json:"createdAt"`
 	UpdatedAt time.Time              `json:"updatedAt"`
+}
+
+// KnowledgeDoc is one raw owner-uploaded knowledge source file
+// (an agent_files row under the knowledge/ prefix).
+type KnowledgeDoc struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// KnowledgeChunkRecord is one searchable slice of an owner-uploaded
+// knowledge source file. Path points back to the source row in agent_files.
+type KnowledgeChunkRecord struct {
+	AgentID    string    `json:"agentId"`
+	UserID     string    `json:"userId"`
+	Path       string    `json:"path"`
+	Hash       string    `json:"hash"`
+	ChunkIndex int       `json:"chunkIndex"`
+	Content    string    `json:"content"`
+	Score      int       `json:"score,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 // SessionRecord holds a conversation session.

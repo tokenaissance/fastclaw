@@ -94,6 +94,7 @@ var agentModules = []moduleEntry{
 	{"identity_anchor", modIdentityAnchor},
 	{"agent_intro", modAgentIntro},
 	{"bootstrap_files", modBootstrapFiles}, // SOUL.md, IDENTITY.md, USER.md, ...
+	{"knowledge", modKnowledge},            // owner-uploaded knowledge base
 	{"memory", modMemory},
 
 	// ── Operational block (middle) ──
@@ -115,6 +116,7 @@ var chatbotModules = []moduleEntry{
 	{"identity_anchor", modIdentityAnchor},
 	{"chatbot_intro", modChatbotIntro},
 	{"bootstrap_files", modBootstrapFiles},
+	{"knowledge", modKnowledge}, // owner-uploaded knowledge base
 	{"memory", modMemory},
 
 	// ── Operational block (middle) ──

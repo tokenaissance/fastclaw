@@ -211,6 +211,13 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// page (keyed on the agent owner) would never see them.
 		ag.registry.SetOwnerUserID(m.uid)
 		ag.registry.SetAgentOwnerUserID(rc.UserID)
+		// Owner-uploaded knowledge base: registered only when the store
+		// can search it. The prompt's knowledge index section tells the
+		// model when to call it (large corpora); small corpora are
+		// injected in full and the tool goes unused.
+		if searcher, ok := m.opts.memoryStore.(tools.KnowledgeSearcher); ok {
+			tools.RegisterKnowledgeSearch(ag.registry, searcher)
+		}
 	}
 	if m.opts.workspaceStore != nil {
 		ag.registry.SetWorkspaceStore(m.opts.workspaceStore, rc.ID)

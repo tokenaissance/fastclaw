@@ -807,6 +807,17 @@ export async function getChangedFiles(
   return { files: (data.files || []) as WorkspaceFile[], available: !!data.available };
 }
 
+export async function getAgentKnowledgeFile(
+  agentId: string,
+  storedName: string,
+): Promise<{ name: string; storedName: string; path: string; content: string; size: number; hash?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/knowledge-files/${encodeURIComponent(storedName)}`,
+  );
+  if (!res.ok) throw new Error(`knowledge file failed: ${res.status}`);
+  return (await res.json()) as { name: string; storedName: string; path: string; content: string; size: number; hash?: string };
+}
+
 // Chat
 export interface ChatHistoryMessage {
   role: "user" | "assistant" | "tool";
@@ -1079,6 +1090,7 @@ export async function steerChat(
 
 export interface ToolResultMetadata {
   sandbox?: boolean;
+  knowledgeSources?: KnowledgeSource[];
   // Stamped on the forced-final-delivery assistant message that the
   // backend emits when the per-turn tool-iteration cap was hit. Lets the
   // UI surface a small badge so the user knows the answer was synthesized
@@ -1089,6 +1101,14 @@ export interface ToolResultMetadata {
   // The bubble is a plan, not an execution result — UI shows a distinct
   // badge so the user knows to review it and reply with "go" (or edits).
   planMode?: boolean;
+}
+
+export interface KnowledgeSource {
+  id: string;
+  file: string;
+  path: string;
+  chunk?: number;
+  score?: string;
 }
 
 export interface ChatStreamEvent {

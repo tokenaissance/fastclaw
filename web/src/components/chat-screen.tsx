@@ -6,8 +6,8 @@ import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { fileUrl, getAgent, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
-import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, listAgentFiles, listProjects, renameChatSession, revealAgentWorkspace, sendChatStream, steerChat, uploadAgentFiles, getSkills, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile } from "@/lib/api";
+import { Bot, Send, Copy, Check, Pencil, Wrench, ChevronDown, ChevronRight, Download, X, File, FileText, Folder, FolderSearch, Image as ImageIcon, FileCode, Film, Music, Puzzle, SlidersHorizontal, ShieldCheck, Paperclip, Square, FolderOpen, RefreshCw, Eye, Code2, RotateCcw, ListChecks, Terminal, ExternalLink, MoreHorizontal, PanelLeftClose, PanelLeftOpen, BookOpen } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
 
@@ -69,6 +69,8 @@ function renderContentWithDataImages(
   suppressAllInlineImages?: boolean,
   agentId?: string,
   sessionId?: string,
+  knowledgeSources?: KnowledgeSource[],
+  onKnowledgeCitationClick?: (source: KnowledgeSource) => void,
 ): React.ReactNode | null {
   const parts = splitDataImages(content);
   if (!parts.some((p) => p.type === "image")) return null;
@@ -82,7 +84,16 @@ function renderContentWithDataImages(
             <img key={i} src={p.src} alt={p.alt} className="rounded-lg max-w-full h-auto my-2" />
           );
         }
-        return <ChatMarkdown key={i} text={p.text} agentId={agentId} sessionId={sessionId} />;
+        return (
+          <ChatMarkdown
+            key={i}
+            text={p.text}
+            agentId={agentId}
+            sessionId={sessionId}
+            knowledgeSources={knowledgeSources}
+            onKnowledgeCitationClick={onKnowledgeCitationClick}
+          />
+        );
       })}
     </>
   );
@@ -185,7 +196,7 @@ function splitOnMarker(s: string): string[] {
 // (not the workspace) — exclude from the "Your files" panel.
 const SYSTEM_FILES = new Set([
   "SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md",
-  "MEMORY.md", "HEARTBEAT.md", "AGENTS.md", "TOOLS.md", "agent.json",
+  "MEMORY.md", "KNOWLEDGE.md", "HEARTBEAT.md", "AGENTS.md", "TOOLS.md", "agent.json",
 ]);
 
 function isSystemFile(path: string): boolean {
@@ -518,6 +529,7 @@ export function ChatScreen() {
   }>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [filesSheetOpen, setFilesSheetOpen] = useState(false);
+  const [knowledgePreview, setKnowledgePreview] = useState<KnowledgeSource | null>(null);
   // Opening the workspace/preview panel collapses the platform sidebar to
   // free horizontal room (null when there's no provider, e.g. act-as view).
   const sidebar = useSidebarOptional();
@@ -527,6 +539,10 @@ export function ChatScreen() {
     // panel opens; don't fight the user if they re-expand while it's open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filesSheetOpen]);
+  const openKnowledgeCitation = useCallback((source: KnowledgeSource) => {
+    setKnowledgePreview(source);
+    setFilesSheetOpen(true);
+  }, []);
   const [sessionTitle, setSessionTitle] = useState<string>("");
   const [attachments, setAttachments] = useState<File[]>([]);
   // Lightbox for clicking either an attachment thumbnail (compose box)
@@ -2059,6 +2075,7 @@ export function ChatScreen() {
                           agentId={selectedAgent}
                           sessionId={sessionId}
                           subagentProgress={subagentProgress}
+                          onKnowledgeCitationClick={openKnowledgeCitation}
                         />
                         {filePanels}
                       </div>,
@@ -2072,6 +2089,7 @@ export function ChatScreen() {
                           agentId={selectedAgent}
                           sessionId={sessionId}
                           subagentProgress={subagentProgress}
+                          onKnowledgeCitationClick={openKnowledgeCitation}
                         />
                         {filePanels}
                       </div>,
@@ -2197,8 +2215,16 @@ export function ChatScreen() {
                           (attachedImages.get(msg.id)?.length ?? 0) > 0,
                           selectedAgent,
                           sessionId,
+                          msg.metadata?.knowledgeSources,
+                          openKnowledgeCitation,
                         ) ?? (
-                          <ChatMarkdown text={msg.content} agentId={selectedAgent} sessionId={sessionId} />
+                          <ChatMarkdown
+                            text={msg.content}
+                            agentId={selectedAgent}
+                            sessionId={sessionId}
+                            knowledgeSources={msg.metadata?.knowledgeSources}
+                            onKnowledgeCitationClick={openKnowledgeCitation}
+                          />
                         )
                       )}
                       {msg.role === "agent" && msg.metadata?.iterationCapReached && (
@@ -2368,7 +2394,7 @@ export function ChatScreen() {
                 </span>
                 . Reply from there — slash commands like{" "}
                 <span className="font-mono text-foreground">/usage</span> can
-                run here, but normal messages typed here won't reach the user
+                run here, but normal messages typed here won&apos;t reach the user
                 on the other side.
               </div>
             )}
@@ -2637,7 +2663,12 @@ export function ChatScreen() {
           // urlSessionId is set and we pass the real sessionId.
           sessionId={urlSessionId ? sessionId : ""}
           projectId={!urlSessionId && urlProjectId ? urlProjectId : undefined}
-          onClose={() => setFilesSheetOpen(false)}
+          knowledgePreview={knowledgePreview}
+          onClearKnowledgePreview={() => setKnowledgePreview(null)}
+          onClose={() => {
+            setFilesSheetOpen(false);
+            setKnowledgePreview(null);
+          }}
         />
       )}
     </div>
@@ -2726,7 +2757,7 @@ function ChatHeaderTitle({ title, fallback, onSave }: ChatHeaderTitleProps) {
  *  `nested`, the outer flex/max-width wrappers are dropped so a parent
  *  container (ToolRoundsBundle) can stack rounds without each one
  *  re-imposing its own bubble alignment. */
-function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, roundIndex, subagentProgress }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string; sessionId: string; nested?: boolean; roundIndex?: number; subagentProgress?: { iteration?: number; max?: number; phase?: "thinking" | "running" | "final-delivery" | "done"; tools?: string[] } | null }) {
+function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, roundIndex, subagentProgress, onKnowledgeCitationClick }: { msg: ChatMessage; surfacedSrcs?: ReadonlySet<string>; agentId: string; sessionId: string; nested?: boolean; roundIndex?: number; subagentProgress?: { iteration?: number; max?: number; phase?: "thinking" | "running" | "final-delivery" | "done"; tools?: string[] } | null; onKnowledgeCitationClick?: (source: KnowledgeSource) => void }) {
   const [groupOpen, setGroupOpen] = useState(false);
   const [expandedTool, setExpandedTool] = useState<Record<string, boolean>>({});
 
@@ -2755,8 +2786,14 @@ function ToolCallGroup({ msg, surfacedSrcs, agentId, sessionId, nested = false, 
       {/* Content before tools */}
       {msg.content && (
         <div className="bg-muted rounded-2xl rounded-bl-md px-4 py-2.5">
-          {renderContentWithDataImages(msg.content, surfacedSrcs, false, agentId, sessionId) ?? (
-            <ChatMarkdown text={msg.content} agentId={agentId} sessionId={sessionId} />
+          {renderContentWithDataImages(msg.content, surfacedSrcs, false, agentId, sessionId, msg.metadata?.knowledgeSources, onKnowledgeCitationClick) ?? (
+            <ChatMarkdown
+              text={msg.content}
+              agentId={agentId}
+              sessionId={sessionId}
+              knowledgeSources={msg.metadata?.knowledgeSources}
+              onKnowledgeCitationClick={onKnowledgeCitationClick}
+            />
           )}
         </div>
       )}
@@ -2918,12 +2955,14 @@ function ToolRoundsBundle({
   agentId,
   sessionId,
   subagentProgress,
+  onKnowledgeCitationClick,
 }: {
   rounds: ChatMessage[];
   surfacedSrcs?: ReadonlySet<string>;
   agentId: string;
   sessionId: string;
   subagentProgress?: { iteration?: number; max?: number; phase?: "thinking" | "running" | "final-delivery" | "done"; tools?: string[] } | null;
+  onKnowledgeCitationClick?: (source: KnowledgeSource) => void;
 }) {
   const [open, setOpen] = useState(false);
   const allTools = rounds.flatMap((r) => r.toolCalls || []);
@@ -2967,6 +3006,7 @@ function ToolRoundsBundle({
                   nested
                   roundIndex={idx + 1}
                   subagentProgress={subagentProgress}
+                  onKnowledgeCitationClick={onKnowledgeCitationClick}
                 />
               ))}
             </div>
@@ -3291,11 +3331,15 @@ function WorkspacePanel({
   agentId,
   sessionId,
   projectId,
+  knowledgePreview,
+  onClearKnowledgePreview,
   onClose,
 }: {
   agentId: string;
   sessionId: string;
   projectId?: string;
+  knowledgePreview?: KnowledgeSource | null;
+  onClearKnowledgePreview?: () => void;
   onClose: () => void;
 }) {
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
@@ -3484,10 +3528,10 @@ function WorkspacePanel({
   // Also grow when entering Preview / opening a file (in case the user dragged
   // narrow earlier) so the iframe / viewer column isn't cramped.
   useEffect(() => {
-    if (tab === "preview" || previewing) {
+    if (tab === "preview" || previewing || knowledgePreview) {
       setWidth((w) => (w < PREVIEW_AUTO_WIDTH ? Math.min(PREVIEW_AUTO_WIDTH, FILES_PANEL_MAX) : w));
     }
-  }, [tab, previewing]);
+  }, [tab, previewing, knowledgePreview]);
 
   // The Preview tab only exists for coding projects with a live dev server.
   // When there's no app preview, hide the tab and snap back to Files.
@@ -3524,7 +3568,7 @@ function WorkspacePanel({
         <div className="flex h-12 items-center justify-between gap-2 border-b border-border px-4">
           <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
             <FolderOpen className="h-4 w-4 shrink-0" />
-            {!compactHeader && <span className="truncate">Workspace</span>}
+            {!compactHeader && <span className="truncate">{knowledgePreview ? "Knowledge" : "Workspace"}</span>}
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {/* Secondary actions: inline on a wide panel, folded into a "⋯"
@@ -3725,7 +3769,10 @@ function WorkspacePanel({
                       files={list}
                       rootPrefix={projectId ? `projects/${projectId}/` : `sessions/${sessionId}/`}
                       selectedPath={previewing?.path}
-                      onSelect={(f) => setPreviewing(f)}
+                      onSelect={(f) => {
+                        onClearKnowledgePreview?.();
+                        setPreviewing(f);
+                      }}
                     />
                   );
                 })()}
@@ -3735,7 +3782,14 @@ function WorkspacePanel({
             {/* Right: viewer for the selected file — overflow-hidden so wide
                 content (a PDF, long code lines) never scrolls the panel. */}
             <div className="min-w-0 flex-1 overflow-hidden">
-              {previewing ? (
+              {knowledgePreview ? (
+                <KnowledgeFileViewer
+                  key={`${knowledgePreview.id}-${knowledgePreview.path}`}
+                  agentId={agentId}
+                  source={knowledgePreview}
+                  onClose={onClearKnowledgePreview}
+                />
+              ) : previewing ? (
                 <FileViewer
                   // Remount on file change so text/error/view state resets and
                   // the new file's content is fetched (not the stale previous).
@@ -3812,6 +3866,85 @@ function formatRelativeTime(ts?: number): string {
 // FileViewer renders a selected workspace file inline (right column of the
 // Files tab): image / pdf / markdown / highlighted text / rendered-or-source
 // HTML. onClose, when given, deselects the file.
+function KnowledgeFileViewer({ agentId, source, onClose }: { agentId: string; source: KnowledgeSource; onClose?: () => void }) {
+  const storedName = source.path.startsWith("knowledge/") ? source.path.slice("knowledge/".length) : source.path;
+  const [file, setFile] = useState<{ name: string; content: string; size: number; hash?: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [view, setView] = useState<"rendered" | "source">("source");
+
+  useEffect(() => {
+    let cancelled = false;
+    getAgentKnowledgeFile(agentId, storedName)
+      .then((data) => {
+        if (!cancelled) setFile({ name: data.name || source.file, content: data.content || "", size: data.size || 0, hash: data.hash });
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, source.file, storedName]);
+
+  const displayName = file?.name || source.file || storedName;
+  const preview = fileKind(displayName).preview;
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center justify-between border-b border-border px-4 py-2 shrink-0">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <BookOpen className="h-4 w-4 text-muted-foreground shrink-0" />
+            <span className="truncate text-sm font-medium">{displayName}</span>
+          </div>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            {source.id}
+            {source.chunk ? ` · chunk ${source.chunk}` : ""}
+            {source.score ? ` · score ${source.score}` : ""}
+            {file?.hash ? ` · ${file.hash.slice(0, 8)}` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {(preview === "markdown" || preview === "html") && (
+            <button
+              onClick={() => setView(view === "rendered" ? "source" : "rendered")}
+              className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              title={view === "rendered" ? "View source" : "View rendered"}
+            >
+              {view === "rendered" ? <Code2 className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          )}
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              title="Close knowledge file"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="min-h-0 flex-1">
+        {error ? (
+          <p className="p-4 text-sm text-destructive">Failed to load: {error}</p>
+        ) : !file ? (
+          <p className="p-4 text-sm text-muted-foreground">Loading…</p>
+        ) : preview !== "text" && view === "rendered" ? (
+          <div className="h-full overflow-auto p-4">
+            <ChatMarkdown text={file.content} />
+          </div>
+        ) : file.content.includes("```") ? (
+          <pre className="h-full overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-xs">{file.content}</pre>
+        ) : (
+          <div className="h-full overflow-auto">
+            <ChatMarkdown bareCode text={"```" + langForPath(displayName) + "\n" + file.content + "\n```"} />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function FileViewer({ agentId, file, onClose }: { agentId: string; file: ProducedFile; onClose?: () => void }) {
   const { preview } = fileKind(file.path);
   const src = fileUrl(agentId, file.path, false);

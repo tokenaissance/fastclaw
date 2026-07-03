@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver
 	_ "modernc.org/sqlite"             // SQLite driver (pure Go)
@@ -1535,6 +1537,19 @@ func (d *DBStore) migrationSQL() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (agent_id, user_id, filename)
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_knowledge_chunks (
+			agent_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			path TEXT NOT NULL,
+			hash TEXT NOT NULL DEFAULT '',
+			chunk_index INTEGER NOT NULL,
+			content TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (agent_id, user_id, path, chunk_index)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_file ON agent_knowledge_chunks (agent_id, user_id, path)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_hash ON agent_knowledge_chunks (agent_id, user_id, hash)`,
 		// configs uses (user_id, agent_id) as the ownership pair, matching
 		// agent_files / sessions / session_messages / session_events. The
 		// older (scope, scope_id) pair is gone — scope was redundant
@@ -1974,10 +1989,11 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 	rows.Close()
 	for _, aid := range ownedAgents {
 		// Match DeleteAgent's table set — deleting a user's agents must
-		// clean the same per-agent rows (projects/project_runtimes/
-		// agent_goals included) or they orphan. Upstream's #15 only
-		// patched DeleteAgent; fork closes the same gap here.
-		for _, t := range []string{"agent_files", "sessions", "session_messages", "session_events", "cron_jobs", "projects", "project_runtimes", "agent_goals"} {
+		// clean the same per-agent rows (agent_knowledge_chunks (from #5)
+		// + projects/project_runtimes/agent_goals included) or they
+		// orphan. Upstream's #15 only patched DeleteAgent; fork closes
+		// the same gap here.
+		for _, t := range []string{"agent_files", "agent_knowledge_chunks", "sessions", "session_messages", "session_events", "cron_jobs", "projects", "project_runtimes", "agent_goals"} {
 			if _, err := tx.ExecContext(ctx,
 				fmt.Sprintf("DELETE FROM %s WHERE agent_id = %s", t, d.ph(1)), aid); err != nil {
 				return err
@@ -2328,6 +2344,7 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 	defer tx.Rollback()
 	for _, t := range []string{
 		"agent_files",
+		"agent_knowledge_chunks",
 		"sessions",
 		"session_messages",
 		"session_events",
@@ -3125,6 +3142,230 @@ func (d *DBStore) ListAgentFiles(ctx context.Context, agentID, userID string) ([
 		files = append(files, f)
 	}
 	return files, rows.Err()
+}
+
+func (d *DBStore) SaveAgentKnowledgeChunks(ctx context.Context, agentID, userID, path, hash string, chunks []string) error {
+	if agentID == "" {
+		return errors.New("store: SaveAgentKnowledgeChunks requires agent_id")
+	}
+	if userID == "" {
+		return errors.New("store: SaveAgentKnowledgeChunks requires user_id")
+	}
+	if path == "" {
+		return errors.New("store: SaveAgentKnowledgeChunks requires path")
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM agent_knowledge_chunks WHERE agent_id = %s AND user_id = %s AND path = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		agentID, userID, path); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for i, chunk := range chunks {
+		chunk = strings.TrimSpace(chunk)
+		if chunk == "" {
+			continue
+		}
+		if d.dialect == "postgres" {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO agent_knowledge_chunks (agent_id, user_id, path, hash, chunk_index, content, created_at, updated_at)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+					ON CONFLICT (agent_id, user_id, path, chunk_index) DO UPDATE SET
+					  hash=$4, content=$6, updated_at=$8`,
+				agentID, userID, path, hash, i, chunk, now, now); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO agent_knowledge_chunks (agent_id, user_id, path, hash, chunk_index, content, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT (agent_id, user_id, path, chunk_index) DO UPDATE SET
+				  hash=excluded.hash, content=excluded.content, updated_at=excluded.updated_at`,
+			agentID, userID, path, hash, i, chunk, now, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DBStore) DeleteAgentKnowledgeChunks(ctx context.Context, agentID, userID, path string) error {
+	if agentID == "" {
+		return errors.New("store: DeleteAgentKnowledgeChunks requires agent_id")
+	}
+	if userID == "" {
+		return errors.New("store: DeleteAgentKnowledgeChunks requires user_id")
+	}
+	if path == "" {
+		return errors.New("store: DeleteAgentKnowledgeChunks requires path")
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM agent_knowledge_chunks WHERE agent_id = %s AND user_id = %s AND path = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		agentID, userID, path)
+	return err
+}
+
+// ListAgentKnowledgeDocs returns every raw knowledge source file
+// (agent_files rows under knowledge/) for the agent, resolving the
+// owner fallback so shared-agent chatters see the owner's corpus.
+// When both a caller row and an owner row exist for the same path the
+// caller's wins, matching GetAgentFile semantics.
+func (d *DBStore) ListAgentKnowledgeDocs(ctx context.Context, agentID, userID string) ([]KnowledgeDoc, error) {
+	if agentID == "" {
+		return nil, errors.New("store: ListAgentKnowledgeDocs requires agent_id")
+	}
+	if userID == "" {
+		return nil, errors.New("store: ListAgentKnowledgeDocs requires user_id")
+	}
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT filename, content FROM agent_files
+			WHERE agent_id = %s AND filename LIKE 'knowledge/%%'
+			  AND user_id IN (%s, COALESCE((SELECT user_id FROM agents WHERE id = %s), ''))
+			ORDER BY filename, CASE WHEN user_id = %s THEN 0 ELSE 1 END`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		agentID, userID, agentID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var docs []KnowledgeDoc
+	for rows.Next() {
+		var doc KnowledgeDoc
+		if err := rows.Scan(&doc.Path, &doc.Content); err != nil {
+			return nil, err
+		}
+		if n := len(docs); n > 0 && docs[n-1].Path == doc.Path {
+			continue // owner row shadowed by the caller's own row
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+func (d *DBStore) SearchAgentKnowledgeChunks(ctx context.Context, agentID, userID, query string, limit int) ([]KnowledgeChunkRecord, error) {
+	if agentID == "" {
+		return nil, errors.New("store: SearchAgentKnowledgeChunks requires agent_id")
+	}
+	if userID == "" {
+		return nil, errors.New("store: SearchAgentKnowledgeChunks requires user_id")
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 6
+	}
+	// Knowledge rows are written under the agent owner's user_id, but the
+	// caller may be a chatter / space owner on a shared agent — resolve the
+	// owner in-query like GetAgentFile does so both ids find the corpus.
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT agent_id, user_id, path, hash, chunk_index, content, created_at, updated_at
+			FROM agent_knowledge_chunks
+			WHERE agent_id = %s
+			  AND user_id IN (%s, COALESCE((SELECT user_id FROM agents WHERE id = %s), ''))`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		agentID, userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	terms := knowledgeSearchTerms(query)
+	var scored []KnowledgeChunkRecord
+	seen := map[string]bool{}
+	for rows.Next() {
+		var rec KnowledgeChunkRecord
+		if err := rows.Scan(&rec.AgentID, &rec.UserID, &rec.Path, &rec.Hash, &rec.ChunkIndex, &rec.Content, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+			return nil, err
+		}
+		key := fmt.Sprintf("%s\x00%d", rec.Path, rec.ChunkIndex)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		rec.Score = scoreKnowledgeChunk(query, terms, rec.Path, rec.Content)
+		if rec.Score > 0 {
+			scored = append(scored, rec)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].Score != scored[j].Score {
+			return scored[i].Score > scored[j].Score
+		}
+		if scored[i].Path != scored[j].Path {
+			return scored[i].Path < scored[j].Path
+		}
+		return scored[i].ChunkIndex < scored[j].ChunkIndex
+	})
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	return scored, nil
+}
+
+func knowledgeSearchTerms(query string) []string {
+	query = strings.ToLower(strings.TrimSpace(query))
+	seen := map[string]bool{}
+	var terms []string
+	add := func(term string) {
+		term = strings.TrimSpace(term)
+		if term == "" || seen[term] {
+			return
+		}
+		seen[term] = true
+		terms = append(terms, term)
+	}
+	var b strings.Builder
+	flush := func() {
+		add(b.String())
+		b.Reset()
+	}
+	for _, r := range query {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+		default:
+			flush()
+		}
+		if unicode.Is(unicode.Han, r) {
+			add(string(r))
+		}
+	}
+	flush()
+	runes := []rune(query)
+	for i := 0; i+1 < len(runes); i++ {
+		if unicode.Is(unicode.Han, runes[i]) && unicode.Is(unicode.Han, runes[i+1]) {
+			add(string(runes[i : i+2]))
+		}
+	}
+	return terms
+}
+
+func scoreKnowledgeChunk(query string, terms []string, path, content string) int {
+	haystack := strings.ToLower(path + "\n" + content)
+	score := 0
+	if q := strings.ToLower(strings.TrimSpace(query)); q != "" && strings.Contains(haystack, q) {
+		score += 20
+	}
+	for _, term := range terms {
+		if len([]rune(term)) <= 1 {
+			if strings.Contains(haystack, term) {
+				score++
+			}
+			continue
+		}
+		score += strings.Count(haystack, term) * (2 + min(len([]rune(term)), 6))
+	}
+	return score
 }
 
 // --- Scoped configs (providers + channels + settings) ---

@@ -896,7 +896,7 @@ func (s *Server) handleCreateUserAgent(w http.ResponseWriter, r *http.Request) {
 // fresh on the new agent.
 var forkAgentFiles = []string{
 	"SOUL.md", "IDENTITY.md", "AGENTS.md",
-	"BOOTSTRAP.md", "TOOLS.md", "HEARTBEAT.md", "agent.json",
+	"BOOTSTRAP.md", "TOOLS.md", "HEARTBEAT.md", "KNOWLEDGE.md", "agent.json",
 }
 
 // forkAgentScopeConfigs is the allowlist of agent-scope config rows
@@ -926,6 +926,24 @@ func (s *Server) forkAgentContent(r *http.Request, src, dst *store.AgentRecord) 
 			continue
 		}
 		if err := s.dataStore.SaveAgentFile(r.Context(), dst.ID, dst.UserID, name, data); err != nil {
+			return err
+		}
+	}
+	// Knowledge base files ride along with the identity — the fork should
+	// answer from the same corpus. Reindex each copy so the destination
+	// agent's knowledge_search chunks exist without a re-upload.
+	docs, err := s.dataStore.ListAgentKnowledgeDocs(r.Context(), src.ID, src.UserID)
+	if err != nil {
+		return err
+	}
+	for _, doc := range docs {
+		if doc.Content == "" {
+			continue
+		}
+		if err := s.dataStore.SaveAgentFile(r.Context(), dst.ID, dst.UserID, doc.Path, []byte(doc.Content)); err != nil {
+			return err
+		}
+		if err := s.indexKnowledgeFile(r.Context(), dst.ID, dst.UserID, doc.Path, []byte(doc.Content)); err != nil {
 			return err
 		}
 	}

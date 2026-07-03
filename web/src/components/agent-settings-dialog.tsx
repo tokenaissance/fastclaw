@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   BrainIcon,
+  BookOpenIcon,
   ClockIcon,
   CoinsIcon,
   IdCardIcon,
@@ -24,6 +25,7 @@ import AgentProfilePanel from "@/components/agent-profile-panel";
 import AgentCustomizePage from "@/app/agents/[id]/customize/page";
 import AgentModelsPage from "@/app/agents/[id]/models/page";
 import AgentContextPage from "@/app/agents/[id]/context/page";
+import AgentKnowledgePage from "@/app/agents/[id]/knowledge/page";
 import AgentSkillsPage from "@/app/agents/[id]/skills/page";
 import AgentPluginsPage from "@/app/agents/[id]/plugins/page";
 import AgentChannelsPage from "@/app/agents/[id]/channels/page";
@@ -40,6 +42,7 @@ export type AgentSettingsTab =
   | "customize"
   | "models"
   | "context"
+  | "knowledge"
   | "skills"
   | "mcp"
   | "plugins"
@@ -57,6 +60,7 @@ const AGENT_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> 
   { id: "customize", label: "Customize", icon: Wand2Icon },
   { id: "models", label: "Models", icon: BrainIcon },
   { id: "context", label: "Context", icon: LayersIcon },
+  { id: "knowledge", label: "Knowledge", icon: BookOpenIcon },
   { id: "skills", label: "Skills", icon: SparklesIcon },
   { id: "mcp", label: "MCP", icon: ServerIcon },
   { id: "plugins", label: "Plugins", icon: Plug },
@@ -172,6 +176,7 @@ export function AgentSettingsDialog({
           {tab === "models" &&
             (role === "viewer" ? <UserModelsPage /> : <AgentModelsPage />)}
           {tab === "context" && <AgentContextPage />}
+          {tab === "knowledge" && <AgentKnowledgePage />}
           {tab === "skills" && <AgentSkillsPage />}
           {tab === "mcp" && <AgentMCPPage />}
           {tab === "plugins" && <AgentPluginsPage />}

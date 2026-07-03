@@ -143,6 +143,7 @@ var systemFiles = map[string]bool{
 	"USER.md":      true,
 	"BOOTSTRAP.md": true,
 	"MEMORY.md":    true,
+	"KNOWLEDGE.md": true,
 	"HEARTBEAT.md": true,
 	"AGENTS.md":    true,
 	"TOOLS.md":     true,
@@ -584,6 +585,9 @@ func makeWriteFile(r *Registry) ToolFunc {
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
 		}
+		if r.ownerManagedFileWriteBlocked(args.Path) {
+			return OwnerManagedFileWriteRefusal, nil
+		}
 
 		// When a workspace store is configured, route userRoot-destined
 		// writes through it. Identity files (systemRoot) still hit the
@@ -671,6 +675,9 @@ func makeEditFile(r *Registry) ToolFunc {
 		// Identity-file confidentiality gate.
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
+		}
+		if r.ownerManagedFileWriteBlocked(args.Path) {
+			return OwnerManagedFileWriteRefusal, nil
 		}
 		// Skill-manifest gate — block edits to a bundled SKILL.md for
 		// non-admin chatters (editing returns surrounding content + lets
@@ -1019,6 +1026,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
 		}
+		if r.ownerManagedFileWriteBlocked(args.Path) {
+			return OwnerManagedFileWriteRefusal, nil
+		}
 		switch r.routeFor(args.Path, OpWrite) {
 		case RouteSystemStore:
 			name := filepath.Clean(args.Path)
@@ -1157,6 +1167,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 		if r.identityFileBlocked(args.Path) {
 			return IdentityFileRefusal, nil
 		}
+		if r.ownerManagedFileWriteBlocked(args.Path) {
+			return OwnerManagedFileWriteRefusal, nil
+		}
 		if r.skillManifestBlocked(args.Path) {
 			return SkillManifestRefusal, nil
 		}
@@ -1184,6 +1197,9 @@ func registerSandboxedFile(r *Registry, ex sandbox.Executor) {
 
 		switch r.routeFor(args.Path, OpWrite) {
 		case RouteSystemStore:
+			if r.ownerManagedFileWriteBlocked(args.Path) {
+				return OwnerManagedFileWriteRefusal, nil
+			}
 			name := filepath.Clean(args.Path)
 			uid := r.systemFileUserID(name)
 			data, err := r.readSystemFileForUser(ctx, uid, name)

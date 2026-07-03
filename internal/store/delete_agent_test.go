@@ -132,6 +132,7 @@ func TestDeleteAgentRemovesScopedRows(t *testing.T) {
 		where string
 	}{
 		{"agent_files", "agent_id = ?"},
+		{"agent_knowledge_chunks", "agent_id = ?"},
 		{"sessions", "agent_id = ?"},
 		{"session_messages", "agent_id = ?"},
 		{"session_events", "agent_id = ?"},

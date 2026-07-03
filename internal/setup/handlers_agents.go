@@ -526,11 +526,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name              string    `json:"name,omitempty"`
-		Description       *string   `json:"description,omitempty"` // ptr so empty-string clears it
-		Model             *string   `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
-		IsPublic          *bool     `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
-		ShareModelConfig  *bool     `json:"shareModelConfig,omitempty"`
+		Name             string  `json:"name,omitempty"`
+		Description      *string `json:"description,omitempty"` // ptr so empty-string clears it
+		Model            *string `json:"model,omitempty"`       // ptr so empty-string clears the agent-scope override
+		IsPublic         *bool   `json:"isPublic,omitempty"`    // ptr so caller can leave it unchanged
+		ShareModelConfig *bool   `json:"shareModelConfig,omitempty"`
 		// PromptMode is a ptr so the caller can distinguish "leave
 		// unchanged" (omitted / null) from "clear override" (empty
 		// string). Allowed string values: "agent" | "chatbot" |
@@ -814,13 +814,13 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 var agentSystemFileAllowlist = map[string]bool{
 	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
 	"BOOTSTRAP.md": true, "TOOLS.md": true, "MEMORY.md": true,
-	"HEARTBEAT.md": true, "USER.md": true, "agent.json": true,
+	"HEARTBEAT.md": true, "USER.md": true, "KNOWLEDGE.md": true, "agent.json": true,
 }
 
 var agentIdentityFiles = map[string]bool{
 	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
 	"BOOTSTRAP.md": true, "TOOLS.md": true, "HEARTBEAT.md": true,
-	"agent.json": true,
+	"KNOWLEDGE.md": true, "agent.json": true,
 }
 
 func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request) {
@@ -905,6 +905,12 @@ func (s *Server) handlePutAgentSystemFile(w http.ResponseWriter, r *http.Request
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if name == "KNOWLEDGE.md" && len([]byte(body.Content)) > maxKnowledgeFileBytes {
+		jsonResponse(w, http.StatusRequestEntityTooLarge, map[string]any{
+			"error": "KNOWLEDGE.md is too large; maximum size is 256KB",
+		})
 		return
 	}
 	target, ok := s.resolveSystemFileTarget(w, r, id, name)
@@ -1051,15 +1057,15 @@ func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 // file browser / zip filter. acceptPath returns true for paths the
 // scope considers in-bounds:
 //
-//   loose chat:  paths under sessions/<chat_id>/
-//   project chat: paths under projects/<pid>/<chat_id>/ (the chat's
-//                 own files), PLUS files directly at projects/<pid>/
-//                 (project-root "shared/legacy" files — pre-subdir
-//                 layout still lives there, and operators may
-//                 deliberately drop shared files at the root). Other
-//                 chats' subdirs (projects/<pid>/<other-sid>/...)
-//                 are excluded — those belong to that chat's panel.
-//   no session:  everything (admin browser).
+//	loose chat:  paths under sessions/<chat_id>/
+//	project chat: paths under projects/<pid>/<chat_id>/ (the chat's
+//	              own files), PLUS files directly at projects/<pid>/
+//	              (project-root "shared/legacy" files — pre-subdir
+//	              layout still lives there, and operators may
+//	              deliberately drop shared files at the root). Other
+//	              chats' subdirs (projects/<pid>/<other-sid>/...)
+//	              are excluded — those belong to that chat's panel.
+//	no session:  everything (admin browser).
 //
 // archiveSuffix returns the human-readable scope id used in the zip
 // filename — chat_id for loose chats, "<pid>-<chat_id>" for project

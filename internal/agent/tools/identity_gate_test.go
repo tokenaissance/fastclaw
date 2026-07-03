@@ -31,6 +31,7 @@ func TestIdentityFileBlockedRespectsCallerFlag(t *testing.T) {
 		// chatter's own state and they should be able to inspect them.
 		{"MEMORY.md", false, false},
 		{"USER.md", false, false},
+		{"KNOWLEDGE.md", false, false},
 
 		// Workspace artifacts: never gated.
 		{"report.md", false, false},
@@ -45,6 +46,20 @@ func TestIdentityFileBlockedRespectsCallerFlag(t *testing.T) {
 			t.Errorf("identityFileBlocked(%q) admin=%v = %v, want %v",
 				c.path, c.admin, got, c.want)
 		}
+	}
+}
+
+func TestOwnerManagedFileWriteBlocked(t *testing.T) {
+	regular := &Registry{callerIsAdmin: false}
+	if !regular.ownerManagedFileWriteBlocked("KNOWLEDGE.md") {
+		t.Fatalf("regular chatter should not be allowed to write KNOWLEDGE.md")
+	}
+	if regular.ownerManagedFileWriteBlocked("notes/KNOWLEDGE.md") {
+		t.Fatalf("nested workspace file named KNOWLEDGE.md should not be owner-managed")
+	}
+	admin := &Registry{callerIsAdmin: true}
+	if admin.ownerManagedFileWriteBlocked("KNOWLEDGE.md") {
+		t.Fatalf("agent owner/admin should be allowed to write KNOWLEDGE.md")
 	}
 }
 

@@ -536,6 +536,9 @@ func (r *Registry) writeForPatch(ctx context.Context, path, content string) erro
 	if r.identityFileBlocked(path) {
 		return fmt.Errorf("%s", IdentityFileRefusal)
 	}
+	if r.ownerManagedFileWriteBlocked(path) {
+		return fmt.Errorf("%s", OwnerManagedFileWriteRefusal)
+	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
 		return r.workspaceStore.Put(ctx, r.agentID, r.projectID, r.sessionID, path,
 			strings.NewReader(content), int64(len(content)), "")
@@ -623,6 +626,9 @@ func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor,
 func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor, path, content string) error {
 	if r.identityFileBlocked(path) {
 		return fmt.Errorf("%s", IdentityFileRefusal)
+	}
+	if r.ownerManagedFileWriteBlocked(path) {
+		return fmt.Errorf("%s", OwnerManagedFileWriteRefusal)
 	}
 	if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(path) {
 		name := filepath.Clean(path)

@@ -1706,6 +1706,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	}
 
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID))
+	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
 	// it can't accidentally call anything, but that also hides the
@@ -1736,7 +1737,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	}
 	a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
 
-	planMeta := map[string]any{"planMode": true}
+	planMeta := mergeMetadata(map[string]any{"planMode": true}, knowledgeMeta)
 	sess.Append(provider.Message{
 		Role:         "assistant",
 		Content:      resp.Content,
@@ -1970,6 +1971,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
+	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 
 	// Hook: AfterSystemPrompt
@@ -2117,9 +2119,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				emitEvent(ctx, ChatEvent{Type: "done"})
 				return emptyMsg
 			}
-			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
+			asst := provider.Message{Role: "assistant", Content: resp.Content, Thinking: resp.Thinking, Metadata: knowledgeMeta, Timestamp: time.Now().UnixMilli(), RawAssistant: resp.RawAssistant}
 			sess.Append(asst)
-			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
+			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content, "metadata": knowledgeMeta}})
 			if resp.Content != "" {
 				replyParts = append(replyParts, resp.Content)
 			}
@@ -2146,7 +2148,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 		// Emit assistant content before tool calls if present
 		if resp.Content != "" {
-			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content}})
+			emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": resp.Content, "metadata": knowledgeMeta}})
 			replyParts = append(replyParts, resp.Content)
 		}
 
@@ -2164,6 +2166,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			Content:      resp.Content,
 			ToolCalls:    resp.ToolCalls,
 			Thinking:     resp.Thinking,
+			Metadata:     knowledgeMeta,
 			Timestamp:    time.Now().UnixMilli(),
 			RawAssistant: resp.RawAssistant,
 		}
@@ -2402,7 +2405,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// badge attached.
 		finalContent = fmt.Sprintf("I've reached the maximum number of tool iterations (%d) and couldn't synthesize a final response. The work above represents what I gathered before hitting the limit.", a.maxToolIterations)
 	}
-	capMeta := iterationCapMetadata(a.maxToolIterations)
+	capMeta := mergeMetadata(iterationCapMetadata(a.maxToolIterations), knowledgeMeta)
 	sess.Append(provider.Message{
 		Role:      "assistant",
 		Content:   finalContent,
@@ -2698,6 +2701,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	chatterMem := a.memory.WithUserID(chatterUID)
 	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem)
+	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
 
@@ -2768,8 +2772,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			sr, err := a.provider.ChatStream(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
 			if err != nil {
 				slog.Error("LLM stream failed, falling back", "agent", a.name, "error", err)
-				sess.Append(provider.Message{Role: "assistant", Content: resp.Content})
-				a.runPostTurn(ctx, msg, append(messages, provider.Message{Role: "assistant", Content: resp.Content}), totalToolCalls, chatterMem)
+				fallbackMsg := provider.Message{Role: "assistant", Content: resp.Content, Metadata: knowledgeMeta}
+				sess.Append(fallbackMsg)
+				a.runPostTurn(ctx, msg, append(messages, fallbackMsg), totalToolCalls, chatterMem)
 				return a.stringStream(resp.Content)
 			}
 
@@ -2817,7 +2822,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 					}
 				}
 				a.meterTokens(ctx, sess.Key(), streamUsage, 0)
-				msg := provider.Message{Role: "assistant", Content: full.String(), Thinking: thinking}
+				msg := provider.Message{Role: "assistant", Content: full.String(), Thinking: thinking, Metadata: knowledgeMeta}
 				switch {
 				case len(rawAssistant) > 0:
 					// Provider already serialized the assistant message
@@ -2853,6 +2858,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 			Content:      resp.Content,
 			ToolCalls:    resp.ToolCalls,
 			Thinking:     resp.Thinking,
+			Metadata:     knowledgeMeta,
 			Timestamp:    time.Now().UnixMilli(),
 			RawAssistant: resp.RawAssistant,
 		}
@@ -2926,7 +2932,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 // Returned StreamReader matches the contract of the normal "final
 // response" branch above so callers don't need a special case.
 func (a *Agent) streamFinalDeliveryAfterCap(ctx context.Context, inboundMsg bus.InboundMessage, messages []provider.Message, sess *session.Session, toolCallCount int, chatterMem *Memory) *provider.StreamReader {
-	capMeta := iterationCapMetadata(a.maxToolIterations)
+	capMeta := mergeMetadata(iterationCapMetadata(a.maxToolIterations), knowledgeMetadata(extractKnowledgeCitationSources(firstSystemContent(messages))))
 	finalMessages := append(messages, capReachedNudge(a.maxToolIterations))
 	sr, err := a.provider.ChatStream(ctx, finalMessages, nil, a.model, a.maxTokens, a.temperature)
 	if err != nil {
@@ -3156,6 +3162,10 @@ var chatbotBuiltinAllowlist = []string{
 	// news, prices, etc.) without requiring full agent mode.
 	"web_search",
 	"web_fetch",
+	// knowledge_search retrieves from the owner-uploaded knowledge base
+	// when the corpus is too large to inject into the system prompt in
+	// full — customer-support chatbots are its primary consumer.
+	"knowledge_search",
 	// exec + load_skill let the chatbot invoke installed skills
 	// (e.g. image generation, data lookup). Skills are the primary
 	// extension mechanism — without exec the chatbot can't run them.

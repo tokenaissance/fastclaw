@@ -849,6 +849,7 @@ var systemFileAllowlist = map[string]bool{
 	"USER.md":      true,
 	"BOOTSTRAP.md": true,
 	"MEMORY.md":    true,
+	"KNOWLEDGE.md": true,
 	"HEARTBEAT.md": true,
 	"AGENTS.md":    true,
 	"TOOLS.md":     true,

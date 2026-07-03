@@ -13,6 +13,7 @@ import { math } from "@streamdown/math";
 import { cjk } from "@streamdown/cjk";
 import remarkBreaks from "remark-breaks";
 import { fileUrl } from "@/lib/api";
+import type { KnowledgeSource } from "@/lib/api";
 import { ExternalAnchor } from "@/components/markdown-link";
 
 // Streamdown 2.x splits rendering features into opt-in plugins. Without these,
@@ -31,15 +32,6 @@ const code = createCodePlugin({ themes: ["github-light", "github-dark"] });
 // via the prop → no <table>; via remarkPluginsAfter → <table> + <br> both render.)
 const cjkWithBreaks = { ...cjk, remarkPluginsAfter: [...cjk.remarkPluginsAfter, remarkBreaks] };
 const streamdownPlugins = { code, mermaid, math, cjk: cjkWithBreaks };
-
-// Strip the `node` prop Streamdown injects into custom components before it
-// reaches the DOM <a> (React warns on the unknown attribute), then defer to
-// ExternalAnchor for the cross-origin target="_blank" behavior.
-const components: Components = {
-  a: ({ node: _node, ...props }: ComponentProps<"a"> & { node?: unknown }) => (
-    <ExternalAnchor {...props} />
-  ),
-};
 
 // Prose typography tuned for chat density (heading sizes, tight spacing),
 // mirroring the former CHAT_PROSE_CLASS. The bulky overrides that flatten
@@ -75,6 +67,8 @@ export function ChatMarkdown({
   agentId,
   sessionId,
   bareCode = false,
+  knowledgeSources,
+  onKnowledgeCitationClick,
 }: {
   text: string;
   agentId?: string;
@@ -82,7 +76,49 @@ export function ChatMarkdown({
   // File-viewer mode: hide the floating copy pill on code blocks (the .chat-md
   // strip already removes the card) so a source file reads as plain code.
   bareCode?: boolean;
+  knowledgeSources?: KnowledgeSource[];
+  onKnowledgeCitationClick?: (source: KnowledgeSource) => void;
 }) {
+  const knowledgeByID = useMemo(() => {
+    const map = new Map<string, KnowledgeSource>();
+    for (const source of knowledgeSources || []) {
+      if (source.id) map.set(source.id, source);
+    }
+    return map;
+  }, [knowledgeSources]);
+  const renderedText = useMemo(() => {
+    if (knowledgeByID.size === 0) return text;
+    return text.replace(/\[(K\d+)\]/g, (match, id: string) => {
+      if (!knowledgeByID.has(id)) return match;
+      return `[${id}](#knowledge-${id})`;
+    });
+  }, [knowledgeByID, text]);
+
+  const components = useMemo<Components>(() => ({
+    a: ({ node, ...props }: ComponentProps<"a"> & { node?: unknown }) => {
+      void node;
+      const href = typeof props.href === "string" ? props.href : "";
+      if (href.startsWith("#knowledge-")) {
+        const id = href.slice("#knowledge-".length);
+        const source = knowledgeByID.get(id);
+        return (
+          <button
+            type="button"
+            className="rounded bg-primary/10 px-1 font-medium text-primary hover:bg-primary/15"
+            title={source ? (source.chunk ? `${source.file}, chunk ${source.chunk}` : source.file) : id}
+            onClick={(event) => {
+              event.preventDefault();
+              if (source) onKnowledgeCitationClick?.(source);
+            }}
+          >
+            {props.children}
+          </button>
+        );
+      }
+      return <ExternalAnchor {...props} />;
+    },
+  }), [knowledgeByID, onKnowledgeCitationClick]);
+
   // Build the URL transform once per agent/session. A stable identity keeps
   // Streamdown (a memo component) from re-rendering on every streamed keystroke,
   // which a fresh inline function each render would defeat.
@@ -138,7 +174,7 @@ export function ChatMarkdown({
           mermaid: { panZoom: false, copy: false, download: false, fullscreen: true },
         }}
       >
-        {text}
+        {renderedText}
       </Streamdown>
     </div>
   );

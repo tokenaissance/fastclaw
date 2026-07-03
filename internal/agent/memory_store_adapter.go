@@ -54,3 +54,14 @@ func (a *MemoryStoreAdapter) GetWorkspaceFileExact(ctx context.Context, agentID,
 func (a *MemoryStoreAdapter) SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error {
 	return a.st.SaveAgentFile(ctx, agentID, userID, filename, data)
 }
+
+// ListKnowledgeDocs / SearchKnowledgeChunks expose the owner-uploaded
+// knowledge corpus. Both resolve the agent-owner fallback inside the
+// store, so a chatter's userID finds the owner's corpus on shared agents.
+func (a *MemoryStoreAdapter) ListKnowledgeDocs(ctx context.Context, agentID, userID string) ([]store.KnowledgeDoc, error) {
+	return a.st.ListAgentKnowledgeDocs(ctx, agentID, userID)
+}
+
+func (a *MemoryStoreAdapter) SearchKnowledgeChunks(ctx context.Context, agentID, userID, query string, limit int) ([]store.KnowledgeChunkRecord, error) {
+	return a.st.SearchAgentKnowledgeChunks(ctx, agentID, userID, query, limit)
+}
