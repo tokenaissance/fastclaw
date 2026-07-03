@@ -302,30 +302,20 @@ func (e *BoxliteExecutor) Hydrate(ctx context.Context) error {
 		return fmt.Errorf("close tar: %w", err)
 	}
 
-	// BoxLite Files API note: despite the OpenAPI spec advertising
-	// "Uploads a tar archive and extracts it at the specified path",
-	// the dev cloud's PUT /files does NOT extract. Empirically:
-	//   - path = a file path → writes the request body verbatim to
-	//     that file (parents are created automatically). 204.
-	//   - path = an existing directory + Content-Type x-tar →
-	//     stores the raw tar as `boxlite-upload-<rand>.tar` inside it.
-	//     Still 204 — silently wrong for our hydrate purposes.
-	// We work around by:
-	//   1. PUT the tar to a deterministic file path `/tmp/hydrate.tar`
-	//   2. exec `tar -xf /tmp/hydrate.tar -C /` to actually unpack
-	//   3. remove the staging file so /tmp stays clean
-	// One upload + one exec is still cheaper than per-file PUTs when
-	// a skill bundle has dozens of files each.
-	const stagingPath = "/tmp/fc-hydrate.tar"
+	// Hydrate only targets rootfs-backed paths (/skills and /workspace), so use
+	// BoxLite's tar upload semantics directly. Do not stage the tar in /tmp and
+	// exec tar manually: /tmp is tmpfs in BoxLite guests, while CopyInto-style
+	// file uploads write below that mount and can produce invisible/stale tar
+	// files.
 	uploadCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	uploadURL := e.prefixPath("/boxes/"+e.boxID+"/files") +
-		"?path=" + url.QueryEscape(stagingPath) + "&overwrite=true"
+		"?path=" + url.QueryEscape("/") + "&overwrite=true"
 	req, err := http.NewRequestWithContext(uploadCtx, "PUT", uploadURL, bytes.NewReader(bundle.buf.Bytes()))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Type", "application/x-tar")
 	auth, err := e.authHeader(ctx)
 	if err != nil {
 		return err
@@ -339,16 +329,6 @@ func (e *BoxliteExecutor) Hydrate(ctx context.Context) error {
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload tar HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Unpack via exec. tar -C / + bundle paths like "skills/..." land
-	// content at /skills/... — matches what the agent's tools expect
-	// (python /skills/<name>/main.py) and what the Docker backend
-	// gives via bind mount. rm afterwards keeps /tmp tidy across
-	// recreate() cycles.
-	extractCmd := fmt.Sprintf("tar -xf %s -C / && rm -f %s", stagingPath, stagingPath)
-	if _, err := e.execOnce(ctx, extractCmd, 60*time.Second); err != nil {
-		return fmt.Errorf("extract hydrate tar: %w", err)
 	}
 
 	slog.Info("boxlite sandbox hydrated",
@@ -699,21 +679,23 @@ func (e *BoxliteExecutor) ReadFile(ctx context.Context, path string) (string, er
 }
 
 func (e *BoxliteExecutor) WriteFile(ctx context.Context, filePath, content string) (string, error) {
-	// BoxLite Files API quirk: when path points at a concrete file
-	// path the request body is written verbatim and parent dirs are
-	// auto-created (verified empirically — see Hydrate's note). We
-	// used to do a heredoc-over-exec dance, which broke on content
-	// containing the random marker and on binary content; PUT is
-	// binary-safe and skips the shell entirely.
+	bundle := newPlainTarBundle()
+	if err := bundle.addBytes("file", []byte(content), 0o644, time.Now()); err != nil {
+		return "", fmt.Errorf("tar write file: %w", err)
+	}
+	if err := bundle.close(); err != nil {
+		return "", fmt.Errorf("close write tar: %w", err)
+	}
+
 	uploadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	uploadURL := e.prefixPath("/boxes/"+e.boxID+"/files") +
 		"?path=" + url.QueryEscape(filePath) + "&overwrite=true"
-	req, err := http.NewRequestWithContext(uploadCtx, "PUT", uploadURL, strings.NewReader(content))
+	req, err := http.NewRequestWithContext(uploadCtx, "PUT", uploadURL, bytes.NewReader(bundle.buf.Bytes()))
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Type", "application/x-tar")
 	auth, err := e.authHeader(ctx)
 	if err != nil {
 		return "", err
