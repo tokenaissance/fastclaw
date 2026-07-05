@@ -163,7 +163,10 @@ func buildDateLine(now time.Time, tzExplicit bool) string {
 	base := fmt.Sprintf("Current date/time: %s (%s, %s — the chatter's local timezone). This is NOW; do NOT call `date`. "+
 		"Each past user message in the history is prefixed with its own send time in [brackets] (e.g. [2026-06-13 22:15 Fri]). "+
 		"Reason about time from NOW and those prefixes: tell today apart from earlier days (never treat a past day's events as today's), "+
-		"and before ANY time-of-day remark check NOW — e.g. don't say \"good night\" in the middle of the day.",
+		"and before ANY time-of-day remark check NOW — e.g. don't say \"good night\" in the middle of the day. "+
+		"This is silent background context for your own reasoning, not something to report: do NOT open or pepper your reply with the "+
+		"current date/time or day of week (e.g. don't start a reply with \"周六晚上九点二十七分\" or \"It's Saturday night\") unless the "+
+		"chatter directly asked what time/day it is or the precise time is materially relevant to the answer.",
 		now.Format("2006-01-02 15:04:05 -0700"), wd, tzName)
 
 	if tzExplicit {
