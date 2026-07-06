@@ -248,6 +248,18 @@ type openAIRequestMode struct {
 	omitTemperature     bool
 }
 
+func initialOpenAIRequestMode(model string) openAIRequestMode {
+	model = strings.ToLower(StripProviderPrefix(model))
+	switch {
+	case strings.HasPrefix(model, "gpt-5"):
+		return openAIRequestMode{maxCompletionTokens: true, omitTemperature: true}
+	case strings.HasPrefix(model, "o1"), strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"):
+		return openAIRequestMode{maxCompletionTokens: true, omitTemperature: true}
+	default:
+		return openAIRequestMode{}
+	}
+}
+
 func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool, mode openAIRequestMode) (*http.Request, error) {
 	req := chatRequest{
 		Model:    StripProviderPrefix(model),
@@ -439,7 +451,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, messages []Message, too
 }
 
 func (p *OpenAIProvider) doChatRequest(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64, stream bool) (*http.Response, error) {
-	mode := openAIRequestMode{}
+	mode := initialOpenAIRequestMode(model)
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		httpReq, err := p.buildRequest(ctx, messages, tools, model, maxTokens, temperature, stream, mode)
