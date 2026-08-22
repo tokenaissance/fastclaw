@@ -232,6 +232,23 @@ func (s *Server) agentScopeDefaults(r *http.Request, agentID string) agentDefaul
 	return d
 }
 
+// agentScopeSharedIdentity returns true when ANY channel bound to this
+// agent has shared_identity enabled. The toggle is conceptually agent-
+// level (Context page) but physically stored per-channel so the gateway
+// routing hot-path can read it without an extra DB lookup.
+func (s *Server) agentScopeSharedIdentity(r *http.Request, ownerUserID, agentID string) bool {
+	chs, err := s.dataStore.ListChannels(r.Context(), ownerUserID, agentID)
+	if err != nil {
+		return false
+	}
+	for _, ch := range chs {
+		if ch.SharedIdentity {
+			return true
+		}
+	}
+	return false
+}
+
 // effectiveUserID returns the resolved user_id for the request: the
 // caller's own id, or — for super_admin in actAs mode — the impersonated
 // user's id.
@@ -533,6 +550,11 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// system default (currently effectively disabled).
 		AutoPersist      *bool `json:"autoPersist,omitempty"`
 		AutoPersistReset bool  `json:"autoPersistReset,omitempty"`
+		// SharedIdentity toggles cross-channel session/memory sharing.
+		// When true, all channels bound to this agent use the channel
+		// owner's user_id as the chatter identity, so sessions and
+		// memory are shared across web + IM channels. Default false.
+		SharedIdentity *bool `json:"sharedIdentity,omitempty"`
 		// Plugins per-agent enable overlay. Keys are plugin IDs, values
 		// are bool. Patch semantics: only the keys present in this map
 		// get written; other keys in the existing row are preserved.
@@ -658,6 +680,16 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// SharedIdentity: batch-update all channels for this agent.
+	if req.SharedIdentity != nil {
+		chs, _ := s.dataStore.ListChannels(r.Context(), rec.UserID, rec.ID)
+		for i := range chs {
+			if chs[i].SharedIdentity != *req.SharedIdentity {
+				chs[i].SharedIdentity = *req.SharedIdentity
+				_ = s.dataStore.SaveChannel(r.Context(), &chs[i])
+			}
+		}
+	}
 	// invalidateAgent (not invalidateUser) so super_admin / public-link
 	// viewers / apikey callers that lazy-attached this agent into their
 	// own UserSpace also drop their stale rc.Model — without this they
@@ -673,6 +705,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			"promptMode":       s.agentScopePromptMode(r, rec.ID),
 			"splitReplies":     s.agentScopeSplitReplies(r, rec.ID),
 			"autoPersist":      s.agentScopeAutoPersist(r, rec.ID),
+			"sharedIdentity":   s.agentScopeSharedIdentity(r, rec.UserID, rec.ID),
 			"plugins":          s.agentScopePlugins(r, rec.ID),
 			"config":           rec.Config,
 			"isPublic":         rec.IsPublic,
@@ -717,6 +750,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			"promptMode":       defaults.PromptMode,
 			"splitReplies":     defaults.SplitReplies,
 			"autoPersist":      defaults.AutoPersist,
+			"sharedIdentity":   s.agentScopeSharedIdentity(r, rec.UserID, rec.ID),
 			"plugins":          plugins,
 			"avatarUrl":        "/api/agents/" + rec.ID + "/files/avatar.png",
 			"createdAt":        rec.CreatedAt,

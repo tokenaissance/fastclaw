@@ -620,6 +620,13 @@ type ChannelRecord struct {
 	BotToken       string                 `json:"botToken,omitempty"`
 	BaseURL        string                 `json:"baseUrl,omitempty"`
 	PlatformUserID string                 `json:"platformUserId,omitempty"` // scanner's platform ID (WeChat openID)
+	// SharedIdentity, when true, makes all inbound messages on this
+	// channel use the channel owner's user_id as the chatter identity
+	// instead of minting a per-platform u_xxx chatter. This lets the
+	// owner share sessions and memory across multiple personal channels
+	// (e.g. WeChat + Feishu + Telegram all resolving as the same user).
+	// Default false — each platform sender gets an isolated chatter.
+	SharedIdentity bool                   `json:"sharedIdentity"`
 	Data           map[string]interface{} `json:"data,omitempty"`           // extra config (accounts map, etc.)
 	CreatedAt      time.Time              `json:"createdAt"`
 	UpdatedAt      time.Time              `json:"updatedAt"`

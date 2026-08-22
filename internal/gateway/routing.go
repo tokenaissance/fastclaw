@@ -39,8 +39,11 @@ func (g *Gateway) processInbound(ctx context.Context) {
 			return
 		case msg := <-g.bus.Inbound:
 			ownerID := msg.OwnerUserID
+			var sharedIdentity bool
 			if ownerID == "" {
-				ownerID = g.resolveChannelOwner(ctx, msg)
+				info := g.resolveChannelOwner(ctx, msg)
+				ownerID = info.ownerID
+				sharedIdentity = info.sharedIdentity
 			}
 			if ownerID == "" {
 				slog.Warn("dropping inbound: cannot resolve owner",
@@ -62,14 +65,21 @@ func (g *Gateway) processInbound(ctx context.Context) {
 				continue
 			}
 
-			// Normalize msg.UserID into a fastagent `u_xxx` id. IM channels
-			// (wechat, telegram, line, discord, feishu, slack) emit the raw
-			// platform-side identifier, which doesn't match the key that
-			// per-chatter data (USER.md, MEMORY.md, per-user skills) is
-			// stored under — so without translation the agent ends up with
-			// an empty chatter profile every turn. See resolveChatter for
-			// the lazy-mint semantics.
-			if chatterID := g.resolveChatter(ctx, ownerID, msg); chatterID != "" {
+			// When shared_identity is enabled on the channel, the owner
+			// wants all their personal channels to share the same session
+			// and memory. Skip per-platform chatter creation and use the
+			// owner's user_id directly so session/memory resolution lands
+			// on the same identity regardless of which channel the message
+			// arrived from.
+			if sharedIdentity {
+				msg.UserID = ownerID
+				msg.SharedIdentity = true
+			} else if chatterID := g.resolveChatter(ctx, ownerID, msg); chatterID != "" {
+				// Normalize msg.UserID into a fastagent `u_xxx` id. IM
+				// channels emit the raw platform-side identifier; without
+				// translation the agent ends up with an empty chatter
+				// profile every turn. See resolveChatter for the lazy-mint
+				// semantics.
 				msg.UserID = chatterID
 			}
 
@@ -85,30 +95,41 @@ func (g *Gateway) processInbound(ctx context.Context) {
 	}
 }
 
+// channelOwnerInfo carries the resolved channel owner and channel-level
+// flags back to processInbound so it can adjust chatter resolution.
+type channelOwnerInfo struct {
+	ownerID        string
+	sharedIdentity bool
+}
+
 // resolveChannelOwner looks up the channels table for the inbound's
-// receiving channel and returns the owning user_id, or "" if not found
-// or scope==system (system channels have no individual owner).
-func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessage) string {
+// receiving channel and returns the owning user_id (+ flags), or empty
+// ownerID if not found or scope==system (system channels have no
+// individual owner).
+func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessage) channelOwnerInfo {
 	if g.store == nil {
-		return ""
+		return channelOwnerInfo{}
 	}
 	// Try the new channels table first.
 	if ch, err := g.store.LookupChannel(ctx, msg.Channel, msg.AccountID); err == nil && ch != nil {
+		info := channelOwnerInfo{sharedIdentity: ch.SharedIdentity}
 		if ch.UserID != "" {
-			return ch.UserID
+			info.ownerID = ch.UserID
+			return info
 		}
 		if ch.AgentID != "" {
 			all, err := g.store.ListAllAgents(ctx)
 			if err != nil {
-				return ""
+				return channelOwnerInfo{}
 			}
 			for _, ar := range all {
 				if ar.ID == ch.AgentID {
-					return ar.UserID
+					info.ownerID = ar.UserID
+					return info
 				}
 			}
 		}
-		return ""
+		return channelOwnerInfo{}
 	}
 	// Fallback: legacy configs table lookup.
 	rec, err := g.store.LookupChannelByCredential(ctx, msg.Channel, msg.AccountID)
@@ -116,10 +137,10 @@ func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessag
 		if !errors.Is(err, store.ErrNotFound) {
 			slog.Warn("channel lookup failed", "channel", msg.Channel, "error", err)
 		}
-		return ""
+		return channelOwnerInfo{}
 	}
 	if rec.UserID != "" {
-		return rec.UserID
+		return channelOwnerInfo{ownerID: rec.UserID}
 	}
 	// System-level rows (user_id='') still happen in dev installs that
 	// pre-seed a global bot. Fall back to the agent owner via agent_id
@@ -127,15 +148,15 @@ func (g *Gateway) resolveChannelOwner(ctx context.Context, msg bus.InboundMessag
 	if rec.AgentID != "" {
 		all, err := g.store.ListAllAgents(ctx)
 		if err != nil {
-			return ""
+			return channelOwnerInfo{}
 		}
 		for _, ar := range all {
 			if ar.ID == rec.AgentID {
-				return ar.UserID
+				return channelOwnerInfo{ownerID: ar.UserID}
 			}
 		}
 	}
-	return ""
+	return channelOwnerInfo{}
 }
 
 // resolveChatter normalizes msg.UserID into a fastagent `u_xxx` id. IM

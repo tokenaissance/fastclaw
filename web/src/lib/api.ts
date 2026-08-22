@@ -115,6 +115,9 @@ export interface AgentDetail {
   // this is the only path the agent has to remember a chatter across
   // sessions.
   autoPersist?: boolean | null;
+  // sharedIdentity — when true, all channels share sessions and memory
+  // with the web channel (owner's identity). Default false.
+  sharedIdentity?: boolean;
   // plugins is the per-agent hook-plugin enable overlay: pluginID →
   // enabled. Missing keys fall back to the system-wide enable state
   // (visible via /api/plugins). null/undefined means "no per-agent
@@ -1334,6 +1337,10 @@ export interface AgentUpdatePayload {
   // profile) and MEMORY.md (long-term facts) — see Agent.autoPersist.
   autoPersist?: boolean;
   autoPersistReset?: boolean;
+  // Shared identity across channels. When true, all channels bound
+  // to this agent use the owner's user_id as chatter so sessions
+  // and memory are shared across web + IM channels.
+  sharedIdentity?: boolean;
   // Per-agent plugin enable overrides (patch semantics — keys not in
   // the map are preserved). Pass pluginsReset:true to clear ALL
   // per-agent overrides and fall back to system-wide enable state.
@@ -1691,6 +1698,7 @@ export interface AgentChannel {
   botUsername?: string;
   botToken: string;    // server-masked
   enabled: boolean;
+  sharedIdentity: boolean;
   updatedAt?: string;
 }
 
@@ -1877,6 +1885,19 @@ export async function disconnectAgentChannel(
   const res = await apiFetch(
     `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}`,
     { method: "DELETE" },
+  );
+  return res.json();
+}
+
+export async function updateAgentChannel(
+  agentId: string,
+  type: string,
+  accountId: string,
+  patch: { sharedIdentity?: boolean },
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}`,
+    { method: "PATCH", body: JSON.stringify(patch) },
   );
   return res.json();
 }

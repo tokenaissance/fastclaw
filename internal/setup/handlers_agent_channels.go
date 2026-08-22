@@ -33,13 +33,14 @@ import (
 //   - "user"  — the caller's own per-user overlay on this agent
 //     (only the caller sees + can mutate it)
 type channelOut struct {
-	Type        string `json:"type"`
-	AccountID   string `json:"accountId"`
-	BotUsername string `json:"botUsername,omitempty"`
-	BotToken    string `json:"botToken"` // masked
-	Enabled     bool   `json:"enabled"`
-	UpdatedAt   string `json:"updatedAt,omitempty"`
-	Source      string `json:"source,omitempty"`
+	Type           string `json:"type"`
+	AccountID      string `json:"accountId"`
+	BotUsername     string `json:"botUsername,omitempty"`
+	BotToken       string `json:"botToken"` // masked
+	Enabled        bool   `json:"enabled"`
+	SharedIdentity bool   `json:"sharedIdentity"`
+	UpdatedAt      string `json:"updatedAt,omitempty"`
+	Source         string `json:"source,omitempty"`
 }
 
 // resolveChannelBindingScope authorizes a connect/disconnect call and
@@ -221,12 +222,13 @@ func flattenChannelRecords(rows []store.ChannelRecord, source string) []channelO
 		}
 		if len(cc.Accounts) == 0 {
 			out = append(out, channelOut{
-				Type:      rec.Type,
-				AccountID: rec.AccountID,
-				BotToken:  maskAPIKey(rec.BotToken),
-				Enabled:   rec.Enabled,
-				UpdatedAt: rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
-				Source:    source,
+				Type:           rec.Type,
+				AccountID:      rec.AccountID,
+				BotToken:       maskAPIKey(rec.BotToken),
+				Enabled:        rec.Enabled,
+				SharedIdentity: rec.SharedIdentity,
+				UpdatedAt:      rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Source:         source,
 			})
 			continue
 		}
@@ -236,13 +238,14 @@ func flattenChannelRecords(rows []store.ChannelRecord, source string) []channelO
 				tok = rec.BotToken
 			}
 			out = append(out, channelOut{
-				Type:        rec.Type,
-				AccountID:   accountID,
-				BotUsername: accountID,
-				BotToken:    maskAPIKey(tok),
-				Enabled:     rec.Enabled,
-				UpdatedAt:   rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
-				Source:      source,
+				Type:           rec.Type,
+				AccountID:      accountID,
+				BotUsername:     accountID,
+				BotToken:       maskAPIKey(tok),
+				Enabled:        rec.Enabled,
+				SharedIdentity: rec.SharedIdentity,
+				UpdatedAt:      rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Source:         source,
 			})
 		}
 	}
@@ -334,6 +337,60 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 		"ok":          true,
 		"botUsername": username,
 	})
+}
+
+// handleUpdateAgentChannel patches channel-level settings (currently
+// only shared_identity). The channel is identified by (type, accountId)
+// within the agent's channels.
+//
+//	PATCH /api/agents/{id}/channels/{type}/{accountId}
+//	Body: {"sharedIdentity": true}
+func (s *Server) handleUpdateAgentChannel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	agentID := r.PathValue("id")
+	channelType := r.PathValue("type")
+	accountID := r.PathValue("accountId")
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, agentID)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		SharedIdentity *bool `json:"sharedIdentity"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// Find the channel row.
+	chs, err := s.dataStore.ListChannels(r.Context(), uid, aid)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	var target *store.ChannelRecord
+	for i := range chs {
+		if chs[i].Type == channelType && chs[i].AccountID == accountID {
+			target = &chs[i]
+			break
+		}
+	}
+	if target == nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "channel not found"})
+		return
+	}
+
+	if req.SharedIdentity != nil {
+		target.SharedIdentity = *req.SharedIdentity
+	}
+	if err := s.dataStore.SaveChannel(r.Context(), target); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleDisconnectAgentChannel(w http.ResponseWriter, r *http.Request) {

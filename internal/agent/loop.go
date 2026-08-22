@@ -544,7 +544,7 @@ func (a *Agent) SteerWeb(sessionId, projectIDHint, text string) bool {
 // delivered (e.g. the group `\[name\]:` prefix). Returns false when no
 // turn is active so the caller falls back to taskQueue.Submit.
 func (a *Agent) SteerInbound(msg bus.InboundMessage, text string) bool {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	return sess.PushSteerIfActive(provider.Message{
 		Role:      "user",
 		Content:   text,
@@ -613,7 +613,7 @@ func (a *Agent) SetGroupContext(gc *GroupContext) {
 // reads it as a bracketed sender label — the backslash escapes are well-
 // understood markdown source.
 func (a *Agent) InjectGroupMessage(ctx context.Context, msg bus.InboundMessage) {
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	label := msg.SenderName
 	if label == "" {
 		label = "Bot"
@@ -883,7 +883,7 @@ func (a *Agent) sessionHasActiveGoal(ctx context.Context, msg bus.InboundMessage
 	if a.goalStore == nil || a.sessions == nil {
 		return false
 	}
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	if sess == nil {
 		return false
 	}
@@ -1662,7 +1662,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	ctx = sandbox.WithUserID(ctx, chatterUID)
 	ctx = store.WithChatterUserID(ctx, chatterUID)
 	ctx = store.WithChannel(ctx, msg.Channel)
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	// Session.ctx() builds its OWN context from session-held fields
 	// rather than inheriting the caller's ctx — without binding the
 	// chatter onto sess itself, the WithChatterUserID we just stamped
@@ -1853,7 +1853,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	slog.Info("turn: refreshing skills",
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	// Bind chatter onto sess. Session.ctx() builds its own
 	// context.Background-rooted ctx for store calls, so the
 	// WithChatterUserID we stamped onto the caller ctx above does NOT
@@ -2605,7 +2605,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	slog.Info("turn: refreshing skills",
 		"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID, "user", chatterUID)
 	a.refreshSkillsFromStore(chatterUID)
-	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	// Bind chatter onto sess so its ctx() embeds WithChatterUserID
 	// for DBStore session writes — Session.ctx() rebuilds ctx from its
 	// own fields, so the chatter has to live on sess itself.
@@ -3205,6 +3205,15 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 // as the per-user skills bucket key and the sandbox bind-mount target,
 // so two different chatters of the same agent each see their own
 // personal skill set and write installs into their own host dir.
+// sessionTriple returns the (channel, accountID, chatID, projectID)
+// arguments for sessions.Get. When SharedIdentity is enabled on the
+// inbound message, the triple is replaced with a virtual one so all
+// channels converge on the same session.
+func sessionTriple(msg bus.InboundMessage, projectID string) (string, string, string, string) {
+	ch, acc, cid := msg.SessionTriple()
+	return ch, acc, cid, projectID
+}
+
 func (a *Agent) chatterUserID(msg bus.InboundMessage) string {
 	if msg.UserID != "" {
 		return msg.UserID

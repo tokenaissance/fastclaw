@@ -181,8 +181,8 @@ func TestResolveChannelOwner_ChannelsFirstAndFallback(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save channel row: %v", err)
 	}
-	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "telegram", AccountID: "bot-new"}); got != owner.ID {
-		t.Errorf("channels-table lookup = %q; want %q", got, owner.ID)
+	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "telegram", AccountID: "bot-new"}); got.ownerID != owner.ID {
+		t.Errorf("channels-table lookup = %q; want %q", got.ownerID, owner.ID)
 	}
 
 	// 2. Channels table shadows a conflicting legacy configs row (the
@@ -191,8 +191,8 @@ func TestResolveChannelOwner_ChannelsFirstAndFallback(t *testing.T) {
 		config.ChannelConfig{Enabled: true, Accounts: map[string]config.AccountConfig{"bot-new": {BotToken: "tok"}}}); err != nil {
 		t.Fatalf("seed shadow configs row: %v", err)
 	}
-	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "telegram", AccountID: "bot-new"}); got != owner.ID {
-		t.Errorf("channels-table precedence = %q; want %q (configs row u_other must NOT win)", got, owner.ID)
+	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "telegram", AccountID: "bot-new"}); got.ownerID != owner.ID {
+		t.Errorf("channels-table precedence = %q; want %q (configs row u_other must NOT win)", got.ownerID, owner.ID)
 	}
 
 	// 3. Legacy configs fallback: pre-migration installs with only a
@@ -201,8 +201,8 @@ func TestResolveChannelOwner_ChannelsFirstAndFallback(t *testing.T) {
 		config.ChannelConfig{Enabled: true, Accounts: map[string]config.AccountConfig{"bot-legacy": {BotToken: "tok"}}}); err != nil {
 		t.Fatalf("seed configs fallback row: %v", err)
 	}
-	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "discord", AccountID: "bot-legacy"}); got != owner.ID {
-		t.Errorf("configs fallback lookup = %q; want %q", got, owner.ID)
+	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "discord", AccountID: "bot-legacy"}); got.ownerID != owner.ID {
+		t.Errorf("configs fallback lookup = %q; want %q", got.ownerID, owner.ID)
 	}
 
 	// 4. Agent-only channel row (system-level, no user_id) → agent owner.
@@ -211,12 +211,12 @@ func TestResolveChannelOwner_ChannelsFirstAndFallback(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save system channel row: %v", err)
 	}
-	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "slack", AccountID: "T-sys"}); got != owner.ID {
-		t.Errorf("agent-only channel row = %q; want agent owner %q", got, owner.ID)
+	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "slack", AccountID: "T-sys"}); got.ownerID != owner.ID {
+		t.Errorf("agent-only channel row = %q; want agent owner %q", got.ownerID, owner.ID)
 	}
 
 	// 5. Unknown channel → dropped (""), never silently routed.
-	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "slack", AccountID: "nope"}); got != "" {
-		t.Errorf("unknown channel owner = %q; want empty", got)
+	if got := g.resolveChannelOwner(ctx, bus.InboundMessage{Channel: "slack", AccountID: "nope"}); got.ownerID != "" {
+		t.Errorf("unknown channel owner = %q; want empty", got.ownerID)
 	}
 }

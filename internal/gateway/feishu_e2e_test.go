@@ -181,10 +181,11 @@ func TestFeishuGroupMessageIdentityChainE2E(t *testing.T) {
 	}
 
 	// Step 1: resolve the owning user from the channels table.
-	ownerID := g.resolveChannelOwner(ctx, msg)
-	if ownerID != owner.ID {
-		t.Fatalf("resolveChannelOwner = %q; want owner %q", ownerID, owner.ID)
+	ownerInfo := g.resolveChannelOwner(ctx, msg)
+	if ownerInfo.ownerID != owner.ID {
+		t.Fatalf("resolveChannelOwner = %q; want owner %q", ownerInfo.ownerID, owner.ID)
 	}
+	ownerID := ownerInfo.ownerID
 
 	// Step 2: normalize the platform sender id into a fastagent app_user.
 	chatterID := g.resolveChatter(ctx, ownerID, msg)
@@ -216,7 +217,7 @@ func TestFeishuGroupMessageIdentityChainE2E(t *testing.T) {
 	// Unknown bot account on the same channel type → no owner, never
 	// silently routed to the default identity.
 	unknown := bus.InboundMessage{Channel: "feishu", AccountID: "cli_other", UserID: "ou_x"}
-	if got := g.resolveChannelOwner(ctx, unknown); got != "" {
-		t.Errorf("resolveChannelOwner(unknown account) = %q; want empty", got)
+	if got := g.resolveChannelOwner(ctx, unknown); got.ownerID != "" {
+		t.Errorf("resolveChannelOwner(unknown account) = %q; want empty", got.ownerID)
 	}
 }

@@ -70,6 +70,22 @@ type InboundMessage struct {
 	// agent-loop side to decide whether the turn should fire downstream
 	// reactions that are only valid for genuine user input.
 	Source string
+	// SharedIdentity is set by the gateway when the channel has
+	// shared_identity enabled. The agent loop uses this to resolve
+	// sessions by owner identity instead of by channel triple, so
+	// conversations are shared across all channels.
+	SharedIdentity bool
+}
+
+// SessionTriple returns the (channel, accountID, chatID) used for session
+// resolution. When SharedIdentity is enabled, all channels converge on a
+// single virtual triple so they share one session. The real Channel /
+// AccountID / ChatID remain intact on the message for outbound routing.
+func (m *InboundMessage) SessionTriple() (channel, accountID, chatID string) {
+	if m.SharedIdentity {
+		return "shared", "", m.UserID
+	}
+	return m.Channel, m.AccountID, m.ChatID
 }
 
 // OutboundButton represents a button in an inline keyboard.

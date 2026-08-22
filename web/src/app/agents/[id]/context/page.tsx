@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Brain, Check, MessageSquare, MessagesSquare, Puzzle } from "lucide-react";
+import { Brain, Check, Link2, MessageSquare, MessagesSquare, Puzzle } from "lucide-react";
 import { getAgent, updateAgent } from "@/lib/api";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
@@ -51,6 +51,8 @@ export default function AgentContextPage() {
   // LLM-driven distill pass that appends to USER.md / MEMORY.md.
   const [autoPersist, setAutoPersist] = useState(false);
   const [autoPersistSaving, setAutoPersistSaving] = useState(false);
+  const [sharedIdentity, setSharedIdentity] = useState(false);
+  const [sharedIdentitySaving, setSharedIdentitySaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -68,6 +70,7 @@ export default function AgentContextPage() {
       }
       setSplitReplies(agentRec?.splitReplies === true);
       setAutoPersist(agentRec?.autoPersist === true);
+      setSharedIdentity(agentRec?.sharedIdentity === true);
     } finally {
       setLoading(false);
     }
@@ -128,6 +131,20 @@ export default function AgentContextPage() {
       setAutoPersist(prev);
     } finally {
       setAutoPersistSaving(false);
+    }
+  };
+
+  const handleSharedIdentityChange = async (next: boolean) => {
+    const prev = sharedIdentity;
+    setSharedIdentity(next);
+    setSharedIdentitySaving(true);
+    try {
+      await updateAgent(agentId, { sharedIdentity: next });
+      flashSaved();
+    } catch {
+      setSharedIdentity(prev);
+    } finally {
+      setSharedIdentitySaving(false);
     }
   };
 
@@ -298,6 +315,31 @@ export default function AgentContextPage() {
             onCheckedChange={handleAutoPersistChange}
             disabled={autoPersistSaving}
             aria-label="Auto-remember chatter"
+          />
+        </div>
+      </div>
+
+      {/* Shared identity across channels */}
+      <div className="rounded-lg border border-border bg-card p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3 min-w-0">
+            <Link2 className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <h3 className="font-medium">Shared identity across channels</h3>
+              <p className="text-sm text-muted-foreground mt-1">
+                When enabled, all IM channels (WeChat / Telegram / Discord /
+                Slack / LINE / Feishu) share the same session and memory
+                with the web chat. Conversations started on one channel
+                can be continued on another. Off by default — each
+                channel gets its own isolated session and memory.
+              </p>
+            </div>
+          </div>
+          <Switch
+            checked={sharedIdentity}
+            onCheckedChange={handleSharedIdentityChange}
+            disabled={sharedIdentitySaving}
+            aria-label="Shared identity across channels"
           />
         </div>
       </div>
