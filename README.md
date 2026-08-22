@@ -159,6 +159,22 @@ table and is edited through the dashboard or `fastagent agents config`.
   caps how many agents a non-admin can self-create
   (`-1` = unlimited, `0` = admin-provisioned only).
 - App-user provisioning `POST /v1/users` — third-party apps mint a stable fastagent user_id per end-user, idempotent on `(api_key, external_id)`. Or pass `user` on `/v1/chat/completions` (or `X-Fastagent-End-User` header) for lazy mint on first call
+- Usage & quota `GET /v1/usage` + `PUT/GET/DELETE /v1/quota` — per-user billing. Read token consumption (`?user_id=` scopes to an owned app_user), and set a monthly token/request ceiling. **Opt-in**: with no quota row (or a limit ≤ 0) the agent runs unlimited; enforcement only begins once something writes a quota for that user. Checked before every LLM call in the agent loop.
+
+### Billing & token quotas
+
+Per-user token/request ceilings are **opt-in** — `usage.CheckQuota` returns
+`Allowed` when no quota row exists, so merging/enabling this feature never
+blocks anyone by default.
+
+- Set/raise/lower a ceiling: `PUT /v1/quota` with
+  `{"user_id": "...", "monthly_token_limit": N, "monthly_request_limit": N, "reset_day": 1}`.
+  Same-user PUTs overwrite; `DELETE /v1/quota` reverts to unlimited.
+- The agent loop checks the quota before every LLM call and rejects the turn
+  with an error message until the next `reset_day` billing window.
+- Ownership is enforced via `CanManageUser` (self / owned app_user /
+  channel_user / platform admin) — a caller can never read or set another
+  tenant's usage or quota.
 
 ## Configuration
 

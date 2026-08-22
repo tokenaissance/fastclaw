@@ -29,6 +29,7 @@ type Store interface {
 	GetUser(ctx context.Context, id string) (*UserRecord, error)
 	GetUserByLogin(ctx context.Context, usernameOrEmail string) (*UserRecord, error)
 	GetUserByExternal(ctx context.Context, ownerUserID, externalID string) (*UserRecord, error)
+	GetUserByAPIKeyExternal(ctx context.Context, apikeyID, externalID string) (*UserRecord, error)
 	GetUserByExternalSuffix(ctx context.Context, ownerUserID, prefix, suffix string) (*UserRecord, error)
 	ListUsers(ctx context.Context) ([]UserRecord, error)
 	UpdateUser(ctx context.Context, u *UserRecord) error

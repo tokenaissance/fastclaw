@@ -203,6 +203,27 @@ func (r *Resolver) RevokeSession(ctx context.Context, sid string) error {
 	return r.store.DeleteWebSession(ctx, sid)
 }
 
+// CanManageUser reports whether ident may operate on targetUserID in a
+// billing context (/v1/usage, /v1/quota). True when the caller targets
+// themselves, a user they own (an app_user / channel_user minted under
+// them via OwnerUserID), or a platform admin. This is the ownership gate
+// that keeps multi-tenant installs from letting any api_key read or
+// mutate arbitrary users' consumption — without it, the upstream
+// "manage my end-users" design leaks across tenants.
+func (r *Resolver) CanManageUser(ctx context.Context, ident Identity, targetUserID string) bool {
+	if targetUserID == "" || targetUserID == ident.UserID {
+		return true
+	}
+	if ident.CanAdminPlatform() {
+		return true
+	}
+	rec, err := r.store.GetUser(ctx, targetUserID)
+	if err != nil {
+		return false
+	}
+	return rec.OwnerUserID == ident.UserID
+}
+
 // ResolveSession turns a cookie SID into an Identity.
 func (r *Resolver) ResolveSession(ctx context.Context, sid string) (Identity, error) {
 	if sid == "" {

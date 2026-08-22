@@ -1822,6 +1822,27 @@ func (d *DBStore) GetUserByExternal(ctx context.Context, ownerUserID, externalID
 	return u, nil
 }
 
+// GetUserByAPIKeyExternal looks up a provisioned user by (apikey_id,
+// external_id) — the column pair the idempotent provisioning path writes
+// and the partial UNIQUE index idx_users_apikey_external enforces. This is
+// the correct fast-path lookup for Accounts.Create retries; the owner-based
+// GetUserByExternal matches app_user/channel_user rows keyed on the owning
+// account instead.
+func (d *DBStore) GetUserByAPIKeyExternal(ctx context.Context, apikeyID, externalID string) (*UserRecord, error) {
+	if apikeyID == "" || externalID == "" {
+		return nil, ErrNotFound
+	}
+	row := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+userColumns+` FROM users WHERE apikey_id = %s AND external_id = %s LIMIT 1`,
+			d.ph(1), d.ph(2)),
+		apikeyID, externalID)
+	u, err := scanUser(row)
+	if err != nil {
+		return nil, scanErr(err)
+	}
+	return u, nil
+}
+
 // GetUserByExternalSuffix looks up an app_user/chatter by owner + external_id
 // suffix match. Used by resolveChatter to find legacy chatter rows whose
 // external_id is "channel:accountID:platformUserID" when only

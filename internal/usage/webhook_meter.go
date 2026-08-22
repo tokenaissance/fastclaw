@@ -161,6 +161,23 @@ func (m *WebhookMeter) SessionsForAgent(ctx context.Context, agentID, userID str
 	return m.localMeter.SessionsForAgent(ctx, agentID, userID, r, limit)
 }
 
+// TotalsForUser, DailyForUser, RecordTokenLog delegate to the local
+// meter. They exist so WebhookMeter satisfies the expanded Meter
+// interface (added with upstream billing); the webhook path only fires
+// per-call from RecordTokens, so per-user readbacks and the append-only
+// log stay on the local backend.
+func (m *WebhookMeter) TotalsForUser(ctx context.Context, userID string, r Range) (Totals, error) {
+	return m.localMeter.TotalsForUser(ctx, userID, r)
+}
+
+func (m *WebhookMeter) DailyForUser(ctx context.Context, userID string, r Range) ([]DailyUsage, error) {
+	return m.localMeter.DailyForUser(ctx, userID, r)
+}
+
+func (m *WebhookMeter) RecordTokenLog(ctx context.Context, userID, agentID, sessionKey, provider, model string, t Tokens, durationMs int64) error {
+	return m.localMeter.RecordTokenLog(ctx, userID, agentID, sessionKey, provider, model, t, durationMs)
+}
+
 func (m *WebhookMeter) Close() error {
 	return m.localMeter.Close()
 }

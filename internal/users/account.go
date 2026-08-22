@@ -127,8 +127,13 @@ func (a *Accounts) Create(ctx context.Context, in CreateInput) (*Account, error)
 	apikeyID := strings.TrimSpace(in.APIKeyID)
 	externalID := strings.TrimSpace(in.ExternalID)
 	// Fast path — already provisioned for this (apikey, external_id) pair.
+	// Lookup by the columns this path actually writes: Create stores the
+	// provisioning pair in apikey_id + external_id (NOT owner_user_id, which
+	// is the key for app_user/channel_user minted via EnsureAppUser).
+	// Matching against owner_user_id here would never hit, and a retry would
+	// fall through to the INSERT and trip idx_users_apikey_external.
 	if apikeyID != "" && externalID != "" {
-		if rec, err := a.store.GetUserByExternal(ctx, apikeyID, externalID); err == nil {
+		if rec, err := a.store.GetUserByAPIKeyExternal(ctx, apikeyID, externalID); err == nil {
 			return toAccount(rec), nil
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return nil, err
@@ -180,7 +185,7 @@ func (a *Accounts) Create(ctx context.Context, in CreateInput) (*Account, error)
 		// identities still bubble — see EnsureAppUser for the same
 		// pattern.
 		if apikeyID != "" && externalID != "" {
-			if again, qerr := a.store.GetUserByExternal(ctx, apikeyID, externalID); qerr == nil {
+			if again, qerr := a.store.GetUserByAPIKeyExternal(ctx, apikeyID, externalID); qerr == nil {
 				return toAccount(again), nil
 			}
 		}

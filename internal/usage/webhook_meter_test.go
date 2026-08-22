@@ -416,6 +416,74 @@ func TestWebhookMeter_Integration(t *testing.T) {
 	}
 }
 
+// The readback + log methods added for the expanded Meter interface
+// (TotalsForUser / DailyForUser / RecordTokenLog) must delegate straight to
+// the local meter. They are pure reads / a separate append-only log — the
+// webhook path only fires from RecordTokens — so a WebhookMeter with a live
+// webhook URL must return identical results to calling the local meter
+// directly, and must never contact the webhook.
+func TestWebhookMeter_DelegatingMethods(t *testing.T) {
+	webhookHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webhookHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	localMeter := NewMemMeter()
+	getCostFunc := func(provider, model string) *config.ModelCost {
+		return &config.ModelCost{Input: 15, Output: 75}
+	}
+	meter := NewWebhookMeter(localMeter, server.URL, "tok", getCostFunc)
+
+	ctx := context.Background()
+	if err := localMeter.RecordTokens(ctx, "alice", "agentA", "sess1", "anthropic-messages", "sonnet-4-6",
+		Tokens{Input: 100, Output: 50, CacheRead: 25}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	r := LastN(1)
+
+	// TotalsForUser delegates: equals the local meter's own answer.
+	viaWebhook, err := meter.TotalsForUser(ctx, "alice", r)
+	if err != nil {
+		t.Fatalf("TotalsForUser: %v", err)
+	}
+	direct, err := localMeter.TotalsForUser(ctx, "alice", r)
+	if err != nil {
+		t.Fatalf("local TotalsForUser: %v", err)
+	}
+	if viaWebhook != direct {
+		t.Errorf("TotalsForUser = %+v, want %+v", viaWebhook, direct)
+	}
+	if viaWebhook.Input != 100 || viaWebhook.Output != 50 || viaWebhook.CacheRead != 25 || viaWebhook.Requests != 1 {
+		t.Errorf("TotalsForUser = %+v, want in=100 out=50 cache=25 req=1", viaWebhook)
+	}
+
+	// DailyForUser delegates and returns the day+agent+model breakdown.
+	daily, err := meter.DailyForUser(ctx, "alice", r)
+	if err != nil {
+		t.Fatalf("DailyForUser: %v", err)
+	}
+	if len(daily) != 1 {
+		t.Fatalf("DailyForUser rows = %d, want 1", len(daily))
+	}
+	d := daily[0]
+	if d.AgentID != "agentA" || d.Model != "sonnet-4-6" || d.InputTokens != 100 || d.Requests != 1 {
+		t.Errorf("DailyForUser row = %+v, want agentA/sonnet-4-6 in=100 req=1", d)
+	}
+
+	// RecordTokenLog delegates without error (MemMeter persists nothing).
+	if err := meter.RecordTokenLog(ctx, "alice", "agentA", "sess1", "anthropic-messages", "sonnet-4-6",
+		Tokens{Input: 1, Output: 2}, 1234); err != nil {
+		t.Errorf("RecordTokenLog: %v", err)
+	}
+
+	// None of the delegating methods may have triggered the webhook.
+	if webhookHits != 0 {
+		t.Errorf("webhook hit %d times from delegating methods, want 0", webhookHits)
+	}
+}
+
 func TestWebhookMeter_ErrorHandling(t *testing.T) {
 	tests := []struct {
 		name           string

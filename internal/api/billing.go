@@ -36,9 +36,19 @@ func (s *Server) HandleGetUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine target user_id.
+	// Determine target user_id. The caller may only read usage for
+	// themselves or a user they own (app_user / channel_user minted
+	// under them); platform admins may read anyone. Without this gate
+	// any api_key could enumerate arbitrary users' consumption in a
+	// multi-tenant install.
 	targetUser := ident.UserID
 	if quid := r.URL.Query().Get("user_id"); quid != "" {
+		if !s.authResolver.CanManageUser(r.Context(), ident, quid) {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": map[string]string{"message": "cannot access usage for this user", "type": "permission_error"},
+			})
+			return
+		}
 		targetUser = quid
 	}
 
@@ -97,7 +107,7 @@ func (s *Server) HandleSetQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, ok := auth.FromContext(r.Context())
+	ident, ok := auth.FromContext(r.Context())
 	if !ok {
 		writeUnauth(w, "authentication required")
 		return
@@ -118,6 +128,14 @@ func (s *Server) HandleSetQuota(w http.ResponseWriter, r *http.Request) {
 	if req.UserID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]string{"message": "user_id is required", "type": "invalid_request_error"},
+		})
+		return
+	}
+	// Ownership gate — a caller may only set quotas for themselves or
+	// users they own; admins may set for anyone.
+	if !s.authResolver.CanManageUser(r.Context(), ident, req.UserID) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": map[string]string{"message": "cannot set quota for this user", "type": "permission_error"},
 		})
 		return
 	}
@@ -156,7 +174,7 @@ func (s *Server) HandleGetQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, ok := auth.FromContext(r.Context())
+	ident, ok := auth.FromContext(r.Context())
 	if !ok {
 		writeUnauth(w, "authentication required")
 		return
@@ -166,6 +184,12 @@ func (s *Server) HandleGetQuota(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]string{"message": "user_id query param is required", "type": "invalid_request_error"},
+		})
+		return
+	}
+	if !s.authResolver.CanManageUser(r.Context(), ident, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": map[string]string{"message": "cannot read quota for this user", "type": "permission_error"},
 		})
 		return
 	}
@@ -207,7 +231,7 @@ func (s *Server) HandleDeleteQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, ok := auth.FromContext(r.Context())
+	ident, ok := auth.FromContext(r.Context())
 	if !ok {
 		writeUnauth(w, "authentication required")
 		return
@@ -217,6 +241,12 @@ func (s *Server) HandleDeleteQuota(w http.ResponseWriter, r *http.Request) {
 	if userID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": map[string]string{"message": "user_id query param is required", "type": "invalid_request_error"},
+		})
+		return
+	}
+	if !s.authResolver.CanManageUser(r.Context(), ident, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": map[string]string{"message": "cannot delete quota for this user", "type": "permission_error"},
 		})
 		return
 	}

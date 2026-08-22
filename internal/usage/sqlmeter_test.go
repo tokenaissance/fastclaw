@@ -102,3 +102,135 @@ func TestSQLMeterRecordAndQuery(t *testing.T) {
 		t.Errorf("top users head = %+v, want bob=1500", users[0])
 	}
 }
+
+// TestSQLMeterPerUserReadback exercises the two methods added for the
+// upstream billing API — TotalsForUser and DailyForUser. Both must scope
+// strictly to the requested user_id, and DailyForUser must return the
+// per-day/per-agent/per-model granularity GET /v1/usage renders.
+func TestSQLMeterPerUserReadback(t *testing.T) {
+	dir := t.TempDir()
+	dsn := "file:" + filepath.Join(dir, "test.db") + "?_pragma=foreign_keys(1)"
+	st, err := store.NewDBStore("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	m := usage.NewSQLMeter(st.DB(), "sqlite")
+	ctx := context.Background()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+
+	// alice burns tokens on two different agents.
+	must(m.RecordTokens(ctx, "alice", "agentA", "sess1", "anthropic-messages", "sonnet-4-6",
+		usage.Tokens{Input: 100, Output: 50}))
+	must(m.RecordTokens(ctx, "alice", "agentB", "sess2", "anthropic-messages", "sonnet-4-6",
+		usage.Tokens{Input: 300, Output: 200}))
+	// bob on the same agentA — must NOT leak into alice's readback.
+	must(m.RecordTokens(ctx, "bob", "agentA", "sess3", "anthropic-messages", "sonnet-4-6",
+		usage.Tokens{Input: 9999, Output: 9999}))
+
+	r := usage.LastN(1)
+
+	tot, err := m.TotalsForUser(ctx, "alice", r)
+	if err != nil {
+		t.Fatalf("TotalsForUser: %v", err)
+	}
+	if tot.Input != 400 || tot.Output != 250 || tot.Requests != 2 {
+		t.Errorf("TotalsForUser(alice) = %+v, want in=400 out=250 req=2", tot)
+	}
+
+	daily, err := m.DailyForUser(ctx, "alice", r)
+	if err != nil {
+		t.Fatalf("DailyForUser: %v", err)
+	}
+	if len(daily) != 2 {
+		t.Fatalf("DailyForUser rows = %d, want 2 (agentA + agentB)", len(daily))
+	}
+	byAgent := map[string]usage.DailyUsage{}
+	for _, d := range daily {
+		if d.Day == "" {
+			t.Errorf("DailyForUser row missing Day: %+v", d)
+		}
+		byAgent[d.AgentID] = d
+	}
+	if a := byAgent["agentA"]; a.InputTokens != 100 || a.OutputTokens != 50 || a.Requests != 1 {
+		t.Errorf("DailyForUser agentA = %+v, want in=100 out=50 req=1", a)
+	}
+	if b := byAgent["agentB"]; b.InputTokens != 300 || b.OutputTokens != 200 || b.Requests != 1 {
+		t.Errorf("DailyForUser agentB = %+v, want in=300 out=200 req=1", b)
+	}
+
+	// Unknown user returns zeros, never bob's numbers.
+	empty, err := m.TotalsForUser(ctx, "carol", r)
+	if err != nil {
+		t.Fatalf("TotalsForUser(carol): %v", err)
+	}
+	if empty.Input != 0 || empty.Requests != 0 {
+		t.Errorf("TotalsForUser(carol) = %+v, want all zeros", empty)
+	}
+}
+
+// TestSQLMeterRecordTokenLog verifies the append-only per-call log. Every
+// call lands one row carrying the full token split + wall-clock duration;
+// unlike token_usage_daily there is no UPSERT, so two calls are two rows.
+func TestSQLMeterRecordTokenLog(t *testing.T) {
+	dir := t.TempDir()
+	dsn := "file:" + filepath.Join(dir, "test.db") + "?_pragma=foreign_keys(1)"
+	st, err := store.NewDBStore("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	m := usage.NewSQLMeter(st.DB(), "sqlite")
+	ctx := context.Background()
+
+	if err := m.RecordTokenLog(ctx, "alice", "agentA", "sess1", "anthropic-messages", "sonnet-4-6",
+		usage.Tokens{Input: 100, Output: 50, CacheRead: 25, CacheCreation: 5}, 1234); err != nil {
+		t.Fatalf("RecordTokenLog 1: %v", err)
+	}
+	if err := m.RecordTokenLog(ctx, "alice", "agentA", "sess1", "anthropic-messages", "sonnet-4-6",
+		usage.Tokens{Input: 7, Output: 8}, 42); err != nil {
+		t.Fatalf("RecordTokenLog 2: %v", err)
+	}
+
+	var count int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM token_usage_log`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("token_usage_log rows = %d, want 2 (append-only, no merge)", count)
+	}
+
+	var (
+		userID, agentID, model       string
+		in, out, cRead, cCreate, dur int64
+	)
+	// token_usage_log has no request_count — one row per call is the
+	// append-only contract.
+	if err := st.DB().QueryRow(
+		`SELECT user_id, agent_id, model, input_tokens, output_tokens,
+		        cache_read_tokens, cache_create_tokens, duration_ms
+		 FROM token_usage_log WHERE duration_ms = 1234`,
+	).Scan(&userID, &agentID, &model, &in, &out, &cRead, &cCreate, &dur); err != nil {
+		t.Fatalf("scan log row: %v", err)
+	}
+	if userID != "alice" || agentID != "agentA" || model != "sonnet-4-6" {
+		t.Errorf("log row = %s/%s/%s, want alice/agentA/sonnet-4-6", userID, agentID, model)
+	}
+	if in != 100 || out != 50 || cRead != 25 || cCreate != 5 || dur != 1234 {
+		t.Errorf("log row = in=%d out=%d cr=%d cc=%d dur=%d, want 100/50/25/5/1234",
+			in, out, cRead, cCreate, dur)
+	}
+}
