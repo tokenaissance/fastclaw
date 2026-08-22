@@ -1,23 +1,23 @@
-                       FastClaw Community License Agreement
+                       FastAgent Community License Agreement
                               Version 1.0, 2026
 
-   FastClaw is licensed under the FastClaw Community License, based on
+   FastAgent is licensed under the FastAgent Community License, based on
    the Apache License 2.0 with the following additional conditions:
 
    1. Commercial Use
 
-      (a) FastClaw may be utilized commercially, including as a backend
+      (a) FastAgent may be utilized commercially, including as a backend
           service for other applications or as an application development
           platform for enterprises, without modifying the source code.
 
-      (b) A commercial license must be obtained from ThinkAny, LLC if any
+      (b) A commercial license must be obtained from Tokenaissance, LLC if any
           of the following conditions apply:
 
           (i) Multi-tenant Service. Unless explicitly authorized by
-              ThinkAny, LLC in writing, You may not use the FastClaw
+              Tokenaissance, LLC in writing, You may not use the FastAgent
               source code to operate a multi-tenant service where
               multiple users or organizations share a single deployment
-              for the purpose of providing FastClaw-as-a-Service to
+              for the purpose of providing FastAgent-as-a-Service to
               third parties.
 
               Permitted use cases (no commercial license required):
@@ -25,59 +25,59 @@
               - Internal deployment within a single organization for
                 its employees or teams.
 
-              - Using FastClaw as a backend to power Your own SaaS
+              - Using FastAgent as a backend to power Your own SaaS
                 product, where end users interact with Your product
-                rather than FastClaw directly.
+                rather than FastAgent directly.
 
               Restricted use cases (commercial license required):
 
-              - Hosting FastClaw and selling access to multiple
+              - Hosting FastAgent and selling access to multiple
                 unrelated organizations as a competing Agent platform
                 service.
 
           (ii) Logo and Copyright Information. In the process of using
-               FastClaw's frontend, You may not remove or modify the
-               FastClaw logo, branding, or copyright information in the
-               FastClaw interface.
+               FastAgent's frontend, You may not remove or modify the
+               FastAgent logo, branding, or copyright information in the
+               FastAgent interface.
 
                Frontend Definition. For the purposes of this License,
-               the "frontend" of FastClaw includes all visual interface
+               the "frontend" of FastAgent includes all visual interface
                components delivered to end users, including but not
                limited to those located in the `web/public/` and
-               `web/src/` directories when running FastClaw from the
+               `web/src/` directories when running FastAgent from the
                source code, as well as any compiled or distributed
                frontend artifacts.
 
-               This restriction is inapplicable to uses of FastClaw
-               that do not involve its frontend (e.g., using FastClaw
+               This restriction is inapplicable to uses of FastAgent
+               that do not involve its frontend (e.g., using FastAgent
                purely as an API backend without exposing its UI to end
                users).
 
-      To obtain a commercial license, please contact ThinkAny, LLC at
-      support@thinkany.ai.
+      To obtain a commercial license, please contact Tokenaissance, LLC at
+      support@tokenaissance.com.
 
    2. Contributions
 
       As a contributor, You agree that:
 
-      (a) ThinkAny, LLC may adjust the open-source agreement to be more
+      (a) Tokenaissance, LLC may adjust the open-source agreement to be more
           strict or relaxed as deemed necessary.
 
       (b) Your contributed code may be used for commercial purposes,
           including but not limited to cloud services and enterprise
-          editions operated by ThinkAny, LLC.
+          editions operated by Tokenaissance, LLC.
 
    3. Trademark
 
-      You may not use the FastClaw name, logo, or trademarks to promote
+      You may not use the FastAgent name, logo, or trademarks to promote
       derivative products or services without prior written consent from
-      ThinkAny, LLC.
+      Tokenaissance, LLC.
 
    Apart from the specific conditions mentioned above, all other rights
    and restrictions follow the Apache License 2.0. The full text of the
    Apache License 2.0 is reproduced below.
 
-   Copyright (c) 2026 ThinkAny, LLC
+   Copyright (c) 2026 Tokenaissance, LLC
 
 ────────────────────────────────────────────────────────────────────────────────
 

@@ -373,4 +373,4 @@ based on Apache License 2.0 with additional conditions.
 - ❌ Removing or modifying the FastAgent branding in the dashboard UI
 
 The full Apache 2.0 text is reproduced inside the [LICENSE](LICENSE) file
-under the addendum. For commercial licensing inquiries: support@thinkany.ai.
+under the addendum. For commercial licensing inquiries: support@tokenaissance.com.
