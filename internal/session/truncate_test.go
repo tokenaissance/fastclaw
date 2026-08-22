@@ -25,9 +25,9 @@ func TestUTF8Truncation(t *testing.T) {
 		},
 		{
 			name:     "混合中英文截断",
-			input:    "好的，搜索工具目前要限，但基于已有的信息，我来给你讲讲 CF4O-PIIE 中美��",
+			input:    "好的，搜索工具目前要限，但基于已有的信息，我来给你讲讲 CF4O-PIIE 中美",
 			maxRunes: 60,
-			expect:   "好的，搜索工具目前要限，但基于已有的信息，我来给你讲讲 CF4O-PIIE 中美��...",
+			expect:   "好的，搜索工具目前要限，但基于已有的信息，我来给你讲讲 CF4O-PIIE 中美...",
 		},
 		{
 			name:     "emoji 正确处理",
