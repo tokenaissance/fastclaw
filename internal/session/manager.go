@@ -75,7 +75,7 @@ func (s *Session) SessionKey() string { return s.sessionKey }
 // session_events.chatter_user_id) can record the actual conversation
 // participant. user_id stays = UserSpace owner; chatter is the
 // additional dimension. Both tags are independent — empty chatter
-// just leaves the column ”.
+// just leaves the column ''.
 func (s *Session) ctx() context.Context {
 	ctx := context.Background()
 	if s.userID != "" {
@@ -91,7 +91,7 @@ func (s *Session) ctx() context.Context {
 // Session so the next Append / SaveSession write stamps the
 // chatter_user_id column. Called by the agent loop at the top of each
 // turn from the resolved chatterUID. Passing "" clears it (the next
-// write goes back to ” which readers fall back to user_id for).
+// write goes back to '' which readers fall back to user_id for).
 func (s *Session) SetChatter(uid string) {
 	s.mu.Lock()
 	s.chatterUserID = uid

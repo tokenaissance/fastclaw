@@ -10,7 +10,7 @@ import (
 )
 
 func TestBuildSkillsSummaryUsesProgressiveDisclosureByDefault(t *testing.T) {
-	t.Setenv("FASTCLAW_HOME", t.TempDir())
+	t.Setenv("FASTAGENT_HOME", t.TempDir())
 	home := t.TempDir()
 	skillDir := filepath.Join(home, "skills", "chart-maker")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -45,7 +45,7 @@ Run scripts/render.py with JSON input.`
 }
 
 func TestLoadSkillsDoesNotKeepBodyContentByDefault(t *testing.T) {
-	t.Setenv("FASTCLAW_HOME", t.TempDir())
+	t.Setenv("FASTAGENT_HOME", t.TempDir())
 	home := t.TempDir()
 	skillDir := filepath.Join(home, "skills", "chart-maker")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -73,7 +73,7 @@ BODY_SHOULD_STAY_ON_DISK_UNTIL_LOAD_SKILL`
 }
 
 func TestBuildSkillsSummaryKeepsAlwaysLoadSkillsInline(t *testing.T) {
-	t.Setenv("FASTCLAW_HOME", t.TempDir())
+	t.Setenv("FASTAGENT_HOME", t.TempDir())
 	home := t.TempDir()
 	skillDir := filepath.Join(home, "skills", "always-inline")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
