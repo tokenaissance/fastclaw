@@ -84,8 +84,9 @@ type loadSkillFrontmatter struct {
 }
 
 type loadSkillMetadata struct {
-	FastClaw *loadSkillOpenClawMeta `json:"fastclaw"`
-	OpenClaw *loadSkillOpenClawMeta `json:"openclaw"`
+	FastAgent *loadSkillOpenClawMeta `json:"fastagent"`
+	FastClaw  *loadSkillOpenClawMeta `json:"fastclaw"`
+	OpenClaw  *loadSkillOpenClawMeta `json:"openclaw"`
 }
 
 type loadSkillOpenClawMeta struct {
@@ -113,7 +114,11 @@ func unavailableReason(data []byte) string {
 	if err := json.Unmarshal(blob, &meta); err != nil {
 		return ""
 	}
-	oc := meta.FastClaw
+	// Prefer fastagent > fastclaw > openclaw, mirroring SkillMetadata.Meta().
+	oc := meta.FastAgent
+	if oc == nil {
+		oc = meta.FastClaw
+	}
 	if oc == nil {
 		oc = meta.OpenClaw
 	}

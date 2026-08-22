@@ -104,7 +104,7 @@ ALWAYS_LOAD_BODY_SHOULD_APPEAR`
 }
 
 func TestGatedSkillsStayInCatalogWithUnavailableReason(t *testing.T) {
-	t.Setenv("FASTCLAW_HOME", t.TempDir())
+	t.Setenv("FASTAGENT_HOME", t.TempDir())
 	home := t.TempDir()
 	skillDir := filepath.Join(home, "skills", "deepcoin-trade")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
