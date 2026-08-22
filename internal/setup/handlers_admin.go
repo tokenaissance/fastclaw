@@ -611,6 +611,9 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 		if owner := ownerMap[sm.UserID]; owner != nil {
 			entry["ownerUsername"] = owner.Username
 			entry["ownerEmail"] = owner.Email
+			if owner.ExternalID != "" {
+				entry["ownerExternalId"] = owner.ExternalID
+			}
 			if owner.DisplayName != "" {
 				entry["ownerDisplayName"] = owner.DisplayName
 			}
@@ -618,7 +621,9 @@ func (s *Server) handleAdminChats(w http.ResponseWriter, r *http.Request) {
 		if sm.ChatterUserID != "" {
 			entry["chatterUserId"] = sm.ChatterUserID
 			if chatter := ownerMap[sm.ChatterUserID]; chatter != nil {
-				entry["chatterExternalId"] = chatter.ExternalID
+				if chatter.ExternalID != "" {
+					entry["chatterExternalId"] = chatter.ExternalID
+				}
 				if chatter.DisplayName != "" {
 					entry["chatterDisplayName"] = chatter.DisplayName
 				}
