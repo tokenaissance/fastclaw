@@ -1339,6 +1339,10 @@ export interface AgentUpdatePayload {
   // per-agent overrides and fall back to system-wide enable state.
   plugins?: Record<string, boolean>;
   pluginsReset?: boolean;
+  // MCP servers whole-map replace. Omit to leave untouched, send {}
+  // to clear, or send the full desired map to replace.
+  mcpServers?: Record<string, MCPServerConfig>;
+  mcpServersReset?: boolean;
 }
 
 export async function updateAgent(id: string, agent: AgentUpdatePayload) {
@@ -1370,6 +1374,15 @@ export async function listHookPlugins(): Promise<HookPlugin[]> {
   }
 }
 
+export interface MCPServerConfig {
+  type: "http" | "stdio";
+  url?: string;
+  headers?: Record<string, string>;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
 export interface AgentFileConfig {
   model?: string;
   maxTokens?: number;
@@ -1378,6 +1391,7 @@ export interface AgentFileConfig {
   workspace?: string;
   skills?: AgentSkillsConfig;
   providers?: Record<string, ProviderData>;
+  mcpServers?: Record<string, MCPServerConfig>;
 }
 
 // Fetch the raw agent.json for one agent (per-agent overrides only — not
