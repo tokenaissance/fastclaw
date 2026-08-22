@@ -236,6 +236,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// scheduling resolve through. Needs the relational store, so it
 		// rides the same guard as cron.
 		tools.RegisterTimezoneTool(ag.registry, m.opts.dataStore)
+		tools.RegisterPreferenceTool(ag.registry, m.opts.dataStore)
 		// /goal feature: token-accounting hook + update_goal tool, all
 		// keyed on the agent's owner (set above by SetOwnerUserID).
 		// Same dataStore guard as cron because both features need the

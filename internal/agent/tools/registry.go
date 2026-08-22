@@ -376,6 +376,9 @@ func (r *Registry) ChatterUserID() string {
 	return r.userID
 }
 
+// AgentID returns the agent_id this registry belongs to.
+func (r *Registry) AgentID() string { return r.agentID }
+
 // SetAgentOwnerUserID records the agent's owning user_id (agent.user_id
 // in the DB). Identity-file writes (SOUL.md / IDENTITY.md / BOOTSTRAP.md
 // / AGENTS.md / TOOLS.md / HEARTBEAT.md / agent.json) route here, so
