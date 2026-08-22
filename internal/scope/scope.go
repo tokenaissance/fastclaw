@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
@@ -754,7 +755,23 @@ func SetValue(ctx context.Context, st store.Store, kind, scope, scopeID, name, v
 }
 
 // camelToSnake converts a camelCase string to snake_case.
+// ALL_CAPS and already_snake strings pass through (lowercased only) so a
+// token like REPLICATE_API_TOKEN doesn't become r_e_p_l_i_c_a_t_e__a_p_i__t_o_k_e_n.
+// Mirrors the fix applied to store.camelToSnake (a49f9d4) — this copy
+// serves the dual-write path, which is the one reachable via HTTP handlers.
 func camelToSnake(s string) string {
+	hasUpper, hasLower := false, false
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			hasUpper = true
+		}
+		if r >= 'a' && r <= 'z' {
+			hasLower = true
+		}
+	}
+	if !hasUpper || !hasLower {
+		return strings.ToLower(s)
+	}
 	var b []byte
 	for i, r := range s {
 		if r >= 'A' && r <= 'Z' {

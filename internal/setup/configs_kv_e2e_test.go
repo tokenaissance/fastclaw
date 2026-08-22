@@ -131,3 +131,53 @@ func TestProviders_CloudPathE2E(t *testing.T) {
 		t.Errorf("legacy configs openai row still present after delete")
 	}
 }
+
+// TestSettings_AllCapsKeyDualWriteE2E drives the scope.camelToSnake ALL_CAPS
+// fix through the real handler path (a49f9d4 + fork mirror). A setting row
+// carrying an ALL_CAPS key survives read-modify-write in handleUpdateAgent:
+// the dual-write flattens REPLICATE_API_TOKEN to replicate_api_token, not
+// the per-char-underscore mangle the pre-fix scope copy produced.
+func TestSettings_AllCapsKeyDualWriteE2E(t *testing.T) {
+	s, uid, aid := setupFileUploadTest(t)
+	ctx := context.Background()
+
+	// Seed an agent-scope agents.defaults row carrying an ALL_CAPS key.
+	if err := s.dataStore.SaveConfig(ctx, &store.ConfigRecord{
+		Kind: store.KindSetting, UserID: "", AgentID: aid, Name: "agents.defaults", Enabled: true,
+		Data: map[string]interface{}{
+			"model":               "deepseek/deepseek-v4-pro",
+			"REPLICATE_API_TOKEN": "r8_abc123",
+		},
+	}); err != nil {
+		t.Fatalf("seed setting: %v", err)
+	}
+
+	// PATCH via the real handler → read-modify-write → SaveSettingByScope
+	// → dual-write → flattenJSONToKV → scope.camelToSnake.
+	body := strings.NewReader(`{"model":"deepseek/deepseek-v4-lite"}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/agents/"+aid, body)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", aid)
+	req = stampAuthAndUserID(req, uid)
+	rec := httptest.NewRecorder()
+	s.handleUpdateAgent(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// agents.defaults maps to the "agent." KV prefix. The ALL_CAPS key must
+	// flatten to a clean dotted key, and the old per-char mangle must not
+	// exist.
+	v, err := s.dataStore.GetConfigValue(ctx, store.KindSetting, scope.Agent, aid, "agent.replicate_api_token")
+	if err != nil || v != "r8_abc123" {
+		t.Fatalf("dual-written ALL_CAPS key = %q err=%v; want agent.replicate_api_token=r8_abc123", v, err)
+	}
+	if _, err := s.dataStore.GetConfigValue(ctx, store.KindSetting, scope.Agent, aid,
+		"agent.r_e_p_l_i_c_a_t_e__a_p_i__t_o_k_e_n"); err == nil {
+		t.Fatalf("mangled per-char key still written on dual-write path")
+	}
+	// The camelCase field that the patch actually touched stays clean too.
+	if v, err := s.dataStore.GetConfigValue(ctx, store.KindSetting, scope.Agent, aid, "agent.model"); err != nil || v != "deepseek/deepseek-v4-lite" {
+		t.Fatalf("agent.model = %q err=%v; want updated value", v, err)
+	}
+}

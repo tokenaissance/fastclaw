@@ -140,3 +140,60 @@ func TestMigrateConfigsToKV(t *testing.T) {
 		t.Fatalf("after second migrate: v=%q err=%v", v, err)
 	}
 }
+
+// TestCamelToSnakeAllCaps pins the a49f9d4 fix: ALL_CAPS and already_snake
+// strings pass through (lowercased only) instead of getting a per-char
+// underscore. REPLICATE_API_TOKEN was becoming r_e_p_l_i_c_a_t_e__a_p_i__t_o_k_e_n.
+func TestCamelToSnakeAllCaps(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"apiKey", "api_key"},           // camelCase → snake
+		{"apiBase", "api_base"},         // camelCase → snake
+		{"REPLICATE_API_TOKEN", "replicate_api_token"}, // ALL_CAPS → lowercase only
+		{"api_base", "api_base"},        // already_snake → passthrough lowercased
+		{"model", "model"},              // single lowercase word
+		{"HTTP", "http"},                // single ALL_CAPS word → lowercase only (was h_t_t_p)
+	}
+	for _, c := range cases {
+		if got := camelToSnake(c.in); got != c.want {
+			t.Errorf("camelToSnake(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestMigrateConfigsToKV_AllCapsKey is the migration-path regression guard
+// for a49f9d4: a provider whose Data contains an ALL_CAPS key (e.g. an env
+// token like REPLICATE_API_TOKEN) must flatten to a clean dotted key, not
+// the per-char-underscore mangle the old camelToSnake produced.
+func TestMigrateConfigsToKV_AllCapsKey(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM configs_kv`); err != nil {
+		t.Fatalf("clear configs_kv: %v", err)
+	}
+	if err := db.SaveConfig(ctx, &ConfigRecord{
+		Kind: KindProvider, UserID: "user-a", AgentID: "", Name: "replicate", Enabled: true,
+		Data: map[string]interface{}{
+			"apiBase":            "https://api.replicate.com",
+			"REPLICATE_API_TOKEN": "r8_abc123",
+		},
+	}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := db.migrateConfigsToKV(ctx); err != nil {
+		t.Fatalf("migrateConfigsToKV: %v", err)
+	}
+
+	v, err := db.GetConfigValue(ctx, KindProvider, "user", "user-a", "replicate.replicate_api_token")
+	if err != nil || v != "r8_abc123" {
+		t.Fatalf("migrated ALL_CAPS key = %q err=%v; want replicate.replicate_api_token=r8_abc123", v, err)
+	}
+	// The mangled per-char form must NOT exist.
+	if _, err := db.GetConfigValue(ctx, KindProvider, "user", "user-a",
+		"replicate.r_e_p_l_i_c_a_t_e__a_p_i__t_o_k_e_n"); err == nil {
+		t.Fatalf("mangled per-char key still present after fix")
+	}
+}
