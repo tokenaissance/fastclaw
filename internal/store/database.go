@@ -157,14 +157,14 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateUsersAddOwnerUserID(ctx); err != nil {
 		return fmt.Errorf("migrate users.owner_user_id: %w", err)
 	}
+	if err := d.migrateChannelsAddSharedIdentity(ctx); err != nil {
+		return fmt.Errorf("migrate channels shared_identity: %w", err)
+	}
 	if err := d.migrateChannelsFromConfigs(ctx); err != nil {
 		return fmt.Errorf("migrate channels from configs: %w", err)
 	}
 	if err := d.migrateConfigsToKV(ctx); err != nil {
 		return fmt.Errorf("migrate configs to kv: %w", err)
-	}
-	if err := d.migrateChannelsAddSharedIdentity(ctx); err != nil {
-		return fmt.Errorf("migrate channels shared_identity: %w", err)
 	}
 	return nil
 }
