@@ -325,7 +325,9 @@ func (s *Server) handleConnectAgentTelegram(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.invalidateOwner(uid, aid)
-	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "telegram", credKey); rec != nil {
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "telegram", username); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	} else if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "telegram", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
@@ -520,7 +522,9 @@ func (s *Server) handleConnectAgentDiscord(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.invalidateOwner(uid, aid)
-	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "discord", credKey); rec != nil {
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "discord", userID); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	} else if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "discord", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
@@ -657,7 +661,9 @@ func (s *Server) handleConnectAgentSlack(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.invalidateOwner(uid, aid)
-	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "slack", credKey); rec != nil {
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "slack", teamID); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	} else if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "slack", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
@@ -937,7 +943,9 @@ func (s *Server) persistWeChatAccount(r *http.Request, userID, agentIDArg, agent
 		return err
 	}
 	s.invalidateOwner(userID, agentIDArg)
-	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "wechat", credKey); rec != nil {
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "wechat", creds.ILinkBotID); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	} else if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "wechat", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
 	return nil
@@ -1104,7 +1112,13 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.invalidateOwner(uid, aid)
-	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "feishu", credKey); rec != nil {
+	// Fork adaptation: channels-table accountID for feishu is appID (see
+	// saveChannelRecord above), NOT credKey — upstream passed credKey which
+	// would miss the just-saved row and silently no-op the channels-first
+	// hot-register. line's credKey == userID (its accountID), so it matches.
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "feishu", appID); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	} else if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "feishu", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
 	resp := map[string]any{
@@ -1217,7 +1231,9 @@ func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.invalidateOwner(uid, aid)
-	if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "line", credKey); rec != nil {
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "line", credKey); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	} else if rec, _ := s.dataStore.LookupChannelByCredential(r.Context(), "line", credKey); rec != nil {
 		s.hotRegisterChannel(*rec)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{
