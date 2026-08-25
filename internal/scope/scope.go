@@ -380,10 +380,33 @@ func kvToSettingMap(prefix string, kv map[string]string) map[string]interface{} 
 		if len(prefix) > 0 && len(fullKey) > len(prefix) {
 			relKey = fullKey[len(prefix):]
 		}
-		// Convert snake_case back to camelCase.
-		camelKey := snakeToCamel(relKey)
-		// Try to parse booleans and numbers back into native types.
-		out[camelKey] = parseKVValue(value)
+		// Rebuild nested maps from dotted keys. Each segment is
+		// snake_case→camelCase converted; the leaf holds the parsed value
+		// (bool / number / JSON object / string). Empty segments (stray or
+		// trailing dots) are tolerated and dropped.
+		segments := make([]string, 0, strings.Count(relKey, ".")+1)
+		for _, seg := range strings.Split(relKey, ".") {
+			if seg != "" {
+				segments = append(segments, seg)
+			}
+		}
+		if len(segments) == 0 {
+			continue
+		}
+		node := out
+		for i, seg := range segments {
+			camel := snakeToCamel(seg)
+			if i == len(segments)-1 {
+				node[camel] = parseKVValue(value)
+				continue
+			}
+			child, ok := node[camel].(map[string]interface{})
+			if !ok {
+				child = map[string]interface{}{}
+				node[camel] = child
+			}
+			node = child
+		}
 	}
 	return out
 }

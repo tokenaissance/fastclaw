@@ -242,6 +242,98 @@ func TestSnakeCamelRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKvToSettingMapNested pins that dotted relative keys reconstruct into
+// nested maps (with snake_case→camelCase per segment). Regression for the
+// flat-key bug: tools.providers.searxng.endpoint used to yield the literal
+// key "searxng.endpoint", breaking SettingInto into typed provider configs.
+func TestKvToSettingMapNested(t *testing.T) {
+	got := kvToSettingMap("tools.providers.", map[string]string{
+		"tools.providers.searxng.endpoint":        "https://searxng.tokenaissance.com",
+		"tools.providers.searxng.api_key":         "sk-x",
+		"tools.providers.jina.options.extra.mode": "fast",
+	})
+	want := map[string]interface{}{
+		"searxng": map[string]interface{}{
+			"endpoint": "https://searxng.tokenaissance.com",
+			"apiKey":   "sk-x",
+		},
+		"jina": map[string]interface{}{
+			"options": map[string]interface{}{
+				"extra": map[string]interface{}{"mode": "fast"},
+			},
+		},
+	}
+	if !jsonEqual(got, want) {
+		t.Fatalf("kvToSettingMap = %#v, want %#v", got, want)
+	}
+}
+
+// TestKvToSettingMapToleratesBadDots guards against stray/trailing dots in
+// stored keys — they must be dropped, not turned into empty map keys.
+func TestKvToSettingMapToleratesBadDots(t *testing.T) {
+	got := kvToSettingMap("tools.providers.", map[string]string{
+		"tools.providers.searxng.endpoint.": "https://x",
+		"tools.providers.searxng..api_key":  "sk-x",
+	})
+	want := map[string]interface{}{
+		"searxng": map[string]interface{}{
+			"endpoint": "https://x",
+			"apiKey":   "sk-x",
+		},
+	}
+	if !jsonEqual(got, want) {
+		t.Fatalf("kvToSettingMap = %#v, want %#v", got, want)
+	}
+}
+
+// TestSettingNestedNamespaceRoundTrip reproduces the dev regression
+// end-to-end: SaveSetting dual-writes tools.providers to a dotted-leaf KV
+// row, and Setting/SettingInto must rebuild the nested map so assembleConfig
+// can unmarshal into map[string]config.ToolProviderCfg.
+func TestSettingNestedNamespaceRoundTrip(t *testing.T) {
+	db := openScopeDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	if err := SaveSetting(ctx, db, "", "", "tools.providers", map[string]interface{}{
+		"searxng": map[string]interface{}{
+			"endpoint": "https://searxng.tokenaissance.com",
+		},
+	}); err != nil {
+		t.Fatalf("SaveSetting: %v", err)
+	}
+
+	// The dual-write stores the flattened dotted leaf (exactly the dev shape).
+	v, err := db.GetConfigValue(ctx, store.KindSetting, System, "", "tools.providers.searxng.endpoint")
+	if err != nil || v != "https://searxng.tokenaissance.com" {
+		t.Fatalf("configs_kv leaf = %q err=%v", v, err)
+	}
+
+	// Setting must reconstruct the nested map.
+	got, err := Setting(ctx, db, "tools.providers", "", "")
+	if err != nil {
+		t.Fatalf("Setting: %v", err)
+	}
+	searxng, ok := got["searxng"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Setting searxng = %#v (%T), want nested map", got["searxng"], got["searxng"])
+	}
+	if ep, _ := searxng["endpoint"].(string); ep != "https://searxng.tokenaissance.com" {
+		t.Fatalf("searxng.endpoint = %v, want https://searxng.tokenaissance.com", searxng["endpoint"])
+	}
+
+	// Full regression: typed unmarshal must succeed. This is what
+	// assembleConfig does; it used to fail with "cannot unmarshal string into
+	// Go value of type config.ToolProviderCfg".
+	providers := map[string]config.ToolProviderCfg{}
+	if err := SettingInto(ctx, db, "tools.providers", "", "", &providers); err != nil {
+		t.Fatalf("SettingInto tools.providers: %v", err)
+	}
+	if got := providers["searxng"].Endpoint; got != "https://searxng.tokenaissance.com" {
+		t.Fatalf("SettingInto searxng.endpoint = %q, want https://searxng.tokenaissance.com", got)
+	}
+}
+
 func jsonEqual(a, b interface{}) bool {
 	as, err := json.Marshal(a)
 	if err != nil {
