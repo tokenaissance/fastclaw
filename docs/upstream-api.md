@@ -364,7 +364,7 @@ give it:
 If the agent supports Skills, install or load:
 
 ```text
-skills/fastclaw-api-integration/SKILL.md
+skills/fastagent-api-integration/SKILL.md
 ```
 
 That skill is the short operational version of this API contract.
