@@ -144,6 +144,30 @@ func TestDeleteUser_CleansAgentScopedRows_CloudPathE2E(t *testing.T) {
 			t.Fatalf("save config %s: %v", cfg.ID, err)
 		}
 	}
+	// Fork-specific tables that must also cascade on user delete: the
+	// dedicated IM channels table (upstream keeps channels in configs)
+	// and the configs_kv mirror (agent / per-(user,agent) / user scopes).
+	if err := db.SaveChannel(ctx, &ChannelRecord{
+		ID:        "ch_user_delete",
+		UserID:    ownerID,
+		AgentID:   agentID,
+		Type:      "telegram",
+		AccountID: "bot_user_delete",
+		Enabled:   true,
+	}); err != nil {
+		t.Fatalf("save channel: %v", err)
+	}
+	for _, kv := range []struct {
+		scope, scopeID, name string
+	}{
+		{"agent", agentID, "agents.defaults.model"},
+		{"user-agent", ownerID + "/" + agentID, "bindings.timezone"},
+		{"user", ownerID, "general.locale"},
+	} {
+		if err := db.SetConfigValue(ctx, KindSetting, kv.scope, kv.scopeID, kv.name, "x"); err != nil {
+			t.Fatalf("set config value %s/%s/%s: %v", kv.scope, kv.scopeID, kv.name, err)
+		}
+	}
 
 	if err := db.DeleteUser(ctx, ownerID); err != nil {
 		t.Fatalf("delete user: %v", err)
@@ -178,6 +202,13 @@ func TestDeleteUser_CleansAgentScopedRows_CloudPathE2E(t *testing.T) {
 		// overrides (user_id=owner, agent_id=X) must be gone.
 		{"configs", "agent_id = ?", agentID},
 		{"configs", "user_id = ?", ownerID},
+		// fork-specific cascade additions: dedicated channels table +
+		// configs_kv mirror across all three scopes this user/agent
+		// appears in.
+		{"channels", "agent_id = ?", agentID},
+		{"configs_kv", "scope = 'agent' AND scope_id = ?", agentID},
+		{"configs_kv", "scope = 'user-agent' AND scope_id = ?", ownerID + "/" + agentID},
+		{"configs_kv", "scope = 'user' AND scope_id = ?", ownerID},
 	} {
 		var count int
 		if err := db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+tc.table+" WHERE "+tc.where, tc.arg).Scan(&count); err != nil {

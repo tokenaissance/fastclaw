@@ -1990,10 +1990,10 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 	for _, aid := range ownedAgents {
 		// Match DeleteAgent's table set — deleting a user's agents must
 		// clean the same per-agent rows (agent_knowledge_chunks (from #5)
-		// + projects/project_runtimes/agent_goals included) or they
-		// orphan. Upstream's #15 only patched DeleteAgent; fork closes
-		// the same gap here.
-		for _, t := range []string{"agent_files", "agent_knowledge_chunks", "sessions", "session_messages", "session_events", "cron_jobs", "projects", "project_runtimes", "agent_goals"} {
+		// + projects/project_runtimes/agent_goals + channels (fork
+		// dedicated IM table) included) or they orphan. Upstream's #15
+		// only patched DeleteAgent; fork closes the same gap here.
+		for _, t := range []string{"agent_files", "agent_knowledge_chunks", "sessions", "session_messages", "session_events", "cron_jobs", "projects", "project_runtimes", "agent_goals", "channels"} {
 			if _, err := tx.ExecContext(ctx,
 				fmt.Sprintf("DELETE FROM %s WHERE agent_id = %s", t, d.ph(1)), aid); err != nil {
 				return err
@@ -2007,13 +2007,25 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 			fmt.Sprintf("DELETE FROM configs WHERE agent_id = %s", d.ph(1)), aid); err != nil {
 			return err
 		}
+		// Same configs_kv sweep as DeleteAgent: the mirror keeps both
+		// scope='agent' rows and scope='user-agent' '<user>/<agent>'
+		// rows for this agent; the read path is KV-first, so drop them.
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s)`,
+				d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+			"agent", aid, "user-agent", "%/"+aid); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM agents WHERE user_id = %s", d.ph(1)), id); err != nil {
 		return err
 	}
-	// Per-user state that's not agent-scoped (agent_files is now agent-only).
-	for _, t := range []string{"web_sessions", "apikeys", "sessions", "session_messages", "session_events"} {
+	// Per-user state that's not agent-scoped (agent_files is now
+	// agent-only). channels is included for the user-authored rows on
+	// someone else's agent ('user_id=X, agent_id=Y'); own agents'
+	// channels were already swept by the per-agent loop above.
+	for _, t := range []string{"web_sessions", "apikeys", "channels", "sessions", "session_messages", "session_events"} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %s WHERE user_id = %s", t, d.ph(1)), id); err != nil {
 			return err
@@ -2024,6 +2036,15 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 	// authored on someone else's agent ('user_id=X, agent_id=Y').
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM configs WHERE user_id = %s", d.ph(1)), id); err != nil {
+		return err
+	}
+	// configs_kv mirror for this user's scopes: scope='user', scope_id=X
+	// plus scope='user-agent' rows whose '<user>/<agent>' prefix is this
+	// user (overrides they authored on any agent).
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		"user", id, "user-agent", id+"/%"); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -2342,6 +2363,12 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	// channels is fork-specific (upstream keeps IM bindings in configs
+	// kind='channel', which the configs sweep below covers). This
+	// dedicated table is the live lookup source (LookupChannel /
+	// ListChannels), so it must be swept too or the deleted agent's bot
+	// binding dangles: LookupChannel keeps routing inbound IM to a dead
+	// agent and UNIQUE(type, account_id) blocks rebinding the account.
 	for _, t := range []string{
 		"agent_files",
 		"agent_knowledge_chunks",
@@ -2352,6 +2379,7 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 		"projects",
 		"project_runtimes",
 		"agent_goals",
+		"channels",
 	} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s WHERE agent_id = %s`, t, d.ph(1)), agentID); err != nil {
@@ -2368,6 +2396,19 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 	// (scope_id dropped), so agent_id = X captures all of them.
 	if _, err := tx.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM configs WHERE agent_id = %s`, d.ph(1)), agentID); err != nil {
+		return err
+	}
+	// configs_kv mirrors agent-scoped config rows under two scope
+	// encodings (kvScopeFromOwnership): scope='agent', scope_id=agentID
+	// (official rows) and scope='user-agent', scope_id='<user>/<agent>'
+	// (per-user overrides). The blob configs table above is
+	// authoritative, but the KV read path is read-preferred
+	// (scope.GetValue/Setting try configs_kv first), so sweep both
+	// encodings or stale values survive the delete and can be read.
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf(`DELETE FROM configs_kv WHERE (scope = %s AND scope_id = %s) OR (scope = %s AND scope_id LIKE %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		"agent", agentID, "user-agent", "%/"+agentID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,

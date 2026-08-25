@@ -119,6 +119,29 @@ func TestDeleteAgentRemovesScopedRows(t *testing.T) {
 			t.Fatalf("save config %s: %v", cfg.ID, err)
 		}
 	}
+	// Fork-specific tables that must also cascade: the dedicated IM
+	// channels table (upstream keeps channels in configs kind='channel')
+	// and the configs_kv mirror (agent scope + per-(user,agent) scope).
+	if err := db.SaveChannel(ctx, &ChannelRecord{
+		ID:        "ch_delete_me",
+		UserID:    ownerID,
+		AgentID:   agentID,
+		Type:      "telegram",
+		AccountID: "bot_delete_me",
+		Enabled:   true,
+	}); err != nil {
+		t.Fatalf("save channel: %v", err)
+	}
+	for _, kv := range []struct {
+		scope, scopeID, name string
+	}{
+		{"agent", agentID, "agents.defaults.model"},
+		{"user-agent", ownerID + "/" + agentID, "bindings.timezone"},
+	} {
+		if err := db.SetConfigValue(ctx, KindSetting, kv.scope, kv.scopeID, kv.name, "x"); err != nil {
+			t.Fatalf("set config value %s/%s/%s: %v", kv.scope, kv.scopeID, kv.name, err)
+		}
+	}
 
 	if err := db.DeleteAgent(ctx, agentID); err != nil {
 		t.Fatalf("delete agent: %v", err)
@@ -130,22 +153,28 @@ func TestDeleteAgentRemovesScopedRows(t *testing.T) {
 	for _, tc := range []struct {
 		table string
 		where string
+		arg   string
 	}{
-		{"agent_files", "agent_id = ?"},
-		{"agent_knowledge_chunks", "agent_id = ?"},
-		{"sessions", "agent_id = ?"},
-		{"session_messages", "agent_id = ?"},
-		{"session_events", "agent_id = ?"},
-		{"cron_jobs", "agent_id = ?"},
-		{"projects", "agent_id = ?"},
-		{"project_runtimes", "agent_id = ?"},
-		{"agent_goals", "agent_id = ?"},
+		{"agent_files", "agent_id = ?", agentID},
+		{"agent_knowledge_chunks", "agent_id = ?", agentID},
+		{"sessions", "agent_id = ?", agentID},
+		{"session_messages", "agent_id = ?", agentID},
+		{"session_events", "agent_id = ?", agentID},
+		{"cron_jobs", "agent_id = ?", agentID},
+		{"projects", "agent_id = ?", agentID},
+		{"project_runtimes", "agent_id = ?", agentID},
+		{"agent_goals", "agent_id = ?", agentID},
 		// fork schema uses (user_id, agent_id), not scope_id — agent_id = ?
 		// captures both the official row (user_id='') and per-user overrides.
-		{"configs", "agent_id = ?"},
+		{"configs", "agent_id = ?", agentID},
+		// fork-specific cascade additions: dedicated channels table +
+		// configs_kv mirror (agent scope + per-(user,agent) scope).
+		{"channels", "agent_id = ?", agentID},
+		{"configs_kv", "scope = 'agent' AND scope_id = ?", agentID},
+		{"configs_kv", "scope = 'user-agent' AND scope_id = ?", ownerID + "/" + agentID},
 	} {
 		var count int
-		if err := db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+tc.table+" WHERE "+tc.where, agentID).Scan(&count); err != nil {
+		if err := db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+tc.table+" WHERE "+tc.where, tc.arg).Scan(&count); err != nil {
 			t.Fatalf("count %s: %v", tc.table, err)
 		}
 		if count != 0 {
