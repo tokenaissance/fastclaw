@@ -21,12 +21,12 @@ type ModelCost struct {
 
 // UsageReport matches the payload FastAgent sends to webhook
 type UsageReport struct {
-	UserID       string `json:"userId"`
-	AgentID      string `json:"agentId"`
-	SessionID    string `json:"sessionId,omitempty"`
-	ProviderID   string `json:"providerId"`
-	ModelID      string `json:"modelId"`
-	Usage        struct {
+	UserID     string `json:"userId"`
+	AgentID    string `json:"agentId"`
+	SessionID  string `json:"sessionId,omitempty"`
+	ProviderID string `json:"providerId"`
+	ModelID    string `json:"modelId"`
+	Usage      struct {
 		InputTokens         int `json:"inputTokens"`
 		OutputTokens        int `json:"outputTokens"`
 		CacheReadTokens     int `json:"cacheReadTokens,omitempty"`
@@ -116,12 +116,12 @@ func main() {
 		}
 
 		stats := map[string]interface{}{
-			"totalWebhooks":   len(receivedPayloads),
-			"totalInputTokens": totalInput,
+			"totalWebhooks":     len(receivedPayloads),
+			"totalInputTokens":  totalInput,
 			"totalOutputTokens": totalOutput,
-			"totalCostCents":  totalCost,
-			"byUser":          byUser,
-			"payloads":        receivedPayloads,
+			"totalCostCents":    totalCost,
+			"byUser":            byUser,
+			"payloads":          receivedPayloads,
 		}
 
 		w.Header().Set("Content-Type", "application/json")

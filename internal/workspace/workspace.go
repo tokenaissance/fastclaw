@@ -76,7 +76,7 @@ type ObjectInfo struct {
 // Common errors. Implementations should wrap these with fmt.Errorf("%w: ...")
 // when adding context, so callers can still errors.Is() match.
 var (
-	ErrNotFound                = errors.New("workspace: object not found")
-	ErrSignedURLUnsupported    = errors.New("workspace: signed URLs not supported by this backend")
-	ErrMoveDestinationExists   = errors.New("workspace: move destination already exists")
+	ErrNotFound              = errors.New("workspace: object not found")
+	ErrSignedURLUnsupported  = errors.New("workspace: signed URLs not supported by this backend")
+	ErrMoveDestinationExists = errors.New("workspace: move destination already exists")
 )

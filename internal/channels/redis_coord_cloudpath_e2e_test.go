@@ -35,9 +35,9 @@ type fakeRedisChannel struct {
 	sends     chan bus.OutboundMessage
 }
 
-func (f *fakeRedisChannel) Name() string         { return f.name }
-func (f *fakeRedisChannel) AccountID() string    { return f.accountID }
-func (f *fakeRedisChannel) BotUsername() string  { return "" }
+func (f *fakeRedisChannel) Name() string                   { return f.name }
+func (f *fakeRedisChannel) AccountID() string              { return f.accountID }
+func (f *fakeRedisChannel) BotUsername() string            { return "" }
 func (f *fakeRedisChannel) Send(chatID, text string) error { return nil }
 func (f *fakeRedisChannel) SendTyping(chatID string) error { return nil }
 

@@ -21,7 +21,7 @@ type FSPolicy struct {
 // NetPolicy controls network access.
 type NetPolicy struct {
 	Outbound []NetRule `yaml:"outbound,omitempty" json:"outbound,omitempty"`
-	Mode     string   `yaml:"mode,omitempty"     json:"mode,omitempty"` // "none", "allowlist", "permissive"
+	Mode     string    `yaml:"mode,omitempty"     json:"mode,omitempty"` // "none", "allowlist", "permissive"
 }
 
 // NetRule defines an outbound network allowlist entry.
@@ -35,7 +35,7 @@ type NetRule struct {
 // ToolsPolicy controls which tools are available.
 type ToolsPolicy struct {
 	Allow []string `yaml:"allow,omitempty" json:"allow,omitempty"` // tool names, * = all
-	Deny  []string `yaml:"deny,omitempty"  json:"deny,omitempty"` // deny wins over allow
+	Deny  []string `yaml:"deny,omitempty"  json:"deny,omitempty"`  // deny wins over allow
 }
 
 // ResPolicy controls resource limits for sandbox.

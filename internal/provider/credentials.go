@@ -26,11 +26,11 @@ type CredentialEntry struct {
 
 // CredentialManager handles secure credential storage and retrieval.
 type CredentialManager struct {
-	masterKey     []byte
-	entries       map[string]*CredentialEntry
-	storePath     string
+	masterKey      []byte
+	entries        map[string]*CredentialEntry
+	storePath      string
 	needsReencrypt bool // true after legacy-key fallback decrypt
-	mu            sync.RWMutex
+	mu             sync.RWMutex
 }
 
 // NewCredentialManagerForUser creates a credential manager scoped to a specific

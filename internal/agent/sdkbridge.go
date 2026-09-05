@@ -34,7 +34,7 @@ type toolAdapter struct {
 }
 
 func (t *toolAdapter) Name() string        { return t.name }
-func (t *toolAdapter) Description() string  { return t.description }
+func (t *toolAdapter) Description() string { return t.description }
 
 func (t *toolAdapter) InputSchema() sdktypes.ToolInputSchema {
 	// Convert FastAgent params (interface{}) to SDK ToolInputSchema

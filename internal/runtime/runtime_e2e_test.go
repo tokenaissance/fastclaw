@@ -91,11 +91,13 @@ func (b *boxliteOnlyExecutor) Exec(ctx context.Context, command string, timeout 
 	}
 	return "", nil
 }
-func (b *boxliteOnlyExecutor) ReadFile(context.Context, string) (string, error)          { return "", nil }
-func (b *boxliteOnlyExecutor) WriteFile(context.Context, string, string) (string, error) { return "", nil }
-func (b *boxliteOnlyExecutor) ListDir(context.Context, string) (string, error)           { return "", nil }
-func (b *boxliteOnlyExecutor) Backend() string                                           { return "boxlite" }
-func (b *boxliteOnlyExecutor) Close() error                                              { return nil }
+func (b *boxliteOnlyExecutor) ReadFile(context.Context, string) (string, error) { return "", nil }
+func (b *boxliteOnlyExecutor) WriteFile(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (b *boxliteOnlyExecutor) ListDir(context.Context, string) (string, error) { return "", nil }
+func (b *boxliteOnlyExecutor) Backend() string                                 { return "boxlite" }
+func (b *boxliteOnlyExecutor) Close() error                                    { return nil }
 
 type stubPool struct {
 	ex sandbox.Executor

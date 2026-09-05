@@ -17,7 +17,7 @@ type FTSResult struct {
 	Timestamp time.Time
 	AgentID   string
 	ChatID    string
-	Snippet   string  // FTS5 snippet() function output
+	Snippet   string // FTS5 snippet() function output
 	Rank      float64
 }
 

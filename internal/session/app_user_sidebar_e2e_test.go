@@ -40,11 +40,11 @@ func TestSessions_AppUserSidebarE2E_ListIncludesChildren(t *testing.T) {
 	ctx := context.Background()
 
 	const (
-		parentID  = "sidebar_e2e_parent"
-		childID1  = "sidebar_e2e_child1"
-		childID2  = "sidebar_e2e_child2"
+		parentID   = "sidebar_e2e_parent"
+		childID1   = "sidebar_e2e_child1"
+		childID2   = "sidebar_e2e_child2"
 		strangerID = "sidebar_e2e_stranger"
-		agentID   = "sidebar_e2e_agent"
+		agentID    = "sidebar_e2e_agent"
 	)
 	createSessionE2EUser(t, db, parentID, "user", "")
 	createSessionE2EUser(t, db, childID1, "app_user", parentID)

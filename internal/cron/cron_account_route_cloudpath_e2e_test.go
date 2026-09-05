@@ -86,20 +86,20 @@ func TestCron_AccountRoute_CloudPathE2E(t *testing.T) {
 		// next_run in the past so the row is immediately due.
 		dueAt := time.Now().Add(-time.Minute)
 		rec := &store.CronJobRecord{
-			ID:          "job-2",
-			UserID:      "u_owner",
-			AgentID:     "agent-1",
-			Name:        "daily-ping",
-			Type:        "interval",
-			Schedule:    "24h",
-			Message:     "ping",
-			Channel:     "telegram",
-			AccountID:   "acct-bot",
-			ChatID:      "chat-2",
-			Timezone:    "UTC",
-			Enabled:     true,
-			NextRun:     &dueAt,
-			CreatedAt:   time.Now(),
+			ID:        "job-2",
+			UserID:    "u_owner",
+			AgentID:   "agent-1",
+			Name:      "daily-ping",
+			Type:      "interval",
+			Schedule:  "24h",
+			Message:   "ping",
+			Channel:   "telegram",
+			AccountID: "acct-bot",
+			ChatID:    "chat-2",
+			Timezone:  "UTC",
+			Enabled:   true,
+			NextRun:   &dueAt,
+			CreatedAt: time.Now(),
 		}
 		if err := db.SaveCronJob(context.Background(), rec); err != nil {
 			t.Fatalf("save cron job: %v", err)

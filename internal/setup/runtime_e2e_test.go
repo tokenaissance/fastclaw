@@ -55,11 +55,13 @@ func (f *fakeRuntimeExecutor) Exec(_ context.Context, command string, _ time.Dur
 	return "", nil
 }
 
-func (f *fakeRuntimeExecutor) ReadFile(context.Context, string) (string, error)          { return "", nil }
-func (f *fakeRuntimeExecutor) WriteFile(context.Context, string, string) (string, error) { return "", nil }
-func (f *fakeRuntimeExecutor) ListDir(context.Context, string) (string, error)           { return "", nil }
-func (f *fakeRuntimeExecutor) Backend() string                                           { return "e2b" }
-func (f *fakeRuntimeExecutor) Close() error                                              { return nil }
+func (f *fakeRuntimeExecutor) ReadFile(context.Context, string) (string, error) { return "", nil }
+func (f *fakeRuntimeExecutor) WriteFile(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (f *fakeRuntimeExecutor) ListDir(context.Context, string) (string, error) { return "", nil }
+func (f *fakeRuntimeExecutor) Backend() string                                 { return "e2b" }
+func (f *fakeRuntimeExecutor) Close() error                                    { return nil }
 
 // ExposePort satisfies sandbox.PortExposer — the backend-agnostic runtime
 // type-asserts this to mint the preview URL.

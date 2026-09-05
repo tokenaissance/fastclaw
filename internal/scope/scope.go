@@ -11,11 +11,16 @@
 //	      per-(user, agent) (user=X, agent=Y)
 //
 // kind="provider": name is the provider key ("openai"). Inner rows
-//   replace outer entries entirely (no field-level merge).
+//
+//	replace outer entries entirely (no field-level merge).
+//
 // kind="channel":  name is the channel type ("telegram"). A disabled inner
-//   row erases the outer entry — lets a user opt out of a system-wide bot.
+//
+//	row erases the outer entry — lets a user opt out of a system-wide bot.
+//
 // kind="setting":  name is the namespace ("agents.defaults", "sandbox", …).
-//   Top-level keys merge field-wise; inner-scope keys win.
+//
+//	Top-level keys merge field-wise; inner-scope keys win.
 package scope
 
 import (

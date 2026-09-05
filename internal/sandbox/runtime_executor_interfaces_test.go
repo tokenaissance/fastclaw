@@ -22,14 +22,14 @@ import (
 // Compile-time: every concrete executor and pool satisfies the runtime's
 // entry points. If any backend drops a method, this package stops compiling.
 var (
-	_ Executor      = (*DockerExecutor)(nil)
-	_ Executor      = (*E2BExecutor)(nil)
-	_ Executor      = (*BoxliteExecutor)(nil)
-	_ ExecutorPool  = (*DockerExecutorPool)(nil)
-	_ ExecutorPool  = (*E2BExecutorPool)(nil)
-	_ ExecutorPool  = (*BoxliteExecutorPool)(nil)
-	_ PortExposer   = (*E2BExecutor)(nil)
-	_ PortExposer   = (*fakePortExposer)(nil)
+	_ Executor     = (*DockerExecutor)(nil)
+	_ Executor     = (*E2BExecutor)(nil)
+	_ Executor     = (*BoxliteExecutor)(nil)
+	_ ExecutorPool = (*DockerExecutorPool)(nil)
+	_ ExecutorPool = (*E2BExecutorPool)(nil)
+	_ ExecutorPool = (*BoxliteExecutorPool)(nil)
+	_ PortExposer  = (*E2BExecutor)(nil)
+	_ PortExposer  = (*fakePortExposer)(nil)
 )
 
 // fakePortExposer is only here to keep the PortExposer compile-time group

@@ -22,12 +22,12 @@ type Process struct {
 	stdout   *bufio.Scanner
 	stderr   io.ReadCloser
 
-	mu        sync.Mutex
-	nextID    atomic.Int64
-	pending   map[int]chan *Response
-	onNotify  func(Notification)
-	running   bool
-	cancelFn  context.CancelFunc
+	mu       sync.Mutex
+	nextID   atomic.Int64
+	pending  map[int]chan *Response
+	onNotify func(Notification)
+	running  bool
+	cancelFn context.CancelFunc
 }
 
 // NewProcess creates a new plugin process from a manifest.

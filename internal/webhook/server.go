@@ -32,9 +32,9 @@ type WebhookRequest struct {
 
 // WebhookResponse is the JSON response returned to webhook callers.
 type WebhookResponse struct {
-	OK      bool   `json:"ok"`
-	Reply   string `json:"reply,omitempty"`
-	Error   string `json:"error,omitempty"`
+	OK    bool   `json:"ok"`
+	Reply string `json:"reply,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // Server is the webhook HTTP server.

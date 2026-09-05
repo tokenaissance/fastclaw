@@ -122,16 +122,16 @@ func TestBuildAttachmentNameSecondaryCollision(t *testing.T) {
 
 func TestExtFromMIMECoversCommonDocs(t *testing.T) {
 	cases := map[string]string{
-		"application/pdf":             ".pdf",
-		"application/pdf; charset=x":  ".pdf",
-		"text/plain":                  ".txt",
-		"text/markdown":               ".md",
-		"text/csv":                    ".csv",
-		"application/json":            ".json",
-		"application/zip":             ".zip",
-		"image/png":                   ".png",
-		"image/jpg":                   ".jpg",
-		"application/x-unknown-type":  "",
+		"application/pdf":            ".pdf",
+		"application/pdf; charset=x": ".pdf",
+		"text/plain":                 ".txt",
+		"text/markdown":              ".md",
+		"text/csv":                   ".csv",
+		"application/json":           ".json",
+		"application/zip":            ".zip",
+		"image/png":                  ".png",
+		"image/jpg":                  ".jpg",
+		"application/x-unknown-type": "",
 	}
 	for ct, want := range cases {
 		if got := extFromMIME(ct); got != want {

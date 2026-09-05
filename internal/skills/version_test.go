@@ -8,9 +8,9 @@ import (
 
 func TestReadSkillVersionFromDir(t *testing.T) {
 	tests := []struct {
-		name     string
-		content  string
-		want     string
+		name    string
+		content string
+		want    string
 	}{
 		{
 			name:    "version without v prefix",

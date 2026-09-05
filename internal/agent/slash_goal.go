@@ -187,4 +187,3 @@ func (a *Agent) clearGoalForSession(sessionKey string) {
 	}
 	_ = a.goalStore.DeleteGoal(context.Background(), g.ID)
 }
-

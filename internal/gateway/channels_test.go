@@ -118,14 +118,14 @@ func TestExpandChannelRecordBindings(t *testing.T) {
 // used by the WeChat adapter path (needs a ConfigRecord shape).
 func TestChannelRecordToConfigRecord(t *testing.T) {
 	ch := store.ChannelRecord{
-		ID:       "ch_1",
-		UserID:   "u_1",
-		AgentID:  "agt_1",
-		Type:     "wechat",
+		ID:        "ch_1",
+		UserID:    "u_1",
+		AgentID:   "agt_1",
+		Type:      "wechat",
 		AccountID: "ilink_1",
-		Enabled:  true,
-		BotToken: "tok",
-		Data:     map[string]interface{}{"botToken": "tok"},
+		Enabled:   true,
+		BotToken:  "tok",
+		Data:      map[string]interface{}{"botToken": "tok"},
 	}
 	cfg := channelRecordToConfigRecord(ch)
 	if cfg.Kind != store.KindChannel {

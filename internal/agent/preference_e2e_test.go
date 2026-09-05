@@ -31,11 +31,11 @@ func TestPreference_CloudPathE2E(t *testing.T) {
 	ctx := context.Background()
 
 	const (
-		agentID  = "agt-e2e"
-		chatter  = "chatter-e2e"
-		sibling  = "chatter-other"
-		prefKey  = "replicate_api_token"
-		prefVal  = "r8_e2e_secret"
+		agentID = "agt-e2e"
+		chatter = "chatter-e2e"
+		sibling = "chatter-other"
+		prefKey = "replicate_api_token"
+		prefVal = "r8_e2e_secret"
 	)
 
 	// Same construction Cloud uses: identity/memory store binds agentID,

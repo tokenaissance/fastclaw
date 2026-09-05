@@ -15,11 +15,11 @@ import (
 // Result describes a successful install so callers can show the user what
 // happened and, if they care, where to find the files.
 type Result struct {
-	Source       string `json:"source"`           // "skills.sh" | "clawhub" | "github"
-	Repo         string `json:"repo,omitempty"`   // GitHub "owner/repo" the content actually came from
-	Name         string `json:"name"`             // final directory name under targetDir
+	Source       string `json:"source"`         // "skills.sh" | "clawhub" | "github"
+	Repo         string `json:"repo,omitempty"` // GitHub "owner/repo" the content actually came from
+	Name         string `json:"name"`           // final directory name under targetDir
 	Version      string `json:"version,omitempty"`
-	InstalledAt  string `json:"installedAt"`      // filesystem path of the new skill dir
+	InstalledAt  string `json:"installedAt"` // filesystem path of the new skill dir
 	FilesWritten int    `json:"filesWritten"`
 }
 

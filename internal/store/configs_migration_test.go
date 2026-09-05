@@ -108,17 +108,17 @@ func TestConfigsScopeMigration(t *testing.T) {
 
 	// Verify each remaining row's (user_id, agent_id) pair.
 	type expect struct {
-		id          string
-		wantUser    string
-		wantAgent   string
-		mustExist   bool
+		id        string
+		wantUser  string
+		wantAgent string
+		mustExist bool
 	}
 	cases := []struct {
-		id          string
-		wantUser    string
-		wantAgent   string
-		wantScope   string
-		mustExist   bool
+		id        string
+		wantUser  string
+		wantAgent string
+		wantScope string
+		mustExist bool
 	}{
 		{"cfg_sys", "", "", "system", true},
 		{"cfg_user", ownerUID, "", "user", true},

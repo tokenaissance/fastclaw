@@ -202,8 +202,8 @@ func TestFeishuMentionNames(t *testing.T) {
 		Name string `json:"name,omitempty"`
 	}{
 		mention("@_u1", "机器人"),
-		mention("@_u2", ""), // name empty → key fallback
-		mention("", ""),     // both empty → dropped
+		mention("@_u2", ""),    // name empty → key fallback
+		mention("", ""),        // both empty → dropped
 		mention("@_u1", "机器人"), // duplicate → collapsed
 	}
 	got := feishuMentionNames(ev)

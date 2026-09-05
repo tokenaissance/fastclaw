@@ -97,9 +97,9 @@ type TemplateProvisioner interface {
 
 // PoolConfig holds configuration for creating sandbox pools.
 type PoolConfig struct {
-	Backend   string // "docker", "e2b" (future)
-	Image     string // container image (for docker backend)
-	Policy    *Policy
+	Backend string // "docker", "e2b" (future)
+	Image   string // container image (for docker backend)
+	Policy  *Policy
 	// E2B-specific fields (future)
 	E2BTemplate string
 	E2BAPIKey   string

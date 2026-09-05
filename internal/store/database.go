@@ -181,7 +181,7 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 //
 // Empty default + partial indexes preserve existing query plans for
 // rows written before this column existed. Readers that want the
-// chatter should COALESCE(NULLIF(chatter_user_id,”), user_id) — the
+// chatter should COALESCE(NULLIF(chatter_user_id,''), user_id) — the
 // fallback is exactly right for the web channel (user_id was already
 // the chatter there) and matches the pre-fix behavior on IM (where
 // every chatter was mis-attributed to the channel owner anyway).
@@ -221,7 +221,7 @@ func (d *DBStore) migrateSessionsAddChatterUserID(ctx context.Context) error {
 }
 
 // migrateAgentGoalsAddRouting retrofits channel/account_id/chat_id/
-// project_id onto legacy agent_goals tables. All four default to ”
+// project_id onto legacy agent_goals tables. All four default to ''
 // — pre-existing rows had no continuation infrastructure attached
 // anyway, so the empty value just means "no routing recorded; can't
 // auto-continue this goal" and TryFireContinuation bails safely.
@@ -764,7 +764,7 @@ func (d *DBStore) migrateCronJobsAddUserID(ctx context.Context) error {
 // `<channel>_<chatID>` convention (web_<sid>, wechat_<openid>, …), so the
 // backfill splits on the first underscore. account_id has no historical
 // source — pre-feature installs only ran one bot per channel anyway, so
-// leaving it ” is correct for those rows. New sessions written after
+// leaving it '' is correct for those rows. New sessions written after
 // this migration always populate the full triple explicitly.
 func (d *DBStore) migrateSessionsAddChannelTriple(ctx context.Context) error {
 	has, err := d.tableHasColumn(ctx, "sessions", "channel")
@@ -985,14 +985,14 @@ func (d *DBStore) migrateUsersAppUserCols(ctx context.Context) error {
 	return nil
 }
 
-// migrateAgentFilesDropTemplate clears the legacy user_id=” template
+// migrateAgentFilesDropTemplate clears the legacy user_id='' template
 // rows from agent_files. Each row is reparented to the agent's owner
 // when no per-user row already exists for that (agent_id, filename) —
 // preserves existing content as the owner's personal copy. After this
 // pass the table holds (agent_id, real_user_id, filename) tuples only;
 // any "shared SOUL.md across all users" use case should live in a local
 // FS file at <agent_home>/<name>, which the runtime falls back to.
-// Idempotent: re-runs find no user_id=” rows and exit clean.
+// Idempotent: re-runs find no user_id='' rows and exit clean.
 func (d *DBStore) migrateAgentFilesDropTemplate(ctx context.Context) error {
 	rows, err := d.db.QueryContext(ctx,
 		`SELECT agent_files.agent_id, agent_files.filename, agent_files.content, agents.user_id
@@ -3045,7 +3045,7 @@ func (d *DBStore) ListSessionMessages(ctx context.Context, userID, agentID, sess
 //
 // Filter is strictly on chatter_user_id (no fallback to user_id). Old
 // rows written before the chatter_user_id column existed have it set
-// to ” and are not counted; those predate per-chatter resolution and
+// to '' and are not counted; those predate per-chatter resolution and
 // folding them in would over-count (they're keyed by channel owner,
 // not the actual chatter). New conversations write chatter_user_id
 // correctly so this is only a concern for sessions migrated from

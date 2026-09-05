@@ -68,7 +68,7 @@ type Totals struct {
 
 // Rank is one row of a per-agent or per-user leaderboard.
 type Rank struct {
-	Key      string `json:"key"`   // agent_id or user_id ("" → "system" on render)
+	Key      string `json:"key"`    // agent_id or user_id ("" → "system" on render)
 	Tokens   int64  `json:"tokens"` // input+output+cache combined
 	Input    int64  `json:"inputTokens"`
 	Output   int64  `json:"outputTokens"`

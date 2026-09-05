@@ -62,6 +62,7 @@ func (m *memGoalStore) DeleteGoal(_ context.Context, goalID string) error {
 	}
 	return nil
 }
+
 // seedActiveGoal places a fresh active goal in the store. Returns
 // the agentID + sessionKey the hook context should reference.
 func seedActiveGoal(t *testing.T, st *memGoalStore, budget int64) (agentID, sessionKey string) {

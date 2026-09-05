@@ -99,14 +99,14 @@ func TestModularPrompt_IdentityFirst_CloudPathE2E(t *testing.T) {
 	for _, want := range []string{
 		"# IDENTITY OVERRIDE (non-negotiable)", // identity anchor (top)
 		"You are **拽姐**",
-		"You run on the FastAgent runtime",     // agent intro
-		"File-tool routing:",                   // agent intro operational guidance
-		"# SOUL.md",                            // bootstrap files
+		"You run on the FastAgent runtime", // agent intro
+		"File-tool routing:",               // agent intro operational guidance
+		"# SOUL.md",                        // bootstrap files
 		soul,
 		"# IDENTITY.md",
-		"Current date/time:",                   // date line
-		"# Confidentiality (load-bearing)",     // operational module
-		"# CRITICAL REMINDER",                  // identity tail (bottom)
+		"Current date/time:",               // date line
+		"# Confidentiality (load-bearing)", // operational module
+		"# CRITICAL REMINDER",              // identity tail (bottom)
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("agent-mode prompt missing %q", want)
@@ -218,7 +218,7 @@ func TestModularPrompt_ModeSpecificAssembly_CloudPathE2E(t *testing.T) {
 		}
 	}
 	for _, forbid := range []string{
-		"File-tool routing:",  // agent_intro only
+		"File-tool routing:",               // agent_intro only
 		"You run on the FastAgent runtime", // agent_intro only
 	} {
 		if strings.Contains(chatbotPrompt, forbid) {

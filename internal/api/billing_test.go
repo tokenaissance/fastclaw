@@ -285,22 +285,22 @@ func TestBilling_AdminCanManageAnyone(t *testing.T) {
 
 // TestBilling_CloudPathE2E walks the full Cloud call chain end-to-end:
 //
-//	1. Header-driven lazy mint — Cloud's proxy forwards the caller's own
-//	   apikey plus X-Fastagent-End-User:<ext>; the auth middleware's
-//	   resolve() rebinds identity to a freshly minted app_user. A GET
-//	   /v1/usage under that header must report the app_user as its own
-//	   userId (proving the header→SwitchToAppUser→identity flip).
-//	2. Chat records usage — the agent loop calls meterTokens = RecordTokens
-//	   + RecordTokenLog on the switched user; we drive the same two calls
-//	   on the same SQLMeter the server uses.
-//	3. Owner readback — alice (the apikey owner) reads the app_user's
-//	   consumption via GET /v1/usage?user_id=... and sees the totals.
-//	4. Upstream quota PUT — the SaaS sets a low monthly token ceiling via
-//	   PUT /v1/quota.
-//	5. Over-limit blocks — usage.CheckQuota (the exact function agent's
-//	   checkQuota calls before every LLM call) must now return
-//	   Allowed=false, proving the quota the SaaS set would halt the next
-//	   agent turn. Raising the ceiling flips it back to Allowed.
+//  1. Header-driven lazy mint — Cloud's proxy forwards the caller's own
+//     apikey plus X-Fastagent-End-User:<ext>; the auth middleware's
+//     resolve() rebinds identity to a freshly minted app_user. A GET
+//     /v1/usage under that header must report the app_user as its own
+//     userId (proving the header→SwitchToAppUser→identity flip).
+//  2. Chat records usage — the agent loop calls meterTokens = RecordTokens
+//     + RecordTokenLog on the switched user; we drive the same two calls
+//     on the same SQLMeter the server uses.
+//  3. Owner readback — alice (the apikey owner) reads the app_user's
+//     consumption via GET /v1/usage?user_id=... and sees the totals.
+//  4. Upstream quota PUT — the SaaS sets a low monthly token ceiling via
+//     PUT /v1/quota.
+//  5. Over-limit blocks — usage.CheckQuota (the exact function agent's
+//     checkQuota calls before every LLM call) must now return
+//     Allowed=false, proving the quota the SaaS set would halt the next
+//     agent turn. Raising the ceiling flips it back to Allowed.
 func TestBilling_CloudPathE2E(t *testing.T) {
 	e := newBillingEnv(t)
 	ctx := context.Background()

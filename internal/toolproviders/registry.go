@@ -153,6 +153,7 @@ func (c *Chain) Available() bool {
 //   - It isn't registered
 //   - Its config has no APIKey or Endpoint
 //   - It returns a retriable error (network, timeout, 429, 5xx, ErrNoResults)
+//
 // Any other error terminates the chain (so config bugs surface fast).
 // When AutoFallback is false, only the first configured provider is tried.
 func (c *Chain) Execute(ctx context.Context, args map[string]any) (Response, error) {

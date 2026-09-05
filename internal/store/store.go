@@ -644,9 +644,9 @@ const (
 //   - kind says which family this row belongs to
 //   - (user_id, agent_id) says who owns it; the empty-string defaults
 //     give us four natural ownership levels:
-//     (”, ”)   = system / global
-//     (X, ”)    = user X's private config
-//     (”, Y)    = agent Y's "official" config (anyone using Y inherits)
+//     ('', '')   = system / global
+//     (X, '')    = user X's private config
+//     ('', Y)    = agent Y's "official" config (anyone using Y inherits)
 //     (X, Y)     = user X's per-agent override on agent Y (multi-tenant)
 //   - name is the lookup handle inside that family (provider key,
 //     channel type, or setting namespace)

@@ -95,11 +95,11 @@ func (m *WebhookMeter) sendWebhook(userID, agentID, sessionKey, provider, model 
 	rawCostCents := CalculateTokenCost(t, *cost)
 
 	report := UsageReport{
-		UserID:    userID,
-		AgentID:   agentID,
-		SessionID: sessionKey,
+		UserID:     userID,
+		AgentID:    agentID,
+		SessionID:  sessionKey,
 		ProviderID: provider,
-		ModelID:   model,
+		ModelID:    model,
 		Usage: tokensForJSON{
 			InputTokens:         t.Input,
 			OutputTokens:        t.Output,

@@ -148,12 +148,12 @@ func TestCamelToSnakeAllCaps(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"apiKey", "api_key"},           // camelCase → snake
-		{"apiBase", "api_base"},         // camelCase → snake
+		{"apiKey", "api_key"},                          // camelCase → snake
+		{"apiBase", "api_base"},                        // camelCase → snake
 		{"REPLICATE_API_TOKEN", "replicate_api_token"}, // ALL_CAPS → lowercase only
-		{"api_base", "api_base"},        // already_snake → passthrough lowercased
-		{"model", "model"},              // single lowercase word
-		{"HTTP", "http"},                // single ALL_CAPS word → lowercase only (was h_t_t_p)
+		{"api_base", "api_base"},                       // already_snake → passthrough lowercased
+		{"model", "model"},                             // single lowercase word
+		{"HTTP", "http"},                               // single ALL_CAPS word → lowercase only (was h_t_t_p)
 	}
 	for _, c := range cases {
 		if got := camelToSnake(c.in); got != c.want {
@@ -177,7 +177,7 @@ func TestMigrateConfigsToKV_AllCapsKey(t *testing.T) {
 	if err := db.SaveConfig(ctx, &ConfigRecord{
 		Kind: KindProvider, UserID: "user-a", AgentID: "", Name: "replicate", Enabled: true,
 		Data: map[string]interface{}{
-			"apiBase":            "https://api.replicate.com",
+			"apiBase":             "https://api.replicate.com",
 			"REPLICATE_API_TOKEN": "r8_abc123",
 		},
 	}); err != nil {

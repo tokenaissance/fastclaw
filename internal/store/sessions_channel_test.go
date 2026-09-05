@@ -160,9 +160,9 @@ func TestSessionTripleBackfill(t *testing.T) {
 	}
 
 	cases := []struct {
-		key       string
-		wantChan  string
-		wantChat  string
+		key      string
+		wantChan string
+		wantChat string
 	}{
 		{"web_s-1234-abcd", "web", "s-1234-abcd"},
 		{"wechat_openid-XYZ", "wechat", "openid-XYZ"},

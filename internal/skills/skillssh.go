@@ -17,11 +17,11 @@ const skillsShBaseURL = "https://skills.sh"
 
 // SkillsShResult is one entry returned by the skills.sh search API.
 type SkillsShResult struct {
-	ID       string `json:"id"`       // "<owner>/<repo>/<skillId>" (display-only)
-	SkillID  string `json:"skillId"`  // folder name of the skill inside the source repo
-	Name     string `json:"name"`     // human-readable name
-	Source   string `json:"source"`   // "<owner>/<repo>" — the GitHub location
-	Installs int    `json:"installs"` // popularity hint for ranking
+	ID       string `json:"id"`                // "<owner>/<repo>/<skillId>" (display-only)
+	SkillID  string `json:"skillId"`           // folder name of the skill inside the source repo
+	Name     string `json:"name"`              // human-readable name
+	Source   string `json:"source"`            // "<owner>/<repo>" — the GitHub location
+	Installs int    `json:"installs"`          // popularity hint for ranking
 	Version  string `json:"version,omitempty"` // latest release tag (GitHub API)
 }
 

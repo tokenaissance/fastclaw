@@ -21,20 +21,20 @@ import (
 
 // Quota is one user's monthly ceiling.
 type Quota struct {
-	UserID             string `json:"userId"`
-	MonthlyTokenLimit  int64  `json:"monthlyTokenLimit"`  // 0 = unlimited
-	MonthlyRequestLimit int64 `json:"monthlyRequestLimit"` // 0 = unlimited
-	ResetDay           int    `json:"resetDay"`            // 1–28; day of month the window resets
+	UserID              string `json:"userId"`
+	MonthlyTokenLimit   int64  `json:"monthlyTokenLimit"`   // 0 = unlimited
+	MonthlyRequestLimit int64  `json:"monthlyRequestLimit"` // 0 = unlimited
+	ResetDay            int    `json:"resetDay"`            // 1–28; day of month the window resets
 }
 
 // QuotaStatus is the result of a quota check.
 type QuotaStatus struct {
-	Allowed           bool   `json:"allowed"`
-	MonthlyTokenLimit int64  `json:"monthlyTokenLimit"`
-	MonthlyRequestLimit int64 `json:"monthlyRequestLimit"`
-	TokensUsed        int64  `json:"tokensUsed"`
-	RequestsUsed      int64  `json:"requestsUsed"`
-	ResetsAt          string `json:"resetsAt"` // RFC3339 date of next reset
+	Allowed             bool   `json:"allowed"`
+	MonthlyTokenLimit   int64  `json:"monthlyTokenLimit"`
+	MonthlyRequestLimit int64  `json:"monthlyRequestLimit"`
+	TokensUsed          int64  `json:"tokensUsed"`
+	RequestsUsed        int64  `json:"requestsUsed"`
+	ResetsAt            string `json:"resetsAt"` // RFC3339 date of next reset
 }
 
 // QuotaStore is the persistence interface for quotas.

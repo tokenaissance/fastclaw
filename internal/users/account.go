@@ -29,9 +29,9 @@ import (
 // end-user. There is intentionally no fine-grained scheme — anything
 // more complex lives in the apikey ACL layer.
 const (
-	RoleSuperAdmin = "super_admin"
-	RoleUser       = "user"
-	RoleAppUser    = "app_user"
+	RoleSuperAdmin  = "super_admin"
+	RoleUser        = "user"
+	RoleAppUser     = "app_user"
 	RoleChannelUser = "channel_user"
 )
 

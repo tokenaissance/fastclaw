@@ -16,9 +16,9 @@ import (
 // scoping is implicit at the call site instead of getting plumbed through
 // every agent loop call.
 type StoreAdapter struct {
-	st             store.Store
-	userID         string
-	ownerCache     map[string]string // sessionKey → resolved owner userID
+	st         store.Store
+	userID     string
+	ownerCache map[string]string // sessionKey → resolved owner userID
 }
 
 func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {

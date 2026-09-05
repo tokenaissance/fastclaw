@@ -175,9 +175,9 @@ func TestSetPreferenceMalformedArgs(t *testing.T) {
 	r, _ := prefFixture(t)
 	setChatter(r, "chatter-1")
 	for _, bad := range []string{
-		`{`,                    // truncated JSON
-		`{"key":"a"}`,          // missing value
-		`{"value":"b"}`,        // missing key
+		`{`,                     // truncated JSON
+		`{"key":"a"}`,           // missing value
+		`{"value":"b"}`,         // missing key
 		`{"key":1,"value":"b"}`, // wrong type
 	} {
 		if _, err := callTool(t, r, "set_preference", bad); err == nil {

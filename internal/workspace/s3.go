@@ -31,13 +31,13 @@ type S3 struct {
 // S3Config holds the bits NewS3 needs. Field naming follows the fastagent.json
 // convention so it round-trips through encoding/json cleanly.
 type S3Config struct {
-	Endpoint  string `json:"endpoint"`            // e.g. "s3.amazonaws.com", "<acct>.r2.cloudflarestorage.com"
-	Region    string `json:"region,omitempty"`    // AWS region; "" for R2/MinIO
-	Bucket    string `json:"bucket"`              // target bucket
-	Prefix    string `json:"prefix,omitempty"`    // key prefix; useful for multi-env share
+	Endpoint  string `json:"endpoint"`         // e.g. "s3.amazonaws.com", "<acct>.r2.cloudflarestorage.com"
+	Region    string `json:"region,omitempty"` // AWS region; "" for R2/MinIO
+	Bucket    string `json:"bucket"`           // target bucket
+	Prefix    string `json:"prefix,omitempty"` // key prefix; useful for multi-env share
 	AccessKey string `json:"accessKey"`
 	SecretKey string `json:"secretKey"`
-	UseSSL    bool   `json:"useSSL"`              // default false — most managed services enforce SSL anyway
+	UseSSL    bool   `json:"useSSL"` // default false — most managed services enforce SSL anyway
 }
 
 // NewS3 builds an S3 Store. Returns a wrapped error instead of panicking so
@@ -80,7 +80,7 @@ func (s *S3) key(agentID, projectID, sessionID, p string) string {
 	case sessionID != "":
 		parts = append(parts, "sessions", sessionID)
 	}
-	parts = append(parts, path.Clean("/"+p)[1:])
+	parts = append(parts, path.Clean("/" + p)[1:])
 	return strings.Join(parts, "/")
 }
 

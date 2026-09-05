@@ -15,17 +15,17 @@ import (
 // (once the new providers exist in the toolproviders package) makes them
 // appear in the UI automatically.
 type categoryCatalog struct {
-	Name      string           `json:"name"`  // e.g. "web_search"
-	Label     string           `json:"label"` // human-friendly name
+	Name      string            `json:"name"`  // e.g. "web_search"
+	Label     string            `json:"label"` // human-friendly name
 	Providers []providerCatalog `json:"providers"`
 }
 
 type providerCatalog struct {
-	Name      string   `json:"name"`         // "exa"
-	Label     string   `json:"label"`        // "Exa"
-	NeedsKey  bool     `json:"needsKey"`     // API key required?
-	NeedsURL  bool     `json:"needsUrl"`     // endpoint required (self-hosted)?
-	Models    []string `json:"models"`       // suggested "<provider>/<model>" suffixes
+	Name     string   `json:"name"`     // "exa"
+	Label    string   `json:"label"`    // "Exa"
+	NeedsKey bool     `json:"needsKey"` // API key required?
+	NeedsURL bool     `json:"needsUrl"` // endpoint required (self-hosted)?
+	Models   []string `json:"models"`   // suggested "<provider>/<model>" suffixes
 }
 
 // builtinCatalog lists every tool category + provider pair that the binary

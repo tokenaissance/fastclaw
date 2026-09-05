@@ -43,7 +43,7 @@ func TestUTF8Truncation(t *testing.T) {
 			if len([]rune(result)) > tt.maxRunes {
 				result = string([]rune(result)[:tt.maxRunes]) + "..."
 			}
-			
+
 			// 验证结果不包含乱码字符 �
 			for _, r := range result {
 				if r == '\uFFFD' {
@@ -51,7 +51,7 @@ func TestUTF8Truncation(t *testing.T) {
 					break
 				}
 			}
-			
+
 			// 验证长度正确
 			runeLen := len([]rune(result))
 			if tt.input != tt.expect && runeLen > tt.maxRunes+3 {
