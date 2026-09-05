@@ -50,7 +50,7 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 	if slashRequiresAdmin(cmd, msg) && !a.isAdminChatter(msg) {
 		return slashResult{
 			handled: true,
-			reply:   fmt.Sprintf("🔒 `%s` 只有 agent owner / admin 能用。让 owner 把你的 platform 用户 ID 加进 agent.json 的 `admins.%s` 里(用 `/whoami` 查自己的 ID)。", cmd, msg.Channel),
+			reply:   fmt.Sprintf("🔒 `%s` 只有 agent owner / admin 能用。让 owner 把你的 platform 用户 ID 加进 agent 配置的 `admins.%s` 里(用 `/whoami` 查自己的 ID)。", cmd, msg.Channel),
 		}
 	}
 
@@ -176,7 +176,7 @@ func slashRequiresAdmin(cmd string, msg bus.InboundMessage) bool {
 // IM channels (discord, telegram, slack, ...): UserID is the platform's
 // own user ID (Discord snowflake, Telegram numeric ID, ...), which has
 // no inherent link to the agent's FastAgent owner. The owner registers
-// platform IDs in agent.json's `admins[channel]` to grant access — and,
+// platform IDs in the agent config's `admins[channel]` to grant access — and,
 // to keep single-user dev installs from being locked out of their own
 // agent, an empty/absent allowlist for the channel falls through to
 // "anyone can run it" (the legacy behavior). Operators who care about
@@ -577,7 +577,7 @@ Info
 
 🔒 Agent-wide write commands (/undo /retry /compact /model /personality)
    and group-chat /new or /reset are restricted to the agent owner + admins
-   listed in agent.json's "admins" field. Private-chat /new and /reset are
+   listed in the agent config's "admins" field. Private-chat /new and /reset are
    available to the chatter. Use /whoami to find your ID.`
 }
 

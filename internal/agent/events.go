@@ -44,10 +44,23 @@ func ContextWithChatEvents(ctx context.Context, ch chan<- ChatEvent) context.Con
 // subscribers are skipped). The legacy channel send respects
 // ctx.Done() so the agent goroutine doesn't leak when the channel
 // consumer is gone but the agent ctx is cancelled.
+// emitEvent fans one event out to every consumer registered on ctx and
+// ignores the persistence outcome (historical best-effort contract).
 func emitEvent(ctx context.Context, evt ChatEvent) {
+	_, _ = emitEventChecked(ctx, evt)
+}
+
+// emitEventChecked is emitEvent's persistence-aware twin: it returns the
+// assigned session_events seq (or -1 when the event was not persisted,
+// e.g. no stream sink) plus the persistence error, so callers that depend
+// on the undo journal (mcp add/remove tool results) can fail loud instead
+// of silently losing the record. Live delivery (hub / legacy channel)
+// always runs even when persistence fails.
+func emitEventChecked(ctx context.Context, evt ChatEvent) (int64, error) {
 	stream := streamFromContext(ctx)
 
 	var seq int64 = -1
+	var persistErr error
 	// Skip persistence for high-volume live-only events. content_delta
 	// streams ~one chunk per generated token (100+ rows per turn for a
 	// modest answer), which would dwarf the rest of session_events for
@@ -60,6 +73,7 @@ func emitEvent(ctx context.Context, evt ChatEvent) {
 		blob, _ := json.Marshal(evt.Data)
 		s, err := stream.sink.AppendSessionEvent(ctx, stream.userID, stream.agentID, stream.sessionKey, evt.Type, blob)
 		if err != nil {
+			persistErr = err
 			slog.Warn("persist chat event failed",
 				"agent", stream.agentID, "session", stream.sessionKey,
 				"type", evt.Type, "error", err)
@@ -83,10 +97,11 @@ func emitEvent(ctx context.Context, evt ChatEvent) {
 		ch = ChatEventsFromContext(ctx)
 	}
 	if ch == nil {
-		return
+		return seq, persistErr
 	}
 	select {
 	case ch <- evt:
 	case <-ctx.Done():
 	}
+	return seq, persistErr
 }

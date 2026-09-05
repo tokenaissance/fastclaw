@@ -108,6 +108,17 @@ webhook:
   url: ""                    # e.g. https://tokenaissance.com/api/fastagent/webhooks/usage
   token: ""                  # Bearer token shared with the webhook receiver
 
+## MCP OAuth credential encryption key (FASTAGENT_OAUTH_SECRET).
+## Required to enable MCP OAuth; MUST be identical on every replica/instance
+## (rotate = all providers must re-authorize). Lives in the Secret, never the
+## ConfigMap. Generate with: openssl rand -hex 32
+oauth:
+  secret: ""
+  # Host callback base (FASTAGENT_OAUTH_CALLBACK_BASE) for server-side MCP
+  # OAuth: agent-initiated `mcp login` URLs redirect back here, e.g.
+  # https://dev.tokenaissance.com/oauth/mcp. Not a secret — ConfigMap.
+  callbackBase: ""
+
 ## Extra FASTAGENT_* env vars passed through to the ConfigMap.
 extraEnv: {}
   # FASTAGENT_LOG_LEVEL: "info"

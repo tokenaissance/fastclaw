@@ -1,0 +1,2 @@
+OK: quandora: removed. Applies next build. Reload queued.
+<mcp-undo>{"action":"add","serverName":"quandora","config":{"type":"http","url":"https://mcp.quandora.ai/quant","oauthResource":"https://mcp.quandora.ai/quant"}}

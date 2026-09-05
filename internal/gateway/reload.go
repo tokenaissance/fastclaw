@@ -56,6 +56,26 @@ func (g *Gateway) ReloadAgents() error {
 	return nil
 }
 
+// NotifyAgentReload drops the affected agent from every cached UserSpace
+// (owner + foreign viewers) and stamps the shared per-user reload marker
+// (DB epoch + Redis broadcast). Called after in-session agent-config
+// writes such as `mcp add/remove` so the new MCP servers appear on the
+// next build without a process restart or a full-system reload.
+func (g *Gateway) NotifyAgentReload(userID, agentID string) {
+	if userID == "" || agentID == "" {
+		return
+	}
+	g.InvalidateAgent(agentID)
+	if err := g.BumpAgentReloadEpoch(context.Background(), userID); err != nil {
+		slog.Warn("bump agent reload epoch after mcp config change",
+			"user", userID, "error", err)
+	}
+	if err := g.BroadcastAgentReload(userID); err != nil {
+		slog.Warn("broadcast agent reload after mcp config change",
+			"user", userID, "error", err)
+	}
+}
+
 // ReloadSandbox rebuilds the gateway-wide sandbox executor pool from the
 // current system-scope sandbox config. It is called after the admin/settings
 // UI saves sandbox changes so exec tools can pick them up without a process

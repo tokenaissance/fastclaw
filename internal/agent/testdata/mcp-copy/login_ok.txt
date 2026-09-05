@@ -1,0 +1,2 @@
+OK: Owner action required — open this URL (the host completes the callback; do NOT paste the redirect back):
+<AUTH_URL>

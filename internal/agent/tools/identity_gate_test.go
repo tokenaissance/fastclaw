@@ -19,7 +19,6 @@ func TestIdentityFileBlockedRespectsCallerFlag(t *testing.T) {
 		{"AGENTS.md", false, true},
 		{"TOOLS.md", false, true},
 		{"HEARTBEAT.md", false, true},
-		{"agent.json", false, true},
 
 		// Absolute path with identity basename still gets caught — model
 		// often produces "/data/.fastagent/agents/<id>/SOUL.md" from the

@@ -36,6 +36,7 @@ import {
   updateAgent,
   type MCPServerConfig,
 } from "@/lib/api";
+import { mergeMCPServersForSave } from "@/lib/mcp-servers";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
 
@@ -71,8 +72,14 @@ export default function AgentMCPPage() {
   }, [fetchConfig]);
 
   const saveServers = async (next: Record<string, MCPServerConfig>) => {
-    await updateAgent(agentId, { mcpServers: next });
-    setServers(next);
+    // Refetch right before saving and merge back any server added
+    // concurrently (agent `mcp add`, another dashboard session) since the
+    // page last loaded. The page's edits are per-entry; only truly
+    // concurrent additions are preserved (see mergeMCPServersForSave).
+    const latest = (await getAgentConfig(agentId)).mcpServers ?? {};
+    const merged = mergeMCPServersForSave(servers, next, latest);
+    await updateAgent(agentId, { mcpServers: merged });
+    setServers(merged);
   };
 
   const handleSaveEntry = async (entry: MCPEntry) => {
@@ -160,15 +167,27 @@ export default function AgentMCPPage() {
                   <Server className="w-4 h-4 shrink-0 text-muted-foreground" />
                   <span className="font-medium truncate">{name}</span>
                 </div>
-                <Badge variant="secondary" className="shrink-0 text-xs">
-                  {cfg.type}
-                </Badge>
+                <div className="flex shrink-0 gap-1">
+                  {cfg.oauthResource && (
+                    <Badge variant="secondary" className="text-xs">
+                      oauth
+                    </Badge>
+                  )}
+                  <Badge variant="secondary" className="text-xs">
+                    {cfg.type}
+                  </Badge>
+                </div>
               </div>
               <div className="text-xs text-muted-foreground truncate">
                 {cfg.type === "http"
                   ? cfg.url || "(no URL)"
                   : [cfg.command, ...(cfg.args ?? [])].join(" ")}
               </div>
+              {cfg.oauthResource && (
+                <div className="text-xs text-muted-foreground truncate">
+                  oauth: {cfg.oauthResource}
+                </div>
+              )}
               {cfg.env && Object.keys(cfg.env).length > 0 && (
                 <div className="text-xs text-muted-foreground">
                   env: {Object.keys(cfg.env).join(", ")}
@@ -267,6 +286,9 @@ function MCPEditDialog({
   const [args, setArgs] = useState("");
   const [envText, setEnvText] = useState("");
   const [headersText, setHeadersText] = useState("");
+  const [oauthResource, setOauthResource] = useState("");
+  const [scopesText, setScopesText] = useState("");
+  const [callbackURL, setCallbackURL] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -280,6 +302,9 @@ function MCPEditDialog({
       setArgs((initial.args ?? []).join(" "));
       setEnvText(kvToText(initial.env));
       setHeadersText(kvToText(initial.headers));
+      setOauthResource(initial.oauthResource ?? "");
+      setScopesText((initial.scopes ?? []).join(", "));
+      setCallbackURL(initial.callbackURL ?? "");
     } else {
       setName("");
       setType("stdio");
@@ -288,6 +313,9 @@ function MCPEditDialog({
       setArgs("");
       setEnvText("");
       setHeadersText("");
+      setOauthResource("");
+      setScopesText("");
+      setCallbackURL("");
     }
     setError("");
   }, [open, initial]);
@@ -316,6 +344,15 @@ function MCPEditDialog({
       entry.url = url.trim();
       const h = textToKV(headersText);
       if (Object.keys(h).length > 0) entry.headers = h;
+      const oauthUrl = oauthResource.trim();
+      if (oauthUrl) entry.oauthResource = oauthUrl;
+      const scopes = scopesText
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (scopes.length > 0) entry.scopes = scopes;
+      const cb = callbackURL.trim();
+      if (cb) entry.callbackURL = cb;
     } else {
       if (!command.trim()) {
         setError("Command is required for stdio type");
@@ -385,6 +422,33 @@ function MCPEditDialog({
                   value={headersText}
                   onChange={(e) => setHeadersText(e.target.value)}
                   rows={3}
+                />
+              </div>
+              <div className="space-y-1.5 border-t pt-3">
+                <Label>OAuth Resource URL <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                <Input
+                  placeholder="留空 = 非 OAuth；填 e.g. https://mcp.quandora.ai/quant"
+                  value={oauthResource}
+                  onChange={(e) => setOauthResource(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  声明该服务器走 MCP OAuth。填完后可在控制台 MCP OAuth 面板授权。
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Scopes <span className="text-muted-foreground font-normal">(optional, comma-separated)</span></Label>
+                <Input
+                  placeholder="e.g. quant"
+                  value={scopesText}
+                  onChange={(e) => setScopesText(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Callback URL <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                <Input
+                  placeholder="留空 = 默认（CLI loopback / Web 公开回调）"
+                  value={callbackURL}
+                  onChange={(e) => setCallbackURL(e.target.value)}
                 />
               </div>
             </>

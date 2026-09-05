@@ -606,19 +606,14 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 			rec.Config["shareModelConfig"] = false
 		}
 	}
-	// MCP servers: whole-map replace into the agent config blob.
-	if req.MCPServersReset {
-		if rec.Config != nil {
-			delete(rec.Config, "mcpServers")
-		}
-	} else if req.MCPServers != nil {
-		if rec.Config == nil {
-			rec.Config = map[string]interface{}{}
-		}
-		if len(req.MCPServers) == 0 {
-			delete(rec.Config, "mcpServers")
-		} else {
-			rec.Config["mcpServers"] = req.MCPServers
+	// MCP servers live one row per server in agent_mcp_servers (not in
+	// agents.config). Whole-map replace is a transactional diff over rows:
+	// an empty map / mcpServersReset clears every row.
+	if req.MCPServersReset || req.MCPServers != nil {
+		servers := req.MCPServers
+		if err := s.dataStore.ReplaceMCPServers(r.Context(), rec.ID, servers); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
 		}
 	}
 	if err := s.dataStore.SaveAgent(r.Context(), rec); err != nil {
@@ -771,6 +766,11 @@ func (s *Server) handleGetAgentConfig(w http.ResponseWriter, r *http.Request) {
 		blob, _ := json.Marshal(rec.Config)
 		_ = json.Unmarshal(blob, &cfg)
 	}
+	// mcpServers is stored per-key in agent_mcp_servers; surface it from
+	// the table so the dashboard MCP editor reads the authoritative set.
+	if servers, err := s.dataStore.ListMCPServers(r.Context(), id); err == nil {
+		cfg.MCPServers = servers
+	}
 	jsonResponse(w, http.StatusOK, cfg)
 }
 
@@ -814,13 +814,13 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 var agentSystemFileAllowlist = map[string]bool{
 	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
 	"BOOTSTRAP.md": true, "TOOLS.md": true, "MEMORY.md": true,
-	"HEARTBEAT.md": true, "USER.md": true, "KNOWLEDGE.md": true, "agent.json": true,
+	"HEARTBEAT.md": true, "USER.md": true, "KNOWLEDGE.md": true,
 }
 
 var agentIdentityFiles = map[string]bool{
 	"SOUL.md": true, "IDENTITY.md": true, "AGENTS.md": true,
 	"BOOTSTRAP.md": true, "TOOLS.md": true, "HEARTBEAT.md": true,
-	"KNOWLEDGE.md": true, "agent.json": true,
+	"KNOWLEDGE.md": true,
 }
 
 func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request) {
@@ -950,9 +950,9 @@ func (s *Server) handleDeleteAgentSystemFile(w http.ResponseWriter, r *http.Requ
 // resolveSystemFileTarget figures out which user_id row a write/delete
 // on (agentID, filename) should hit, and gates access:
 //
-//   - Identity files (SOUL/IDENTITY/AGENTS/BOOTSTRAP/TOOLS/HEARTBEAT/
-//     agent.json) always target the agent owner's row — this is the
-//     canonical "shared template". Caller must be the owner or hold
+//   - Identity files (SOUL/IDENTITY/AGENTS/BOOTSTRAP/TOOLS/HEARTBEAT)
+//     always target the agent owner's row — this is the canonical
+//     "shared template". Caller must be the owner or hold
 //     platform admin (super_admin session, or type=admin apikey).
 //   - Per-user files (USER.md, MEMORY.md) target the caller's own row
 //     so each chatter has an independent override. Caller just needs

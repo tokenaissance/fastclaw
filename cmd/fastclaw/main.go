@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
@@ -16,6 +17,9 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/daemon"
 	"github.com/fastclaw-ai/fastclaw/internal/gateway"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/adapter"
+	oauthport "github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/port"
 	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/setup"
@@ -63,6 +67,19 @@ func (a *apiResolver) EnsureAgent(ctx context.Context, userID, agentID string) e
 // save snapshot, surfacing as "model is empty" mysteries on the next
 // chat turn.
 func (a *apiResolver) ReloadAgents() error { return a.gw.ReloadAgents() }
+
+// BroadcastAgentReload publishes a per-user cross-replica invalidate over
+// Redis after an OAuth authorization/revocation.
+func (a *apiResolver) BroadcastAgentReload(userID string) error {
+	return a.gw.BroadcastAgentReload(userID)
+}
+
+// BumpAgentReloadEpoch stamps the shared per-user DB marker so replicas
+// without Redis (or that missed a pub/sub message) also drop that user's
+// cache.
+func (a *apiResolver) BumpAgentReloadEpoch(userID string) error {
+	return a.gw.BumpAgentReloadEpoch(context.Background(), userID)
+}
 
 // ReloadSandbox rebuilds the gateway-owned sandbox executor pool after
 // system-scope sandbox settings change, avoiding a manual process restart.
@@ -113,6 +130,7 @@ func main() {
 	rootCmd.AddCommand(adminCmd())
 	rootCmd.AddCommand(apikeyCmd())
 	rootCmd.AddCommand(agentsCmd())
+	rootCmd.AddCommand(mcpCmd())
 	rootCmd.AddCommand(sessionCmd())
 	rootCmd.AddCommand(cronCmd())
 	rootCmd.AddCommand(channelsCmd())
@@ -160,6 +178,42 @@ func runGateway(port int) error {
 		return fmt.Errorf("create gateway: %w", err)
 	}
 
+	// MCP OAuth bootstrap — process singleton shared by every agent loop
+	// (refresh locks must not be per-loop; see docs/mcp-oauth-design.md §12).
+	// Only active when FASTAGENT_OAUTH_SECRET is set; servers that declare
+	// oauthResource without it log an error at loop build time.
+	var oauthBootstrap *oauth.Bootstrap
+	if env.OAuth.Secret != "" {
+		home, herr := config.HomeDir()
+		if herr != nil {
+			return fmt.Errorf("resolve home dir for oauth store: %w", herr)
+		}
+		var dbStore *store.DBStore
+		if st, ok := gw.Store().(*store.DBStore); ok {
+			dbStore = st
+		}
+		var locker oauthport.DistributedLocker
+		if env.Redis.Enabled {
+			addr := env.Redis.Addr
+			if addr == "" {
+				addr = "127.0.0.1:6379"
+			}
+			rc := redis.NewClient(&redis.Options{
+				Addr:     addr,
+				Username: env.Redis.Username,
+				Password: env.Redis.Password,
+				DB:       env.Redis.DB,
+			})
+			locker = &adapter.RedisRefreshLocker{Client: rc, Prefix: env.Redis.Prefix}
+		}
+		oauthBootstrap, err = oauth.Init(env.OAuth.Secret, oauth.Options{
+			Home: home, DB: dbStore, Locker: locker,
+		})
+		if err != nil {
+			return fmt.Errorf("init mcp oauth: %w", err)
+		}
+	}
+
 	// Remove credential-bearing env vars from the process environment
 	// now that boot config has been read. Closes the /proc/<pid>/environ
 	// path that a shell-having LLM could otherwise use to recover the
@@ -192,6 +246,9 @@ func runGateway(port int) error {
 	webSrv.SetUsageMeter(gw.Usage())
 	webSrv.SetAuth(authResolver)
 	webSrv.SetWebChannel(gw.WebChannel())
+	if oauthBootstrap != nil {
+		webSrv.SetOAuth(oauthBootstrap)
+	}
 	// Share the chat-event hub so bus-fired web turns (cron / goal
 	// continuation / heartbeat / sub-agent) stream through the same
 	// SSE pipeline a user-typed turn uses. Must be wired before

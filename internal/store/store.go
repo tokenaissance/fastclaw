@@ -9,11 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
 // ErrNotFound is returned by Get* methods when the row does not exist. Use
 // errors.Is(err, store.ErrNotFound) at call sites.
 var ErrNotFound = errors.New("store: not found")
+
+// ErrMCPServerExists is returned by AddMCPServer when the server is
+// already declared for the agent — the coeffect-table "cannot provide
+// twice" precondition, surfaced as an error with no state transition.
+var ErrMCPServerExists = errors.New("store: mcp server already exists")
 
 // Store is the unified interface for all persistent data.
 //
@@ -67,6 +74,17 @@ type Store interface {
 	SaveAgent(ctx context.Context, agent *AgentRecord) error
 	DeleteAgent(ctx context.Context, agentID string) error
 	ListAllAgents(ctx context.Context) ([]AgentRecord, error)
+	// Agent MCP server declarations live one row per server (not inside
+	// agents.config). ListMCPServers returns the full map for the agent;
+	// AddMCPServer fails with ErrMCPServerExists when the server is
+	// already declared (set precondition k∉dom); DeleteMCPServer fails
+	// with ErrNotFound when it is absent (restriction precondition k∈dom);
+	// ReplaceMCPServers atomically makes the table equal the given map
+	// (dashboard whole-list save / reset).
+	ListMCPServers(ctx context.Context, agentID string) (map[string]config.MCPServerConfig, error)
+	AddMCPServer(ctx context.Context, agentID, serverName string, cfg config.MCPServerConfig) error
+	DeleteMCPServer(ctx context.Context, agentID, serverName string) error
+	ReplaceMCPServers(ctx context.Context, agentID string, servers map[string]config.MCPServerConfig) error
 
 	// --- Sessions (per user, per agent — chat history is private) ---
 	GetSession(ctx context.Context, userID, agentID, sessionKey string) (*SessionRecord, error)

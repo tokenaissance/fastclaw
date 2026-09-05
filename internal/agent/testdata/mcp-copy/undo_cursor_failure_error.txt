@@ -1,0 +1,1 @@
+ERROR: mcp undo: remove of "quandora" applied but failed to record the cursor: cursor write failed (injected) (repeating undo may replay it; check with mcp status)

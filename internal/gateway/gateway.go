@@ -178,6 +178,14 @@ type Gateway struct {
 	usage       usage.Meter
 	quotaStore  usage.QuotaStore
 	envCfg      *config.EnvConfig
+	// invalidator broadcasts cross-replica agent reloads over Redis
+	// pub/sub. nil when Redis is disabled (single-instance deployments
+	// only need the local ReloadAgents call).
+	invalidator *rediscoord.Invalidator
+	// reloadEpochs is the DB-backed cross-replica reload fallback
+	// (per-user rows polled every 30s) — works without Redis and as a
+	// safety net for lost pub/sub messages.
+	reloadEpochs *agentReloadEpochs
 	// projectRuntime is the coding-agent runtime manager (live dev server
 	// + preview). Set by SetProjectRuntime after construction; nil keeps
 	// agents as plain assistants. Exposed to the setup server via
@@ -429,7 +437,8 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		return nil, fmt.Errorf("init accounts: %w", err)
 	}
 
-	g := &Gateway{
+	var g *Gateway
+	g = &Gateway{
 		bus:         mb,
 		store:       st,
 		accounts:    accts,
@@ -437,13 +446,18 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		usage:       meter,
 		quotaStore:  quotaStore,
 		sandboxPool: systemSandboxPool,
-		users:       newUserSpaceRegistry(mb, st, ws, meter, quotaStore, systemSandboxPool, pluginMgr),
-		chanMgr:     chanMgr,
-		webChan:     webChan,
-		scheduler:   scheduler,
-		webhookSrv:  webhookSrv,
-		pluginMgr:   pluginMgr,
-		envCfg:      env,
+		users: newUserSpaceRegistry(mb, st, ws, meter, quotaStore, systemSandboxPool, pluginMgr,
+			func(userID, agentID string) {
+				if g != nil {
+					g.NotifyAgentReload(userID, agentID)
+				}
+			}),
+		chanMgr:    chanMgr,
+		webChan:    webChan,
+		scheduler:  scheduler,
+		webhookSrv: webhookSrv,
+		pluginMgr:  pluginMgr,
+		envCfg:     env,
 	}
 
 	if webhookSrv != nil {
@@ -569,7 +583,37 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		slog.Warn("registerChannelsFromStore", "error", err)
 	}
 
+	if redisClient != nil {
+		g.invalidator = rediscoord.NewInvalidator(redisClient, redisPrefix(env.Redis.Prefix)+":reload-agents")
+		slog.Info("redis reload invalidator enabled", "channel", redisPrefix(env.Redis.Prefix)+":reload-agents")
+	}
+	if db, ok := st.(*store.DBStore); ok {
+		g.reloadEpochs = newAgentReloadEpochs(db)
+	} else {
+		slog.Warn("agent reload epoch fallback disabled: store is not DB-backed", "type", fmt.Sprintf("%T", st))
+	}
+
 	return g, nil
+}
+
+// BroadcastAgentReload asks every other gateway replica to drop ONE
+// user's cached UserSpace (Redis pub/sub). The local instance invalidates
+// separately; nil invalidator (no Redis) is a no-op.
+func (g *Gateway) BroadcastAgentReload(userID string) error {
+	if g.invalidator == nil {
+		return nil
+	}
+	return g.invalidator.PublishReloadFor(context.Background(), userID)
+}
+
+// BumpAgentReloadEpoch stamps the shared per-user "state changed" marker
+// so every replica (with or without Redis) drops THAT user's cached
+// UserSpace. Call after an account-scoped authorization/revocation.
+func (g *Gateway) BumpAgentReloadEpoch(ctx context.Context, userID string) error {
+	if g.reloadEpochs == nil {
+		return nil
+	}
+	return g.reloadEpochs.Bump(ctx, userID)
 }
 
 // UserSpaceFor returns the resolved user's UserSpace, lazy-loading on
@@ -645,6 +689,43 @@ func (g *Gateway) Run() error {
 	if err := g.bus.Start(ctx); err != nil {
 		return fmt.Errorf("start message bus: %w", err)
 	}
+	// Cross-replica reload poller: works without Redis (DB epoch) and as
+	// a safety net for lost Redis pub/sub messages.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(reloadEpochPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				changed, err := g.reloadEpochs.Poll(ctx)
+				if err != nil {
+					slog.Warn("reload epoch poll failed", "error", err)
+					continue
+				}
+				for _, userID := range changed {
+					g.InvalidateUser(userID)
+				}
+			}
+		}
+	}()
+	if g.invalidator != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := g.invalidator.Run(ctx, func(userID string) {
+				// Mark the epoch as seen so the poller doesn't reload
+				// the same change a second time.
+				g.reloadEpochs.SyncUser(context.Background(), userID)
+				g.InvalidateUser(userID)
+			}); err != nil {
+				slog.Warn("reload invalidator stopped", "error", err)
+			}
+		}()
+	}
 	wg.Add(1)
 	go func() { defer wg.Done(); g.users.startEvictor(ctx) }()
 	wg.Add(1)
@@ -713,14 +794,27 @@ func makeStoreFirstAgentFileLoader(st store.Store) func(string, string) (config.
 			if ar.ID != agentID {
 				continue
 			}
-			if len(ar.Config) == 0 {
+			// mcpServers no longer lives in agents.config: the per-key
+			// agent_mcp_servers table is authoritative. Fetch it FIRST so
+			// an agent whose JSON config is empty but that has server rows
+			// (e.g. created and populated purely via `mcp add`) still gets
+			// rc.MCPServers on the next build.
+			servers, err := st.ListMCPServers(context.Background(), agentID)
+			if err != nil {
 				return config.AgentFileConfig{}, false
 			}
-			blob, _ := json.Marshal(ar.Config)
-			var cfg config.AgentFileConfig
-			if err := json.Unmarshal(blob, &cfg); err == nil {
+			cfg := config.AgentFileConfig{}
+			if len(ar.Config) > 0 {
+				blob, _ := json.Marshal(ar.Config)
+				_ = json.Unmarshal(blob, &cfg)
+			}
+			// Table stays authoritative even if a legacy JSON still
+			// carries a stale mcpServers object.
+			cfg.MCPServers = servers
+			if len(ar.Config) > 0 || len(cfg.MCPServers) > 0 {
 				return cfg, true
 			}
+			return config.AgentFileConfig{}, false
 		}
 		return config.AgentFileConfig{}, false
 	}

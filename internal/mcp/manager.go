@@ -15,6 +15,7 @@ type Manager struct {
 	servers map[string]Client // serverName -> client
 	// toolMap maps prefixed tool name -> (serverName, originalToolName)
 	toolMap map[string]toolRoute
+	auths   map[string]func(context.Context) (string, error)
 }
 
 type toolRoute struct {
@@ -22,19 +23,35 @@ type toolRoute struct {
 	originalName string
 }
 
+// ManagerOption configures the manager before servers are connected.
+type ManagerOption func(*Manager)
+
+// WithAuth wires an OAuth bearer-token provider for one HTTP server.
+func WithAuth(serverName string, f func(context.Context) (string, error)) ManagerOption {
+	return func(m *Manager) { m.auths[serverName] = f }
+}
+
 // NewManager creates an MCP manager and connects to all configured servers.
 // Servers that fail to connect are logged as warnings but don't block startup.
-func NewManager(servers map[string]config.MCPServerConfig) *Manager {
+func NewManager(servers map[string]config.MCPServerConfig, opts ...ManagerOption) *Manager {
 	m := &Manager{
 		servers: make(map[string]Client),
 		toolMap: make(map[string]toolRoute),
+		auths:   make(map[string]func(context.Context) (string, error)),
+	}
+	for _, opt := range opts {
+		opt(m)
 	}
 
 	for name, cfg := range servers {
 		var client Client
 		switch cfg.Type {
 		case "http":
-			client = NewHTTPClient(cfg.URL, cfg.Headers)
+			hc := NewHTTPClient(cfg.URL, cfg.Headers)
+			if f, ok := m.auths[name]; ok {
+				hc.SetAuthProvider(f)
+			}
+			client = hc
 		case "stdio":
 			client = NewStdioClient(cfg.Command, cfg.Args, cfg.Env)
 		default:
@@ -68,6 +85,16 @@ func NewManager(servers map[string]config.MCPServerConfig) *Manager {
 	}
 
 	return m
+}
+
+// SetAuth wires (or replaces) the OAuth token provider for a server on a
+// live manager. Used when authorization completes while the manager is
+// already running.
+func (m *Manager) SetAuth(serverName string, f func(context.Context) (string, error)) {
+	m.auths[serverName] = f
+	if hc, ok := m.servers[serverName].(*HTTPClient); ok {
+		hc.SetAuthProvider(f)
+	}
 }
 
 // ToolDefs returns tool definitions for all MCP tools, with prefixed names.

@@ -1,0 +1,1 @@
+ERROR: mcp add: server "quandora" already exists — remove it first (or edit via the agent settings page)

@@ -1,0 +1,1 @@
+ERROR: mcp login: FASTAGENT_OAUTH_CALLBACK_BASE is not configured (server-side deployments need it to receive the authorization callback)

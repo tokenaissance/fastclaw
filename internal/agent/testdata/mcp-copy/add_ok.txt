@@ -1,0 +1,2 @@
+OK: quandora: registered (oauth). Applies next build. Reload queued.
+<mcp-undo>{"action":"remove","serverName":"quandora"}

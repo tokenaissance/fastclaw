@@ -17,6 +17,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth"
 	"github.com/fastclaw-ai/fastclaw/internal/push"
 	"github.com/fastclaw-ai/fastclaw/internal/runtime"
 	"github.com/fastclaw-ai/fastclaw/internal/session"
@@ -93,12 +94,20 @@ type Server struct {
 	// sandbox-backed runtime, in which case the /runtime endpoints return
 	// 503 instead of nil-panicking. Set via SetRuntimeManager at boot.
 	runtimeMgr *runtime.Manager
+	// mcpOAuth is the process-level MCP OAuth bootstrap. Nil when
+	// FASTAGENT_OAUTH_SECRET is unset — the /api/mcp/oauth/* endpoints
+	// then return 503 (feature disabled).
+	mcpOAuth *oauth.Bootstrap
 }
 
 // SetRuntimeManager wires the project runtime manager. Call once at boot
 // after constructing the Server; leaving it unset disables the coding-
 // agent preview endpoints (they 503).
 func (s *Server) SetRuntimeManager(m *runtime.Manager) { s.runtimeMgr = m }
+
+// SetOAuth wires the process-level MCP OAuth bootstrap into the HTTP
+// layer. Call once at boot; leave unset to disable MCP OAuth endpoints.
+func (s *Server) SetOAuth(b *oauth.Bootstrap) { s.mcpOAuth = b }
 
 // NewServer creates a setup wizard server on the given port.
 func NewServer(port int) *Server {
@@ -253,6 +262,17 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/admin/registration", admin(s.handleGetRegistration))
 	mux.HandleFunc("PUT /api/admin/registration", admin(s.handleSetRegistration))
 	mux.HandleFunc("GET /api/admin/chats", admin(s.handleAdminChats))
+
+	// MCP OAuth (Quandora etc.). The public GET callback is the
+	// self-hosted redirect landing; the cloud proxies the browser
+	// redirect to POST /api/mcp/oauth/callback with the admin key.
+	mux.HandleFunc("POST /api/mcp/oauth/start", auth(s.handleMcpOAuthStart))
+	mux.HandleFunc("POST /api/mcp/oauth/callback", admin(s.handleMcpOAuthCallback))
+	mux.HandleFunc("GET /oauth/mcp/{callbackID}/callback", s.handleMcpOAuthPublicCallback)
+	mux.HandleFunc("GET /api/mcp/oauth/status", auth(s.handleMcpOAuthStatus))
+	mux.HandleFunc("GET /api/mcp/oauth/servers", auth(s.handleMcpOAuthServers))
+	mux.HandleFunc("POST /api/mcp/oauth/revoke", auth(s.handleMcpOAuthRevoke))
+	mux.HandleFunc("POST /api/mcp/oauth/refresh", admin(s.handleMcpOAuthRefresh))
 
 	// Per-user config (system_settings + scoped providers/channels).
 	mux.HandleFunc("GET /api/config", auth(s.handleGetConfig))

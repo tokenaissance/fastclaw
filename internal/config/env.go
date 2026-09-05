@@ -19,6 +19,16 @@ type EnvConfig struct {
 	Sandbox EnvSandbox
 	Redis   EnvRedis
 	Log     EnvLog
+	OAuth   EnvOAuth
+}
+
+// EnvOAuth holds the MCP OAuth client bootstrap settings.
+type EnvOAuth struct {
+	// Secret is the master key used to encrypt stored refresh tokens.
+	// REQUIRED when any MCP server declares oauthResource — we fail
+	// closed rather than persist refresh tokens in plaintext. Rotating
+	// it invalidates every stored credential (users must re-authorize).
+	Secret string // FASTAGENT_OAUTH_SECRET
 }
 
 type EnvGateway struct {
@@ -142,6 +152,9 @@ func LoadEnv() *EnvConfig {
 	if v := os.Getenv("FASTAGENT_DEBUG_MODE"); v == "true" || v == "1" {
 		cfg.Log.Debug = true
 	}
+	if v := os.Getenv("FASTAGENT_OAUTH_SECRET"); v != "" {
+		cfg.OAuth.Secret = v
+	}
 	return cfg
 }
 
@@ -225,6 +238,7 @@ func ScrubBootSecrets() {
 		"FASTAGENT_REDIS_PASSWORD",
 		"BOXLITE_API_KEY",
 		"E2B_API_KEY",
+		"FASTAGENT_OAUTH_SECRET",
 	}
 	for _, k := range keys {
 		_ = os.Unsetenv(k)

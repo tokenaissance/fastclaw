@@ -49,6 +49,9 @@ data:
   {{- with .Values.webhook.url }}
   FASTAGENT_WEBHOOK_URL: {{ . | quote }}
   {{- end }}
+  {{- if .Values.oauth.callbackBase }}
+  FASTAGENT_OAUTH_CALLBACK_BASE: {{ .Values.oauth.callbackBase | quote }}
+  {{- end }}
 
   {{- with .Values.extraEnv }}
   {{- range $k, $v := . }}

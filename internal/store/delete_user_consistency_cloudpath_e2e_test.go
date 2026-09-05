@@ -22,6 +22,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
 func TestDeleteUser_CleansAgentScopedRows_CloudPathE2E(t *testing.T) {
@@ -168,6 +170,11 @@ func TestDeleteUser_CleansAgentScopedRows_CloudPathE2E(t *testing.T) {
 			t.Fatalf("set config value %s/%s/%s: %v", kv.scope, kv.scopeID, kv.name, err)
 		}
 	}
+	if err := db.AddMCPServer(ctx, agentID, "quandora", config.MCPServerConfig{
+		Type: "http", URL: "https://mcp.example/quant", OAuthResource: "https://mcp.example/quant",
+	}); err != nil {
+		t.Fatalf("seed mcp server: %v", err)
+	}
 
 	if err := db.DeleteUser(ctx, ownerID); err != nil {
 		t.Fatalf("delete user: %v", err)
@@ -206,6 +213,7 @@ func TestDeleteUser_CleansAgentScopedRows_CloudPathE2E(t *testing.T) {
 		// configs_kv mirror across all three scopes this user/agent
 		// appears in.
 		{"channels", "agent_id = ?", agentID},
+		{"agent_mcp_servers", "agent_id = ?", agentID},
 		{"configs_kv", "scope = 'agent' AND scope_id = ?", agentID},
 		{"configs_kv", "scope = 'user-agent' AND scope_id = ?", ownerID + "/" + agentID},
 		{"configs_kv", "scope = 'user' AND scope_id = ?", ownerID},

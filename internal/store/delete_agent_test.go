@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/fastclaw-ai/fastclaw/internal/config"
 )
 
 func TestDeleteAgentRemovesScopedRows(t *testing.T) {
@@ -142,6 +144,11 @@ func TestDeleteAgentRemovesScopedRows(t *testing.T) {
 			t.Fatalf("set config value %s/%s/%s: %v", kv.scope, kv.scopeID, kv.name, err)
 		}
 	}
+	if err := db.AddMCPServer(ctx, agentID, "quandora", config.MCPServerConfig{
+		Type: "http", URL: "https://mcp.example/quant", OAuthResource: "https://mcp.example/quant",
+	}); err != nil {
+		t.Fatalf("seed mcp server: %v", err)
+	}
 
 	if err := db.DeleteAgent(ctx, agentID); err != nil {
 		t.Fatalf("delete agent: %v", err)
@@ -170,6 +177,7 @@ func TestDeleteAgentRemovesScopedRows(t *testing.T) {
 		// fork-specific cascade additions: dedicated channels table +
 		// configs_kv mirror (agent scope + per-(user,agent) scope).
 		{"channels", "agent_id = ?", agentID},
+		{"agent_mcp_servers", "agent_id = ?", agentID},
 		{"configs_kv", "scope = 'agent' AND scope_id = ?", agentID},
 		{"configs_kv", "scope = 'user-agent' AND scope_id = ?", ownerID + "/" + agentID},
 	} {

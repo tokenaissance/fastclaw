@@ -19,7 +19,7 @@ import (
 //
 //  1. Parse `rc.Model` as "<providerKey>/<modelId>".
 //  2. Look up `rc.Providers[providerKey]`. `Providers` is the merged view
-//     (global ← agent.json), so agent-exclusive providers shadow global
+//     (global ← per-agent DB config), so agent-exclusive providers shadow global
 //     ones with the same key.
 //  3. Fall back to the shared provider (the one the Manager/UserSpace
 //     picked from global defaults) so old deployments without per-agent
@@ -50,6 +50,7 @@ type managerOpts struct {
 	quotaStore      usage.QuotaStore
 	userID          string
 	globalSkillsCfg config.SkillsCfg
+	mcpConfigNotify func(userID, agentID string)
 }
 
 func WithSessionStore(st session.SessionStore) ManagerOption {
@@ -107,6 +108,13 @@ func WithQuotaStore(qs usage.QuotaStore) ManagerOption {
 // REPLICATE_API_TOKEN regardless of what's saved in the DB.
 func WithGlobalSkillsCfg(cfg config.SkillsCfg) ManagerOption {
 	return func(o *managerOpts) { o.globalSkillsCfg = cfg }
+}
+
+// WithMCPConfigNotify wires the gateway's per-agent reload notify into
+// every agent so the `mcp add/remove` tool can persist agent MCP config
+// and invalidate caches across replicas.
+func WithMCPConfigNotify(fn func(userID, agentID string)) ManagerOption {
+	return func(o *managerOpts) { o.mcpConfigNotify = fn }
 }
 
 // Manager loads and manages all agent instances.
@@ -172,7 +180,12 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 	// override map). Plain NewAgent constructs the loader with a
 	// zero-value SkillsCfg, which is why FAL_KEY / REPLICATE_API_TOKEN
 	// were never reaching the sandbox.
-	ag := NewAgentWithSkillsCfg(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg)
+	// newAgentWithActor stamps the Manager's user (m.uid) as the session
+	// actor so OAuth-protected MCP servers are owner-gated (scheme A):
+	// an agent attached into a foreign UserSpace carries the visitor as
+	// actor while rc.UserID stays the agent owner, so the token provider
+	// refuses the visitor before reading the owner's credential.
+	ag := newAgentWithActor(rc, providerForAgent(rc, prov), mb, homeDir, m.opts.globalSkillsCfg, m.uid)
 	ag.SetOwnerUserID(m.uid)
 	// Per-user skills bucket: chat-time `skills/...` writes route to
 	// ~/.fastagent/users/<uid>/, where SkillsLoader's "personal" layer
@@ -254,6 +267,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// on an in-memory counter that restart-clears) can hit the
 		// store directly without re-plumbing through Manager.
 		ag.dataStore = m.opts.dataStore
+		ag.mcpConfigNotify = m.opts.mcpConfigNotify
 		// Date line in the chatter's timezone — needs dataStore for the
 		// scope-prefs lookup, hence wired here and re-applied by
 		// ReloadWorkspaceFiles after every ctxBuilder rebuild.
@@ -347,8 +361,8 @@ func (m *Manager) Names() []string {
 }
 
 // UpdateProvider replaces the LLM provider for all agents (hot-reload).
-// Agents with their own per-agent provider override (agent.json providers
-// shadowing the shared one) keep their dedicated provider — this call
+// Agents with their own per-agent provider override (per-agent providers
+// in the DB config shadowing the shared one) keep their dedicated provider — this call
 // only affects agents that were using the shared instance.
 func (m *Manager) UpdateProvider(prov provider.Provider) {
 	for _, ag := range m.agents {
@@ -359,7 +373,7 @@ func (m *Manager) UpdateProvider(prov provider.Provider) {
 // UpdateProviderResolved is like UpdateProvider but aware of per-agent
 // provider overrides. For each agent it rebuilds the provider using the
 // same rule NewManager applied at construction: agent-level `providers`
-// in agent.json shadow the shared fallback.
+// in the DB config shadow the shared fallback.
 func (m *Manager) UpdateProviderResolved(shared provider.Provider, resolved []config.ResolvedAgent) {
 	byID := make(map[string]config.ResolvedAgent, len(resolved))
 	for _, rc := range resolved {

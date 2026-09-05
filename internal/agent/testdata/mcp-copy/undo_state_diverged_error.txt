@@ -1,0 +1,1 @@
+ERROR: mcp undo: remove of "quandora" failed: mcp remove: "quandora" is not a configured MCP server (state changed since the op — check with mcp status)

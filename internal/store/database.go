@@ -1335,7 +1335,21 @@ func (d *DBStore) tableHasColumn(ctx context.Context, table, column string) (boo
 	return false, rows.Err()
 }
 
+// migrationSQL returns the dialect-appropriate DDL for this store.
 func (d *DBStore) migrationSQL() []string {
+	return migrationSQLForDialect(d.dialect)
+}
+
+// migrationSQLForDialect is pure so the DDL can be regression-tested
+// without opening a real database connection.
+func migrationSQLForDialect(dialect string) []string {
+	// SQLite has a BLOB column type; Postgres does not (it uses BYTEA).
+	// The oauth stores share one DDL list, so the ciphertext column type
+	// must be dialect-aware or AutoMigrate fails on Postgres.
+	blobType := "BLOB"
+	if dialect == "postgres" {
+		blobType = "BYTEA"
+	}
 	return []string{
 		// users holds first-party humans (role=super_admin/user) AND
 		// app-provisioned end-users (role=app_user). The latter are
@@ -1424,6 +1438,20 @@ func (d *DBStore) migrationSQL() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_user ON agents (user_id)`,
+		// agent_mcp_servers holds one row per declared MCP server (per-key
+		// granularity). It is the successor to the mcpServers object inside
+		// agents.config: different servers are different rows, so concurrent
+		// adds/removes of distinct servers commute (no whole-document
+		// read-modify-write). Workspace code has not shipped, so there is no
+		// JSON->rows migration; agents.config no longer carries mcpServers.
+		`CREATE TABLE IF NOT EXISTS agent_mcp_servers (
+			agent_id TEXT NOT NULL,
+			server_name TEXT NOT NULL,
+			config TEXT NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (agent_id, server_name)
+		)`,
 		// channel / account_id / chat_id together identify the
 		// (channel-type, channel-instance, conversation) the session
 		// belongs to. Multiple session_keys can share that triple — the
@@ -1801,6 +1829,20 @@ func (d *DBStore) migrationSQL() []string {
 			PRIMARY KEY (kind, scope, scope_id, name)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_configs_kv_prefix ON configs_kv (kind, scope, scope_id)`,
+		// MCP OAuth shared stores — Postgres-backed so multiple gateway
+		// instances share pending authorizations, encrypted credentials
+		// and dynamic client registrations. Ciphertext is opaque to the
+		// DB (encryption lives in the oauth adapter layer).
+		"CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (token_key TEXT PRIMARY KEY, ciphertext " + blobType + " NOT NULL, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+		"CREATE TABLE IF NOT EXISTS mcp_oauth_pending (state TEXT PRIMARY KEY, ciphertext " + blobType + " NOT NULL, user_id TEXT NOT NULL, agent_id TEXT NOT NULL, server_name TEXT NOT NULL, created_at TIMESTAMP NOT NULL, expires_at TIMESTAMP NOT NULL)",
+		`CREATE INDEX IF NOT EXISTS idx_mcp_oauth_pending_user ON mcp_oauth_pending (user_id, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
+			server_name TEXT NOT NULL,
+			callback_url TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (server_name, callback_url)
+		)`,
 	}
 }
 
@@ -1993,7 +2035,7 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 		// + projects/project_runtimes/agent_goals + channels (fork
 		// dedicated IM table) included) or they orphan. Upstream's #15
 		// only patched DeleteAgent; fork closes the same gap here.
-		for _, t := range []string{"agent_files", "agent_knowledge_chunks", "sessions", "session_messages", "session_events", "cron_jobs", "projects", "project_runtimes", "agent_goals", "channels"} {
+		for _, t := range []string{"agent_files", "agent_knowledge_chunks", "sessions", "session_messages", "session_events", "cron_jobs", "projects", "project_runtimes", "agent_goals", "channels", "agent_mcp_servers"} {
 			if _, err := tx.ExecContext(ctx,
 				fmt.Sprintf("DELETE FROM %s WHERE agent_id = %s", t, d.ph(1)), aid); err != nil {
 				return err
@@ -2380,6 +2422,7 @@ func (d *DBStore) DeleteAgent(ctx context.Context, agentID string) error {
 		"project_runtimes",
 		"agent_goals",
 		"channels",
+		"agent_mcp_servers",
 	} {
 		if _, err := tx.ExecContext(ctx,
 			fmt.Sprintf(`DELETE FROM %s WHERE agent_id = %s`, t, d.ph(1)), agentID); err != nil {

@@ -147,7 +147,6 @@ var systemFiles = map[string]bool{
 	"HEARTBEAT.md": true,
 	"AGENTS.md":    true,
 	"TOOLS.md":     true,
-	"agent.json":   true,
 }
 
 // isWorkspacePath decides whether a write/read/list_dir path belongs in the

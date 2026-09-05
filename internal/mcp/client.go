@@ -39,9 +39,9 @@ type jsonRPCError struct {
 }
 
 type initializeParams struct {
-	ProtocolVersion string       `json:"protocolVersion"`
-	Capabilities    struct{}     `json:"capabilities"`
-	ClientInfo      clientInfo   `json:"clientInfo"`
+	ProtocolVersion string     `json:"protocolVersion"`
+	Capabilities    struct{}   `json:"capabilities"`
+	ClientInfo      clientInfo `json:"clientInfo"`
 }
 
 type clientInfo struct {

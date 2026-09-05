@@ -105,7 +105,7 @@ table and is edited through the dashboard or `fastagent agents config`.
 
 | Data | Belongs to | Backing store |
 |------|-----------|---------------|
-| Agent records, SOUL.md / IDENTITY.md / MEMORY.md / agent.json | Agent | DB (`agent_files` table) |
+| Agent records, SOUL.md / IDENTITY.md / MEMORY.md | Agent | DB (`agent_files` table) |
 | Sessions (chat history) | Agent × user | DB (`sessions` table) |
 | API keys, users, scoped configs (providers/channels/settings) | Platform | DB |
 | Skills | Agent / Global | Filesystem (`skills/`, `agents/<id>/agent/skills/`) |
@@ -321,7 +321,8 @@ the named environment variable, the rest comes from the preset.
 The CLI reads and writes the same `agent_files` table the dashboard's
 file editor uses. Allowlisted filenames: `SOUL.md`, `IDENTITY.md`,
 `USER.md`, `BOOTSTRAP.md`, `MEMORY.md`, `HEARTBEAT.md`, `AGENTS.md`,
-`TOOLS.md`, `agent.json`.
+`TOOLS.md`. (The per-agent `agent.json` config file is retired — agent
+config, including MCP servers, is DB-only.)
 
 | Subcommand | Purpose |
 |---|---|

@@ -11,7 +11,7 @@ package tools
 //
 // The vulnerability: the apply_patch tool could read AND write
 // SOUL.md / IDENTITY.md / BOOTSTRAP.md / AGENTS.md / TOOLS.md /
-// HEARTBEAT.md / agent.json through its patch backend — bypassing the
+// HEARTBEAT.md through its patch backend — bypassing the
 // identityFileBlocked gate that write_file/edit_file already enforced.
 // A non-admin chatter could exfiltrate the agent's persona config or
 // rewrite its identity. The fix: readForPatch and writeForPatch refuse

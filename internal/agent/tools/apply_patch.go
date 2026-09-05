@@ -467,7 +467,7 @@ Format:
 Rules:
 - Hunks anchor on context lines (' ' prefix) plus '-' lines that must literally match the file. Provide enough context to make the location unambiguous; matching is in-order, first match wins.
 - Pure-add hunks (only '+' lines) only work with *** End of File or at the very top of a file.
-- Identity files (SOUL.md, IDENTITY.md, MEMORY.md, AGENTS.md, BOOTSTRAP.md, TOOLS.md, HEARTBEAT.md, USER.md, agent.json) accept Add and Update but NOT Delete or Move.
+- Identity files (SOUL.md, IDENTITY.md, MEMORY.md, AGENTS.md, BOOTSTRAP.md, TOOLS.md, HEARTBEAT.md, USER.md) accept Add and Update but NOT Delete or Move.
 - Path resolution matches read_file/write_file: workspace-relative paths go to the workspace store, identity-file basenames go to the system store, absolute paths go to disk.`
 
 var applyPatchSchema = map[string]interface{}{

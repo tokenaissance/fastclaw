@@ -65,6 +65,13 @@ spec:
               name: {{ include "fastagent.fullname" . }}-secrets
               key: FASTAGENT_WEBHOOK_TOKEN
         {{- end }}
+        {{- if .Values.oauth.secret }}
+        - name: FASTAGENT_OAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fastagent.fullname" . }}-secrets
+              key: FASTAGENT_OAUTH_SECRET
+        {{- end }}
         volumeMounts:
         - name: data
           mountPath: /data/.fastagent

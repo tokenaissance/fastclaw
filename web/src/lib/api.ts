@@ -1435,6 +1435,12 @@ export interface MCPServerConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  // OAuth-protected remote MCP servers (http type only). When
+  // oauthResource is set, the runtime authenticates via MCP OAuth instead
+  // of static headers and the cloud console can authorize/revoke it.
+  oauthResource?: string;
+  scopes?: string[];
+  callbackURL?: string;
 }
 
 export interface AgentFileConfig {
@@ -1448,9 +1454,9 @@ export interface AgentFileConfig {
   mcpServers?: Record<string, MCPServerConfig>;
 }
 
-// Fetch the raw agent.json for one agent (per-agent overrides only — not
-// the merged/resolved config). Used by the per-agent Models and Skills
-// admin pages.
+// Fetch the raw per-agent config (agents.config DB row — per-agent
+// overrides only, not the merged/resolved config). Used by the per-agent
+// Models and Skills admin pages.
 export async function getAgentConfig(id: string): Promise<AgentFileConfig> {
   const res = await apiFetch(`/api/agents/${id}/config`);
   return res.json();

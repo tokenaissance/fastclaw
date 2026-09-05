@@ -320,7 +320,7 @@ type UserSpace struct {
 	mu sync.Mutex
 }
 
-// readUserScopeAgentDefaults reads the (user=X, agent='') agents.defaults
+// readUserScopeAgentDefaults reads the (user=X, agent=”) agents.defaults
 // row raw — distinct from assembleConfig, which merges system + user and
 // can't tell apart "user explicitly chose the system value" from "no
 // user-scope row at all". EnsureAgent uses this to detect a chatter's
@@ -619,7 +619,7 @@ func (sp *UserSpace) EnsureAgent(ctx context.Context, st store.Store, mb *bus.Me
 // by the resulting UserSpace. Pass nil when sandbox is disabled at
 // system scope; agents will run with path-only file roots in that
 // case.
-func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, projectRuntime *coderuntime.Manager) (*UserSpace, error) {
+func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, projectRuntime *coderuntime.Manager, notifyAgent func(userID, agentID string)) (*UserSpace, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("loadUserSpace: userID required")
 	}
@@ -764,6 +764,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		agent.WithSessionStore(session.NewStoreAdapter(st, userID)),
 		agent.WithMemoryStore(agent.NewMemoryStoreAdapter(st)),
 		agent.WithDataStore(st),
+		agent.WithMCPConfigNotify(notifyAgent),
 	}
 	if ws != nil {
 		managerOpts = append(managerOpts, agent.WithWorkspaceStore(ws))
@@ -949,6 +950,11 @@ type userSpaceRegistry struct {
 	// construction (the manager is built later in boot than the
 	// registry), hence the mutable field + mutex rather than a ctor arg.
 	projectRuntime *coderuntime.Manager
+	// notifyAgent is the gateway's per-agent reload notify (invalidate
+	// local UserSpaces + DB epoch + Redis broadcast). Passed into every
+	// agent.Manager so in-session `mcp add/remove` config writes take
+	// effect across replicas.
+	notifyAgent func(userID, agentID string)
 }
 
 // setProjectRuntime records the manager so subsequent loadUserSpace calls
@@ -976,7 +982,7 @@ type userSpaceEntry struct {
 	lastUsed time.Time
 }
 
-func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager) *userSpaceRegistry {
+func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store, meter usage.Meter, quotaStore usage.QuotaStore, systemSandboxPool sandbox.ExecutorPool, pluginMgr *plugin.Manager, notifyAgent func(userID, agentID string)) *userSpaceRegistry {
 	return &userSpaceRegistry{
 		spaces:            make(map[string]*userSpaceEntry),
 		bus:               mb,
@@ -986,6 +992,7 @@ func newUserSpaceRegistry(mb *bus.MessageBus, st store.Store, ws workspace.Store
 		quotaStore:        quotaStore,
 		systemSandboxPool: systemSandboxPool,
 		pluginMgr:         pluginMgr,
+		notifyAgent:       notifyAgent,
 		idleTTL:           30 * time.Minute,
 	}
 }
@@ -1013,7 +1020,7 @@ func (r *userSpaceRegistry) getOrLoad(ctx context.Context, userID string) (*User
 		e.lastUsed = time.Now()
 		return e.space, nil
 	}
-	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.quotaStore, r.systemSandboxPool, r.pluginMgr, r.projectRuntime)
+	sp, err := loadUserSpace(ctx, userID, r.bus, r.store, r.workspace, r.meter, r.quotaStore, r.systemSandboxPool, r.pluginMgr, r.projectRuntime, r.notifyAgent)
 	if err != nil {
 		return nil, err
 	}
@@ -1088,7 +1095,7 @@ func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
 // per Account.
 //
 // Pulls rows from three ownership corners this user can route:
-//   - (user_id='', agent_id=Y): the agent's "official" rows for any
+//   - (user_id=”, agent_id=Y): the agent's "official" rows for any
 //     agent Y the user owns (legacy / pre-refactor data)
 //   - (user_id=userID, agent_id=Y) where user owns Y: this user's
 //     bindings on their own agent (the normal post-refactor pattern)

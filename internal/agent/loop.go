@@ -19,6 +19,8 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/mcp"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth"
+	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/usecase"
 	"github.com/fastclaw-ai/fastclaw/internal/privacy"
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	coderuntime "github.com/fastclaw-ai/fastclaw/internal/runtime"
@@ -29,6 +31,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/toolproviders"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/workspace"
+	"sort"
 )
 
 // Agent is the ReAct agent loop.
@@ -58,6 +61,12 @@ type Agent struct {
 	workspacePath string // working dir where agent creates user files
 	homeDir       string // FastAgent root, ~/.fastagent
 	ownerUserID   string // the user that owns this agent (for hook namespacing)
+	// mcpActorUserID is the session principal whose UserSpace built this
+	// agent instance. OAuth-protected MCP servers (scheme A) are gated to
+	// the agent owner: a foreign actor gets ErrCredentialOwnerOnly before
+	// any credential-store read. Empty = legacy single-user mode where no
+	// multi-tenant separation exists.
+	mcpActorUserID string
 	// admins is the per-channel allowlist of chatters who can run write-
 	// mode slash commands (/new /undo /retry /compact /model /personality).
 	// Keyed by channel name (e.g. "discord" → ["123...", "456..."]). Empty
@@ -94,6 +103,13 @@ type Agent struct {
 	// survives daemon restarts / UserSpace invalidations / idle
 	// evictions that all reset the in-memory turnCount.
 	dataStore store.Store
+	// mcpConfigNotify is invoked after an in-session `mcp add/remove`
+	// persists agent MCP config: it drops the affected agent from cached
+	// UserSpaces and stamps the per-user reload marker (DB epoch + Redis
+	// broadcast) so every replica picks the change up. Wired by the
+	// gateway; nil means config still persists but the change applies on
+	// the next agent build / user-space reload.
+	mcpConfigNotify func(userID, agentID string)
 	// workspaceStore is optional; when set, SkillsLoader hydrates per-agent
 	// and global skill dirs from the object store on every turn so skills
 	// uploaded post-boot or on a sibling replica become visible here.
@@ -216,12 +232,12 @@ func (a *Agent) bindSession(ctx context.Context, channel, accountID, sessionID, 
 
 // NewAgent creates a new Agent from a resolved config.
 func NewAgent(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string) *Agent {
-	return NewAgentWithSkillsCfg(rc, prov, mb, homeDir, config.SkillsCfg{})
+	return newAgentWithActor(rc, prov, mb, homeDir, config.SkillsCfg{}, rc.UserID)
 }
 
 // NewAgentWithFullCfg creates a new Agent with full config support (memory, privacy, skills learner).
 func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, fullCfg *config.Config) *Agent {
-	ag := NewAgentWithSkillsCfg(rc, prov, mb, homeDir, fullCfg.Skills)
+	ag := newAgentWithActor(rc, prov, mb, homeDir, fullCfg.Skills, rc.UserID)
 	ag.memoryCfg = fullCfg.Memory
 	ag.piiScrubEnabled = fullCfg.Privacy.PIIScrubbing.Enabled
 	// splitReplies is plumbed inside NewAgentWithSkillsCfg so foreign-
@@ -269,6 +285,16 @@ func NewAgentWithFullCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bu
 
 // NewAgentWithSkillsCfg creates a new Agent with global skills config for env injection.
 func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg) *Agent {
+	return newAgentWithActor(rc, prov, mb, homeDir, globalSkillsCfg, rc.UserID)
+}
+
+// newAgentWithActor is the shared constructor. actorUserID is the session
+// principal the built agent instance serves (the UserSpace owner). Manager
+// passes its user ID so foreign-attached agents carry the visitor as actor
+// while rc.UserID keeps the agent owner — the pair feeds the scheme-A
+// owner-only gate on OAuth-protected MCP servers. Direct callers default
+// the actor to the agent owner (single-user / legacy semantics).
+func newAgentWithActor(rc config.ResolvedAgent, prov provider.Provider, mb *bus.MessageBus, homeDir string, globalSkillsCfg config.SkillsCfg, actorUserID string) *Agent {
 	workspace := rc.Workspace
 	if workspace == "" {
 		// Fallback for callers (tests, legacy configs) that don't populate
@@ -344,6 +370,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		homePath:             rc.Home,
 		workspacePath:        workspace,
 		homeDir:              homeDir,
+		mcpActorUserID:       actorUserID,
 		admins:               rc.Admins,
 		skillsCfg:            rc.Skills,
 		globalSkillsCfg:      globalSkillsCfg,
@@ -403,7 +430,18 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 
 	// Connect MCP servers and register their tools
 	if len(rc.MCPServers) > 0 {
-		mcpMgr := mcp.NewManager(rc.MCPServers)
+		var mcpOpts []mcp.ManagerOption
+		if ob := oauth.Global(); ob != nil {
+			mcpOpts = mcpOAuthManagerOptions(ob, rc, ag.mcpActorUserID)
+		} else {
+			for name, cfg := range rc.MCPServers {
+				if cfg.OAuthResource != "" {
+					slog.Error("MCP server declares oauthResource but FASTAGENT_OAUTH_SECRET is not configured; tools will be unavailable",
+						"agent", rc.ID, "server", name)
+				}
+			}
+		}
+		mcpMgr := mcp.NewManager(rc.MCPServers, mcpOpts...)
 		ag.mcpMgr = mcpMgr
 
 		for _, td := range mcpMgr.ToolDefs() {
@@ -420,7 +458,371 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 		}
 	}
 
+	// Host-level MCP manager (product paradigm L2): the agent can list
+	// status, manage server config (add/remove), and ask the OWNER to
+	// authorize an OAuth-protected MCP server. login only produces the
+	// authorization URL; the code is exchanged by the host callback
+	// (cloud /oauth/mcp/{id}/callback or CLI loopback), never by the
+	// model. Registered whenever MCP OAuth is enabled — even with zero
+	// configured servers — so the agent can `mcp add` the first one.
+	ag.registerMCPManagementTool(rc, oauth.Global())
+
 	return ag
+}
+
+// registerMCPManagementTool exposes the `mcp` built-in on this agent.
+// Registration is decoupled from rc.MCPServers on purpose: the tool is
+// registered whenever MCP OAuth is enabled (ob != nil), including agents
+// that currently have zero configured servers, so the model can run
+// `mcp add` to register the first one. Exposure per turn is still
+// filtered by prompt mode via builtinAllowForMode (agent mode only).
+func (ag *Agent) registerMCPManagementTool(rc config.ResolvedAgent, ob *oauth.Bootstrap) {
+	if ob == nil || ag == nil || ag.registry == nil {
+		return
+	}
+	ag.registry.Register("mcp", mcpToolDescription, mcpToolSchema,
+		mcpToolFnWithAgent(ob, rc, ag.mcpActorUserID, ag))
+}
+
+const mcpToolDescription = "Manage this agent's OAuth-protected MCP servers (fastagent MCP capability). " +
+	"Only the agent owner's sessions may call this tool — visitors and shared-session callers are refused. " +
+	"Before acting, call status with no serverName to list every configured OAuth MCP server and its state.\n\n" +
+	"Actions:\n" +
+	"- add <serverName> <url> [oauthResource] [scopes]: register an HTTP MCP server on this agent (static-header or " +
+	"OAuth-protected). Persists immediately; tools become available on the next agent build/session. Reversible with remove.\n" +
+	"- remove <serverName>: unregister a server and drop its tools from the next build. Reversible with add.\n" +
+	"- undo: replay the inverse of the most recent recorded mcp add/remove of the CURRENT chat session from its persisted " +
+	"operation trace (LIFO — call again to undo the next older operation). Ops from other/deleted sessions are not " +
+	"reachable. Only server-declaration operations are auto-replayed; authorization login/logout still needs a human " +
+	"consent step.\n" +
+	"- login <serverName>: start authorization for an unauthenticated or expired server. Returns an authorization URL " +
+	"for the OWNER to open in a browser and approve. The code is exchanged by the host callback — do NOT ask the user " +
+	"to paste the redirected URL back into the chat, and do NOT poll for completion.\n" +
+	"- status [serverName]: read local credential state (none / authorized / expired) without touching the network. " +
+	"With no serverName, lists all configured OAuth servers.\n" +
+	"- check <serverName>: verify end-to-end by actually calling the server with the stored credential. status only " +
+	"proves a local token exists; check proves the credential still works remotely. If check fails, the credential is " +
+	"dead — re-run login.\n" +
+	"- refresh <serverName>: force a token refresh (no-op when the token is still fresh). Use when the credential is " +
+	"expired or about to expire and you need it working now.\n" +
+	"- logout <serverName>: revoke the authorization; re-run login before using the server again."
+
+var mcpToolSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"action": map[string]any{
+			"type":        "string",
+			"description": "Which action to run: add (register a server), remove (unregister a server), undo (replay the inverse of the most recent recorded add/remove from the operation trace, LIFO), login (start authorization; returns the URL to give the owner), status (query state; omit serverName to list all), check (end-to-end verify the credential works), refresh (force a token refresh), logout (revoke).",
+			"enum":        []string{"login", "status", "check", "refresh", "logout", "add", "remove", "undo"},
+		},
+		"serverName": map[string]any{
+			"type":        "string",
+			"description": "Name of an MCP server. Required for add/remove/login/check/refresh/logout; optional for status (omit to list all). If unsure which servers exist, call status without serverName first.",
+		},
+		"url": map[string]any{
+			"type":        "string",
+			"description": "MCP server HTTP(S) endpoint, e.g. https://mcp.quandora.ai/quant. Required for add.",
+		},
+		"oauthResource": map[string]any{
+			"type":        "string",
+			"description": "RFC 8707 resource / OAuth discovery URL — only for OAuth-protected servers; usually the same as url. Optional for add.",
+		},
+		"scopes": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string"},
+			"description": "OAuth scopes to request on login; optional — when omitted the provider-supported scope set is requested.",
+		},
+	},
+	"required": []string{"action"},
+}
+
+// mcpToolFn builds the `mcp` tool handler. actorUserID is the UserSpace
+// user that built this agent instance; when it differs from the agent
+// owner (rc.UserID), every action is refused before any usecase runs.
+func mcpToolFn(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserID string) func(context.Context, json.RawMessage) (string, error) {
+	return mcpToolFnWithAgent(ob, rc, actorUserID, nil)
+}
+
+// mcpToolFnWithAgent builds the `mcp` tool handler. actorUserID is the
+// UserSpace user that built this agent instance; when it differs from the
+// agent owner (rc.UserID), every action is refused before any usecase
+// runs. ag supplies the relational store + reload notify used by the
+// add/remove actions; nil disables those actions with a clear error.
+func mcpToolFnWithAgent(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserID string, ag *Agent) func(context.Context, json.RawMessage) (string, error) {
+	return func(ctx context.Context, raw json.RawMessage) (string, error) {
+		if actorUserID != "" && rc.UserID != "" && actorUserID != rc.UserID {
+			return "", fmt.Errorf("mcp: only the agent owner may manage MCP authorization")
+		}
+		var in struct {
+			Action     string   `json:"action"`
+			ServerName string   `json:"serverName"`
+			URL        string   `json:"url"`
+			OAuthRes   string   `json:"oauthResource"`
+			Scopes     []string `json:"scopes"`
+		}
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return "", fmt.Errorf("mcp: %w", err)
+		}
+		switch in.Action {
+		case "login":
+			return mcpToolLogin(ctx, ob, rc, in.ServerName)
+		case "status":
+			return mcpToolStatus(ctx, ob, rc, in.ServerName)
+		case "check":
+			return mcpToolCheck(ctx, ob, rc, actorUserID, in.ServerName)
+		case "refresh":
+			return mcpToolRefresh(ctx, ob, rc, in.ServerName)
+		case "logout":
+			return mcpToolLogout(ctx, ob, rc, in.ServerName)
+		case "add":
+			return mcpToolAdd(ctx, ag, rc, mcpAddInput{
+				ServerName: in.ServerName, URL: in.URL,
+				OAuthResource: in.OAuthRes, Scopes: in.Scopes,
+			})
+		case "remove":
+			return mcpToolRemove(ctx, ag, rc, in.ServerName)
+		case "undo":
+			return mcpToolUndo(ctx, ag, rc)
+		default:
+			return "", fmt.Errorf("mcp: unknown action %q (login|status|check|refresh|logout|add|remove|undo)", in.Action)
+		}
+	}
+}
+
+func mcpToolLogin(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+	if ob == nil {
+		return "", fmt.Errorf("mcp login: MCP OAuth is not configured")
+	}
+	if ob.Start == nil {
+		return "", fmt.Errorf("mcp login: OAuth start flow is not configured (incomplete bootstrap)")
+	}
+	if serverName == "" {
+		return "", fmt.Errorf("mcp login: serverName is required")
+	}
+	cfg, ok := rc.MCPServers[serverName]
+	if !ok || cfg.OAuthResource == "" {
+		return "", fmt.Errorf("mcp login: %q is not a configured OAuth MCP server", serverName)
+	}
+	resource := cfg.OAuthResource
+	// Host callback base: in server/cloud deployments the consent redirect
+	// must come back to the host (cloud /oauth/mcp or CLI loopback), never
+	// into the agent conversation.
+	base := os.Getenv("FASTAGENT_OAUTH_CALLBACK_BASE")
+	if base == "" {
+		return "", fmt.Errorf("mcp login: FASTAGENT_OAUTH_CALLBACK_BASE is not configured (server-side deployments need it to receive the authorization callback)")
+	}
+	out, err := ob.Start.Execute(ctx, usecase.StartAuthInput{
+		UserID:       rc.UserID,
+		AgentID:      rc.ID,
+		ServerName:   serverName,
+		ServerURL:    resource,
+		CallbackBase: base,
+		Scopes:       cfg.Scopes,
+	})
+	if err != nil {
+		return "", fmt.Errorf("mcp login: %w", err)
+	}
+	return "Owner action required — open this URL (the host completes the callback; do NOT paste the redirect back):\n" + out.AuthURL, nil
+}
+
+func mcpToolStatus(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+	if ob == nil {
+		return "", fmt.Errorf("mcp status: MCP OAuth is not configured")
+	}
+	if ob.Status == nil {
+		return "", fmt.Errorf("mcp status: OAuth status store is not configured (incomplete bootstrap)")
+	}
+	var names []string
+	for name, cfg := range rc.MCPServers {
+		if cfg.OAuthResource == "" {
+			continue
+		}
+		if serverName == "" || name == serverName {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		if serverName != "" {
+			return "", fmt.Errorf("mcp status: %q is not a configured OAuth MCP server", serverName)
+		}
+		return "No OAuth-protected MCP servers configured.", nil
+	}
+	var sb strings.Builder
+	for _, name := range names {
+		out, err := ob.Status.Execute(ctx, usecase.RefreshInput{
+			UserID: rc.UserID, AgentID: rc.ID, ServerName: name,
+			ServerURL: rc.MCPServers[name].OAuthResource,
+		})
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("%s: error (%v)\n", name, err))
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s\n", name, out.Status))
+	}
+	return strings.TrimRight(sb.String(), "\n"), nil
+}
+
+func mcpToolLogout(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+	if ob == nil {
+		return "", fmt.Errorf("mcp logout: MCP OAuth is not configured")
+	}
+	if ob.Revoke == nil {
+		return "", fmt.Errorf("mcp logout: OAuth revoke flow is not configured (incomplete bootstrap)")
+	}
+	if serverName == "" {
+		return "", fmt.Errorf("mcp logout: serverName is required")
+	}
+	cfg, ok := rc.MCPServers[serverName]
+	if !ok || cfg.OAuthResource == "" {
+		return "", fmt.Errorf("mcp logout: %q is not a configured OAuth MCP server", serverName)
+	}
+	if err := ob.Revoke.Execute(ctx, usecase.RefreshInput{
+		UserID: rc.UserID, AgentID: rc.ID, ServerName: serverName,
+		ServerURL: cfg.OAuthResource,
+	}); err != nil {
+		return "", fmt.Errorf("mcp logout: %w", err)
+	}
+	return serverName + ": authorization revoked.", nil
+}
+
+// mcpToolCheck verifies an OAuth MCP server end-to-end: local credential
+// state first (no network), then a real MCP initialize + tools/list with
+// the owner bearer token. Unlike status (which only reads the local store),
+// check proves the credential still works at the provider — a locally
+// "authorized" token can be dead after a server-side revoke or an issuer
+// change, and the 401-triggered single refresh inside the HTTP client is
+// exactly the recovery path a real tool call would take.
+func mcpToolCheck(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserID, serverName string) (string, error) {
+	if ob == nil {
+		return "", fmt.Errorf("mcp check: MCP OAuth is not configured")
+	}
+	if ob.Status == nil {
+		return "", fmt.Errorf("mcp check: OAuth status store is not configured (incomplete bootstrap)")
+	}
+	if serverName == "" {
+		return "", fmt.Errorf("mcp check: serverName is required")
+	}
+	cfg, ok := rc.MCPServers[serverName]
+	if !ok || cfg.OAuthResource == "" {
+		return "", fmt.Errorf("mcp check: %q is not a configured OAuth MCP server", serverName)
+	}
+	if out, err := ob.Status.Execute(ctx, usecase.RefreshInput{
+		UserID: rc.UserID, AgentID: rc.ID, ServerName: serverName, ServerURL: cfg.OAuthResource,
+	}); err != nil {
+		return "", fmt.Errorf("mcp check: %w", err)
+	} else if out.Status == usecase.StatusNone {
+		return "", fmt.Errorf("mcp check: %q is not authorized yet — run mcp login or have the owner authorize it in settings", serverName)
+	}
+	// Probe with an isolated client so check never depends on the
+	// session's pre-built connection state. cfg.URL is the MCP transport;
+	// cfg.OAuthResource is the RFC 8707 resource used for token discovery.
+	transportURL := cfg.URL
+	if transportURL == "" {
+		transportURL = cfg.OAuthResource
+	}
+	hc := mcp.NewHTTPClient(transportURL, cfg.Headers)
+	hc.SetAuthProvider(mcpOAuthAccessToken(ob, rc, actorUserID, serverName, cfg.OAuthResource))
+	defer hc.Close()
+	if err := hc.Connect(); err != nil {
+		return "", fmt.Errorf("mcp check: %q connection failed: %w", serverName, err)
+	}
+	tools, err := hc.ListTools()
+	if err != nil {
+		return "", fmt.Errorf("mcp check: %q tools/list failed: %w", serverName, err)
+	}
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return fmt.Sprintf("%s: connected and authorized (server returned no tools).", serverName), nil
+	}
+	return fmt.Sprintf("%s: connected and authorized (%d tools: %s).", serverName, len(names), strings.Join(names, ", ")), nil
+}
+
+// mcpToolRefresh forces a token refresh through the same use case the MCP
+// HTTP client drives automatically on 401 / pre-expiry. When the stored
+// token is still fresh the use case is a no-op and returns the current
+// pair; when stale it rotates the refresh token. Refresh never surfaces
+// token material — only expiry and scope count.
+func mcpToolRefresh(ctx context.Context, ob *oauth.Bootstrap, rc config.ResolvedAgent, serverName string) (string, error) {
+	if ob == nil {
+		return "", fmt.Errorf("mcp refresh: MCP OAuth is not configured")
+	}
+	if ob.Status == nil || ob.Refresh == nil {
+		return "", fmt.Errorf("mcp refresh: OAuth refresh flow is not configured (incomplete bootstrap)")
+	}
+	if serverName == "" {
+		return "", fmt.Errorf("mcp refresh: serverName is required")
+	}
+	cfg, ok := rc.MCPServers[serverName]
+	if !ok || cfg.OAuthResource == "" {
+		return "", fmt.Errorf("mcp refresh: %q is not a configured OAuth MCP server", serverName)
+	}
+	if out, err := ob.Status.Execute(ctx, usecase.RefreshInput{
+		UserID: rc.UserID, AgentID: rc.ID, ServerName: serverName, ServerURL: cfg.OAuthResource,
+	}); err != nil {
+		return "", fmt.Errorf("mcp refresh: %w", err)
+	} else if out.Status == usecase.StatusNone {
+		return "", fmt.Errorf("mcp refresh: %q is not authorized yet — run mcp login or have the owner authorize it in settings", serverName)
+	}
+	tokens, err := ob.Refresh.Execute(ctx, usecase.RefreshInput{
+		UserID: rc.UserID, AgentID: rc.ID, ServerName: serverName, ServerURL: cfg.OAuthResource,
+	})
+	if err != nil {
+		return "", fmt.Errorf("mcp refresh: %q failed: %w", serverName, err)
+	}
+	expiry := "no expiry provided"
+	if !tokens.ExpiresAt.IsZero() {
+		expiry = tokens.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("%s: token refreshed, valid until %s (%d scopes).", serverName, expiry, len(tokens.Scopes)), nil
+}
+
+// mcpOAuthAccessToken builds the scheme-A bearer provider for one OAuth
+// MCP server. The closure carries the agent owner (rc.UserID) as the
+// credential identity and the session actor (actorUserID) for the owner
+// gate; the gate refuses a foreign actor before any store read.
+func mcpOAuthAccessToken(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserID, serverName, serverURL string) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		if ob == nil || ob.Provider == nil {
+			return "", fmt.Errorf("mcp oauth access token: OAuth provider is not configured (incomplete bootstrap)")
+		}
+		return ob.Provider.AccessToken(ctx, usecase.RefreshInput{
+			UserID:      rc.UserID,
+			AgentID:     rc.ID,
+			ServerName:  serverName,
+			ServerURL:   serverURL,
+			ActorUserID: actorUserID,
+		})
+	}
+}
+
+// mcpOAuthManagerOptions builds the bearer-token ManagerOptions for the
+// OAuth-protected servers declared in rc.MCPServers (scheme A owner gate).
+//
+// actorUserID is the session principal that built this agent instance (the
+// Manager's user). The agent owner (rc.UserID) owns the stored credential;
+// the token provider refuses access when the actor differs, so a visitor
+// session that attaches a foreign agent can never use the owner's Quandora
+// (or any OAuth-protected MCP) credential. Static-header servers are
+// untouched — zero behavior change for the legacy path.
+func mcpOAuthManagerOptions(ob *oauth.Bootstrap, rc config.ResolvedAgent, actorUserID string) []mcp.ManagerOption {
+	var opts []mcp.ManagerOption
+	for name, cfg := range rc.MCPServers {
+		if cfg.OAuthResource == "" {
+			continue // static-header path, zero behavior change
+		}
+		resource := cfg.OAuthResource
+		if resource == "" {
+			resource = cfg.URL
+		}
+		serverName, serverURL := name, resource
+		opts = append(opts, mcp.WithAuth(serverName, mcpOAuthAccessToken(ob, rc, actorUserID, serverName, serverURL)))
+	}
+	return opts
 }
 
 func newContextBuilderWithThinking(home string, memory *Memory, skillsSummary string, thinking string) *ContextBuilder {
@@ -2364,7 +2766,21 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			if meta != nil {
 				evt["metadata"] = meta
 			}
-			emitEvent(ctx, ChatEvent{Type: "tool_result", Data: evt})
+			// Fail loud for mcp mutations whose undo record cannot be
+			// persisted: the declaration change is committed, so we can't
+			// roll it back here — but the model must not silently believe
+			// an undo journal exists when it doesn't.
+			if seq, jerr := emitEventChecked(ctx, ChatEvent{Type: "tool_result", Data: evt}); seq < 0 || jerr != nil {
+				if updated, warned := applyUndoJournalWarning(r.toolName, resultContent, seq, jerr); warned {
+					resultContent = updated
+					toolMsg.Content = resultContent
+					if n := len(messages); n > 0 && messages[n-1].Role == "tool" {
+						messages[n-1] = toolMsg
+					}
+					slog.Warn("mcp undo journal missing after mutation",
+						"agent", a.name, "name", r.toolName, "persistErr", jerr)
+				}
+			}
 		}
 		// Update consecutive-failed-rounds tally now that the whole
 		// round's results have been processed. A single non-failure

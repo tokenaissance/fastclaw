@@ -709,7 +709,7 @@ var systemSettingNamespaces = []string{
 // Agent-scope keys cover model/temperature/sandbox; everything else is
 // a system-wide namespace. The bool return is "isAgentScope" — true
 // means the row's agent_id should be set to the active agentID; false
-// means a system row (user_id='', agent_id='').
+// means a system row (user_id=”, agent_id=”).
 func settingKey(key string) (string, []string, bool, error) {
 	if ns, ok := agentScopeKeys[key]; ok {
 		path := []string{key}
@@ -853,7 +853,6 @@ var systemFileAllowlist = map[string]bool{
 	"HEARTBEAT.md": true,
 	"AGENTS.md":    true,
 	"TOOLS.md":     true,
-	"agent.json":   true,
 }
 
 func validateSystemFilename(filename string) error {

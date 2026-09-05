@@ -60,6 +60,12 @@ type MCPServerConfig struct {
 	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	// OAuth fields are optional and only needed for OAuth-protected
+	// remote servers (e.g. Quandora). When OAuthResource is empty the
+	// server is treated exactly as before — static headers / no auth.
+	OAuthResource string   `json:"oauthResource,omitempty"` // default: URL
+	Scopes        []string `json:"scopes,omitempty"`        // default: scopes_supported
+	CallbackURL   string   `json:"callbackURL,omitempty"`   // default: CLI loopback / public web callback
 }
 
 // CronJob defines a scheduled job loaded into the gateway's runtime.
@@ -520,22 +526,13 @@ type Peer struct {
 }
 
 // AgentFileConfigLoader is the indirection point for layer-3 agent config.
-// Gateway boot wires it to read from agents.config rows in the DB.
-var AgentFileConfigLoader func(agentID, home string) (AgentFileConfig, bool) = defaultAgentFileConfigLoader
-
-func defaultAgentFileConfigLoader(_, home string) (AgentFileConfig, bool) {
-	if home == "" {
-		return AgentFileConfig{}, false
-	}
-	data, err := os.ReadFile(filepath.Join(home, "agent.json"))
-	if err != nil {
-		return AgentFileConfig{}, false
-	}
-	var cfg AgentFileConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return AgentFileConfig{}, false
-	}
-	return cfg, true
+// The per-agent `agent.json` file has been retired: agent config is DB-only
+// (agents.config column + per-key agent_mcp_servers rows). Composition roots
+// (gateway and any other agent execution entrypoint) MUST wire the DB-first
+// loader; the default here is a no-op so an unwired path fails closed (no
+// silent file fallback) instead of reading a stale local file.
+var AgentFileConfigLoader func(agentID, home string) (AgentFileConfig, bool) = func(string, string) (AgentFileConfig, bool) {
+	return AgentFileConfig{}, false
 }
 
 // AgentFileConfig is the schema for an agent's per-row override JSON

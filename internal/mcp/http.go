@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,14 @@ type HTTPClient struct {
 	client  *http.Client
 	mu      sync.Mutex
 	nextID  int
+	// sessionID is the Mcp-Session-Id the server assigned on initialize
+	// (Streamable HTTP 2025-11-25). Servers like Quandora require it on
+	// every request after the handshake; without it tools/list returns
+	// HTTP 400 / -32600 Invalid Request.
+	sessionID string
+	// auth injects a Bearer token for OAuth-protected servers. Nil keeps
+	// the static-header path unchanged.
+	auth func(ctx context.Context) (string, error)
 }
 
 // NewHTTPClient creates a new HTTP MCP client.
@@ -28,6 +37,15 @@ func NewHTTPClient(url string, headers map[string]string) *HTTPClient {
 		client:  &http.Client{},
 		nextID:  1,
 	}
+}
+
+// SetAuthProvider wires an OAuth token provider. When set, every request
+// gets Authorization: Bearer <token> and a 401 triggers exactly one
+// refresh-and-replay (never a loop).
+func (c *HTTPClient) SetAuthProvider(f func(ctx context.Context) (string, error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.auth = f
 }
 
 func expandHeaders(headers map[string]string) map[string]string {
@@ -46,6 +64,8 @@ func (c *HTTPClient) sendRequest(method string, params interface{}) (*jsonRPCRes
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
+	auth := c.auth
+	sessionID := c.sessionID
 	c.mu.Unlock()
 
 	req := jsonRPCRequest{
@@ -60,41 +80,70 @@ func (c *HTTPClient) sendRequest(method string, params interface{}) (*jsonRPCRes
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
+	authToken := ""
+	for attempt := 0; ; attempt++ {
+		httpReq, err := http.NewRequest("POST", c.url, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-	for k, v := range c.headers {
-		httpReq.Header.Set(k, v)
-	}
+		httpReq.Header.Set("Content-Type", "application/json")
+		for k, v := range c.headers {
+			httpReq.Header.Set(k, v)
+		}
+		if sessionID != "" {
+			httpReq.Header.Set("Mcp-Session-Id", sessionID)
+		}
+		if auth != nil {
+			if authToken == "" {
+				tok, err := auth(context.Background())
+				if err != nil {
+					return nil, fmt.Errorf("mcp: oauth token unavailable: %w", err)
+				}
+				authToken = tok
+			}
+			httpReq.Header.Set("Authorization", "Bearer "+authToken)
+		}
 
-	resp, err := c.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.client.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("send request: %w", err)
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
+		respBody, readErr := io.ReadAll(resp.Body)
+		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+			c.mu.Lock()
+			c.sessionID = sid
+			c.mu.Unlock()
+		}
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read response: %w", readErr)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 && auth != nil {
+			// Force one refresh and replay; a second 401 means the
+			// credential is genuinely rejected — fail rather than loop.
+			if tok, err := auth(context.Background()); err == nil {
+				authToken = tok
+				continue
+			}
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		}
 
-	var rpcResp jsonRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
-	}
+		var rpcResp jsonRPCResponse
+		if err := json.Unmarshal(respBody, &rpcResp); err != nil {
+			return nil, fmt.Errorf("parse response: %w", err)
+		}
 
-	if rpcResp.Error != nil {
-		return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
-	}
+		if rpcResp.Error != nil {
+			return nil, fmt.Errorf("RPC error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		}
 
-	return &rpcResp, nil
+		return &rpcResp, nil
+	}
 }
 
 // Connect initializes the connection with the MCP server.

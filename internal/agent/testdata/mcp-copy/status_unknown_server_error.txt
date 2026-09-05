@@ -1,0 +1,1 @@
+ERROR: mcp status: "missing" is not a configured OAuth MCP server

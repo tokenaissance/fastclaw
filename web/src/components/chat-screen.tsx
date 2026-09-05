@@ -196,7 +196,7 @@ function splitOnMarker(s: string): string[] {
 // (not the workspace) — exclude from the "Your files" panel.
 const SYSTEM_FILES = new Set([
   "SOUL.md", "IDENTITY.md", "USER.md", "BOOTSTRAP.md",
-  "MEMORY.md", "KNOWLEDGE.md", "HEARTBEAT.md", "AGENTS.md", "TOOLS.md", "agent.json",
+  "MEMORY.md", "KNOWLEDGE.md", "HEARTBEAT.md", "AGENTS.md", "TOOLS.md",
 ]);
 
 function isSystemFile(path: string): boolean {
