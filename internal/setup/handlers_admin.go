@@ -757,7 +757,7 @@ type adminCreateUserAgentReq struct {
 	Model       string `json:"model,omitempty"`
 	// ForkFrom is an optional source agent id. When set, the new agent
 	// inherits SOUL.md / IDENTITY.md / AGENTS.md / BOOTSTRAP.md /
-	// TOOLS.md / HEARTBEAT.md / agent.json from the source's owner-row,
+	// TOOLS.md / HEARTBEAT.md from the source's owner-row,
 	// plus the source's agent-scope `agents.defaults` and
 	// `skills.entries` config rows. Per-user state (MEMORY.md, USER.md,
 	// sessions, cron_jobs) and per-owner routing (channel bindings)
@@ -896,7 +896,7 @@ func (s *Server) handleCreateUserAgent(w http.ResponseWriter, r *http.Request) {
 // fresh on the new agent.
 var forkAgentFiles = []string{
 	"SOUL.md", "IDENTITY.md", "AGENTS.md",
-	"BOOTSTRAP.md", "TOOLS.md", "HEARTBEAT.md", "KNOWLEDGE.md", "agent.json",
+	"BOOTSTRAP.md", "TOOLS.md", "HEARTBEAT.md", "KNOWLEDGE.md",
 }
 
 // forkAgentScopeConfigs is the allowlist of agent-scope config rows
