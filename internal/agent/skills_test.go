@@ -7,7 +7,191 @@ import (
 	"testing"
 
 	"github.com/fastclaw-ai/fastclaw/internal/config"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
+
+// skillEnvTestStore satisfies workspace.Store for loader tests that only
+// need to attach an agentID (SkillEnvVars never touches the store).
+type skillEnvTestStore struct {
+	workspace.Store
+}
+
+func TestSplitSkillFrontmatterTopLevelEnv(t *testing.T) {
+	data := []byte(`---
+name: baoyu-skills
+description: WeChat publishing suite.
+env:
+  - name: WECHAT_APP_ID
+    description: WeChat Official Account AppID
+    required: true
+  - name: WECHAT_APP_SECRET
+    description: WeChat Official Account AppSecret
+    required: true
+    secret: true
+---
+# Body
+`)
+	fm, body := SplitSkillFrontmatter(data)
+	if fm == nil {
+		t.Fatal("SplitSkillFrontmatter returned nil frontmatter")
+	}
+	if len(fm.Env) != 2 {
+		t.Fatalf("env len = %d, want 2: %+v", len(fm.Env), fm.Env)
+	}
+	if fm.Env[0].Name != "WECHAT_APP_ID" || !fm.Env[0].Required || fm.Env[0].Secret {
+		t.Fatalf("WECHAT_APP_ID spec mismatch: %+v", fm.Env[0])
+	}
+	if fm.Env[1].Name != "WECHAT_APP_SECRET" || !fm.Env[1].Required || !fm.Env[1].Secret {
+		t.Fatalf("WECHAT_APP_SECRET spec mismatch: %+v", fm.Env[1])
+	}
+	if !strings.Contains(body, "# Body") {
+		t.Fatalf("body should keep prose after frontmatter, got: %q", body)
+	}
+}
+
+func TestParseSkillMetadataFastagentEnv(t *testing.T) {
+	data := []byte(`---
+name: baoyu-skills
+metadata:
+  fastagent:
+    env:
+      - name: WECHAT_APP_ID
+        required: true
+      - name: WECHAT_APP_SECRET
+        required: true
+        secret: true
+---
+`)
+	fm, _ := SplitSkillFrontmatter(data)
+	if fm == nil {
+		t.Fatal("SplitSkillFrontmatter returned nil frontmatter")
+	}
+	meta := ParseSkillMetadata(&fm.Metadata)
+	if meta == nil || meta.Meta() == nil {
+		t.Fatal("ParseSkillMetadata returned nil metadata")
+	}
+	env := meta.Meta().Env
+	if len(env) != 2 {
+		t.Fatalf("metadata env len = %d, want 2: %+v", len(env), env)
+	}
+	if env[1].Name != "WECHAT_APP_SECRET" || !env[1].Secret {
+		t.Fatalf("nested secret spec mismatch: %+v", env[1])
+	}
+}
+
+func TestParseSkillMetadataOpenClawEnvFallback(t *testing.T) {
+	// baoyu-post-to-wechat keeps upstream `metadata.openclaw` for
+	// compatibility; Meta() must fall back to it when `fastagent` is
+	// absent so materialized per-skill installs surface env vars too.
+	data := []byte(`---
+name: baoyu-post-to-wechat
+metadata:
+  openclaw:
+    homepage: https://github.com/JimLiu/baoyu-skills#baoyu-post-to-wechat
+    requires:
+      anyBins:
+        - bun
+        - npx
+    env:
+      - name: WECHAT_APP_ID
+        required: true
+      - name: WECHAT_APP_SECRET
+        required: true
+        secret: true
+---
+`)
+	fm, _ := SplitSkillFrontmatter(data)
+	if fm == nil {
+		t.Fatal("SplitSkillFrontmatter returned nil frontmatter")
+	}
+	meta := ParseSkillMetadata(&fm.Metadata)
+	if meta == nil || meta.Meta() == nil {
+		t.Fatal("ParseSkillMetadata returned nil metadata")
+	}
+	env := meta.Meta().Env
+	if len(env) != 2 {
+		t.Fatalf("openclaw env len = %d, want 2: %+v", len(env), env)
+	}
+	if env[0].Name != "WECHAT_APP_ID" || !env[0].Required {
+		t.Fatalf("openclaw env[0] mismatch: %+v", env[0])
+	}
+	if env[1].Name != "WECHAT_APP_SECRET" || !env[1].Secret {
+		t.Fatalf("openclaw env[1] mismatch: %+v", env[1])
+	}
+}
+
+func TestSplitSkillFrontmatterTopLevelEnvWinsOverMetadata(t *testing.T) {
+	data := []byte(`---
+name: x
+env:
+  - name: TOP_LEVEL_VAR
+metadata:
+  fastagent:
+    env:
+      - name: NESTED_VAR
+---
+`)
+	fm, _ := SplitSkillFrontmatter(data)
+	if fm == nil {
+		t.Fatal("nil frontmatter")
+	}
+	if len(fm.Env) != 1 || fm.Env[0].Name != "TOP_LEVEL_VAR" {
+		t.Fatalf("top-level env should win over metadata.env, got: %+v", fm.Env)
+	}
+}
+
+func TestSkillEnvVarsPerAgentOverrideAndGlobalFallback(t *testing.T) {
+	cfg := config.SkillsCfg{
+		Entries: map[string]config.SkillEntryCfg{
+			"baoyu-skills": {
+				Env: map[string]string{
+					"WECHAT_APP_ID": "global-app-id",
+				},
+			},
+		},
+		AgentEntries: map[string]map[string]config.SkillEntryCfg{
+			"agent-1": {
+				"baoyu-skills": {
+					Env: map[string]string{
+						"WECHAT_APP_ID":     "agent-app-id",
+						"WECHAT_APP_SECRET": "agent-secret",
+					},
+				},
+			},
+			"agent-2": {
+				"baoyu-skills": {}, // empty per-agent row must fall back to global
+			},
+		},
+	}
+
+	newLoader := func(agentID string) *SkillsLoader {
+		return NewSkillsLoaderWithGlobal(t.TempDir(), t.TempDir(), "", config.SkillsConfig{}, cfg).
+			WithObjectStore(skillEnvTestStore{}, agentID)
+	}
+
+	// Per-agent override wins and merges the agent-only secret.
+	env1 := newLoader("agent-1").SkillEnvVars("baoyu-skills")
+	if env1["WECHAT_APP_ID"] != "agent-app-id" {
+		t.Fatalf("agent override should win, got: %+v", env1)
+	}
+	if env1["WECHAT_APP_SECRET"] != "agent-secret" {
+		t.Fatalf("agent secret missing, got: %+v", env1)
+	}
+
+	// Empty per-agent row falls back to the global entry.
+	env2 := newLoader("agent-2").SkillEnvVars("baoyu-skills")
+	if env2["WECHAT_APP_ID"] != "global-app-id" {
+		t.Fatalf("global fallback failed, got: %+v", env2)
+	}
+	if _, ok := env2["WECHAT_APP_SECRET"]; ok {
+		t.Fatalf("global entry should not contain the agent-only secret, got: %+v", env2)
+	}
+
+	// Unknown skill returns nil.
+	if got := newLoader("agent-1").SkillEnvVars("does-not-exist"); got != nil {
+		t.Fatalf("unknown skill should return nil, got: %+v", got)
+	}
+}
 
 func TestBuildSkillsSummaryUsesProgressiveDisclosureByDefault(t *testing.T) {
 	t.Setenv("FASTAGENT_HOME", t.TempDir())
