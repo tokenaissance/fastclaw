@@ -88,16 +88,17 @@ type sseUsage struct {
 //
 // Defensive sanitization: OpenAI/DeepSeek reject any request where an
 // assistant message with `tool_calls` is not immediately followed by a
-// `tool` message answering each tool_call_id. Dirty sessions can land
-// us in that state — e.g. the agent's tool-loop detector at
-// loop.go:1218 appends the assistant's tool_calls then breaks out
-// without executing the tools, leaving orphans behind. Old sessions
-// from before the streamed-RawAssistant fix can also carry orphan
-// tool_calls inside the persisted RawAssistant. Either case used to
-// surface as `An assistant message with 'tool_calls' must be followed
-// by tool messages`. We strip the offending tool_calls (and any
-// orphan tool replies) at wire-build time so the request goes through
-// — the session keeps its historical record untouched.
+// `tool` message answering each tool_call_id, and any `tool` message
+// that is not a response to a preceding assistant's tool_calls. Dirty
+// sessions can land in either state — e.g. the agent's tool-loop
+// detector at loop.go:1218 appends the assistant's tool_calls then
+// breaks out without executing the tools; compaction/truncation can
+// drop the assistant half of a pair and leave its tool reply dangling;
+// and a tool call that hung (exec) may produce a late result in the
+// wrong position. Either case used to surface as the corresponding
+// provider error. We strip orphan tool_calls AND dangling tool replies
+// at wire-build time so the request goes through — the session keeps
+// its historical record untouched.
 func toAPIMessages(msgs []Message) []json.RawMessage {
 	orphanAssistant, orphanTool := findOrphanToolCalls(msgs)
 	out := make([]json.RawMessage, 0, len(msgs))
@@ -183,6 +184,34 @@ func findOrphanToolCalls(msgs []Message) (orphanAssistant, orphanTool map[int]bo
 			if wantSet[msgs[k].ToolCallID] {
 				orphanTool[k] = true
 			}
+		}
+	}
+	// Inverse direction: a `tool` message whose tool_call_id is not
+	// declared by the nearest preceding (non-orphan) assistant. This is
+	// what surfaces as "Messages with role 'tool' must be a response to a
+	// preceding message with 'tool_calls'" after the assistant half was
+	// dropped by compaction or a late tool result landed out of order.
+	for i, m := range msgs {
+		if m.Role != "tool" || orphanTool[i] {
+			continue
+		}
+		found := false
+		for j := i - 1; j >= 0; j-- {
+			if msgs[j].Role != "assistant" || orphanAssistant[j] {
+				continue
+			}
+			for _, id := range assistantToolCallIDs(msgs[j]) {
+				if id == m.ToolCallID {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			orphanTool[i] = true
 		}
 	}
 	return
