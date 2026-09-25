@@ -2131,6 +2131,14 @@ never from the transport**; and each state must lead to a different action
 (wait / wait-with-hint / re-issue / refresh), which is what keeps the count at
 five instead of "always unknown".
 
+> **Extended 2026-09-26 ([08 §10.9](./fs-formal-proof/08-state-observability-principle.md)).** The same rule
+> governs *adding* a state, not only entering one: this vocabulary does not grow a task-level `cancelled`
+> value. "Stop the whole task" is `stop_task(task)` — cancel every turn of it that has not completed — an
+> operation over the turn set whose effect is already readable from the per-turn facts, so a stored
+> task-level status would be a second source for a derived fact (O6), and it would paper over the input that
+> is genuinely missing (the queued half is not store-visible yet: cloud `docs/mcp-task-submission.md` §14.6's
+> second hole). Fix the input, not the vocabulary.
+
 #### A4.4 Tests
 
 Component tests over the three event sequences that decide the partition (turn

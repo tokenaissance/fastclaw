@@ -792,3 +792,40 @@ means 0, the wire's unset"), and the hop from that payload to the reader by
 `TestRuntimePage_CanSetMemoryAndSkillLearning` (real handler, real store, system scope, read back through
 the typed call the gateway makes). Falsified for real: dropping the two namespaces reddens 3 of the 4 web
 cases, and saving at user scope instead of system scope reddens the Go test on every assertion.
+
+### 10.9 No state for a derived fact — stopping a task is an operation over its turns (2026-09-26)
+
+A design rule written down *before* the capability is built, because the shape it would take by default is
+the wrong one. The MCP surface stops **one step** at a time (today `cancel_task(session, turnId)`, planned
+`cancel_turn(task, turnId)`; cloud `docs/mcp-task-submission.md` §14.2), and the obvious next ask is "stop the
+whole task". The obvious implementation — a `cancelled` status on the session/task row — is a **second source
+for a fact that is already derived**: a task is stopped exactly when none of its turns is still queued or
+running, and that is read off the same two inputs `cancelTurn` already consults
+(`internal/setup/turn_cancel.go`: the request's own pending entry, then the session's live lease row). A stored
+flag would then have to answer questions the turn facts already answer — what does a turn added *after* the
+flag mean? does the flag lie when a queued turn starts anyway? — and each answer is a new way for σ to be false
+(O1) or for an absence not to speak (O6).
+
+> **A state may only be added for a fact that has no derivation.** "Stop the whole task" is
+> `stop_task(task)`, defined as *cancel every turn of this task that has not completed* — one operation
+> applied to the turn set, whose whole effect is visible in the per-turn facts it changes. It invents no
+> task-level state, and it is idempotent for the same reason `cancelTurn` is (withdrawing twice is one
+> withdrawal; stamping twice is one request on the same possession).
+
+Three consequences, stated because they are what make the operation honest rather than merely flag-free:
+
+* **The derivation is only as good as its inputs, so fix the input rather than hiding it.** One input is
+  currently weak: the *queued* half lives in the receiving pod's in-process map, so on the MCP surface a
+  queued step cannot be found at all (the adapter releases the stream, the handler returns, the entry is
+  unregistered — measured on dev 2026-09-26, recorded as the second hole in cloud §14.6). A task-level
+  `cancelled` flag would paper over exactly that: it would say "stopped" while a queued turn ran anyway,
+  which is the shape of the bug that was just measured, one layer up.
+* **Its answer is a count, not a boolean**: "withdrew 1 queued, stamped 1 running, 2 already finished". A
+  bare `{canceled:true}` claims more than the server did — the single-turn tool has that shape today, which
+  is why the cloud doc measures it instead of trusting the sentence.
+* **It cannot be a promise about the future.** A task gains turns; "stopped" is a statement about the turns
+  that existed when it was called, and a later turn is a new step. That is a property of the operation, not a
+  limitation of the store.
+
+No witness is owed by this section: it adds no obligation, no gap, and no code. It is the design half of
+§5.1's rule — the same reason a delivery point is not a rule, a derived fact is not a state.
