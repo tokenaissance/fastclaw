@@ -131,4 +131,25 @@ func TestClientDisconnectDoesNotKillTheTurnE2E(t *testing.T) {
 	if prov.sawCancel() {
 		t.Fatal("turn was cancelled while finishing without its client")
 	}
+
+	// Let the detached turn finish before this test returns. The assistant message
+	// lands mid-flight — the loop keeps going afterwards (skill refresh, turn files,
+	// auto-persist) and writes into the harness home, which is a `t.TempDir`. Returning
+	// while that goroutine still has files to create makes the framework's own cleanup
+	// race it, and the failure reads as this test's fault rather than as a flake:
+	//
+	//	--- FAIL: TestClientDisconnectDoesNotKillTheTurnE2E
+	//	    testing.go:1369: TempDir RemoveAll cleanup: unlinkat /tmp/…/001: directory not empty
+	//
+	// (Measured in CI 2026-09-25; the same test passed 3/3 and the whole package passed
+	// under -race on a quieter machine, which is the signature of a race, not a break.)
+	// Waiting for the turn slot to be free is the honest signal: the lease is released
+	// last (see the ordering note in beginTurnLease).
+	deadline = time.Now().Add(10 * time.Second)
+	for sess.TurnActive() {
+		if time.Now().After(deadline) {
+			t.Fatal("turn slot was never released after the reply landed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
