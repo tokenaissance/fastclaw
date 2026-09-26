@@ -896,21 +896,31 @@ type GoalRecord struct {
 // CronJobRecord holds a scheduled job. agent_id is mandatory; user_id is
 // also stored so "list a user's crons" doesn't need a join against
 // agents and ownership checks can short-circuit.
+//
+// CreatorUserID is the chatter whose turn called create_cron_job — the
+// account the job belongs to for list/delete in chat. It is NOT the
+// routing identity: the tick still ships to the agent owner's UserSpace
+// (and its channel/chat), while per-chatter state (MEMORY.md, USER.md)
+// and the tool's visibility gate key on this field. Empty on rows saved
+// by callers that don't set it (the pre-2026-09-27 backfill copies
+// user_id, i.e. the owner) — the tool treats the owner as the creator in
+// that case so legacy jobs stay reachable by their owner alone.
 type CronJobRecord struct {
-	ID        string     `json:"id"`
-	UserID    string     `json:"userId,omitempty"`
-	AgentID   string     `json:"agentId"`
-	Name      string     `json:"name"`
-	Type      string     `json:"type"`
-	Schedule  string     `json:"schedule"`
-	Message   string     `json:"message"`
-	Channel   string     `json:"channel"`
-	ChatID    string     `json:"chatId"`
-	AccountID string     `json:"accountId"`
-	Timezone  string     `json:"timezone"`
-	Enabled   bool       `json:"enabled"`
-	LastRun   *time.Time `json:"lastRun,omitempty"`
-	NextRun   *time.Time `json:"nextRun,omitempty"`
+	ID            string     `json:"id"`
+	UserID        string     `json:"userId,omitempty"`
+	CreatorUserID string     `json:"creatorUserId,omitempty"`
+	AgentID       string     `json:"agentId"`
+	Name          string     `json:"name"`
+	Type          string     `json:"type"`
+	Schedule      string     `json:"schedule"`
+	Message       string     `json:"message"`
+	Channel       string     `json:"channel"`
+	ChatID        string     `json:"chatId"`
+	AccountID     string     `json:"accountId"`
+	Timezone      string     `json:"timezone"`
+	Enabled       bool       `json:"enabled"`
+	LastRun       *time.Time `json:"lastRun,omitempty"`
+	NextRun       *time.Time `json:"nextRun,omitempty"`
 	// FailureCount is the number of consecutive fire-attempts whose
 	// destination channel was missing/unreachable. UpdateCronJobRun
 	// resets it to 0; IncrementCronJobFailure bumps it. The scheduler

@@ -35,7 +35,7 @@ func TestCronJobsAreScopedToTheirCreator(t *testing.T) {
 	reg := NewRegistry(t.TempDir(), t.TempDir())
 	reg.SetOwnerUserID("u_owner")
 	reg.SetAgentOwnerUserID("u_owner")
-	RegisterCronTools(reg, db, "u_owner", agentID)
+	RegisterCronTools(reg, db, agentID)
 
 	jobID := func(name string) string {
 		t.Helper()

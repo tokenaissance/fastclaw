@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -26,12 +27,15 @@ type deleteCronJobArgs struct {
 
 // RegisterCronTools registers cron job management tools.
 //
-// Channel + chatID for the originating turn are read from the registry
-// at execute time via r.MessageChannel() / r.MessageChatID() so a single
+// Everything per-turn is read from the registry at execute time — the
+// bus address via r.MessageChannel() / r.MessageChatID(), and the
+// identity the job belongs to via r.ChatterUserID() — so a single
 // registration at agent construction handles every chat context the
-// agent runs in. The agent loop's bindSession stamps the per-turn
-// values onto the registry before any tool fires.
-func RegisterCronTools(r *Registry, st store.Store, userID, agentID string) {
+// agent runs in. The agent loop's bindSession stamps those values onto
+// the registry before any tool fires; the boot-time userID the
+// registration used to take was only ever the UserSpace owner, which on
+// a shared agent is the binder and not the chatter.
+func RegisterCronTools(r *Registry, st store.Store, agentID string) {
 	r.Register("create_cron_job",
 		"Create a scheduled task. Use this for any user request that names a specific time, an interval, or a recurring schedule (e.g. \"5 分钟后提醒\", \"every Monday 9am\", \"each day at 8\"). When the schedule fires, the agent receives `message` as a fresh inbound prompt on the same channel the request originated from. Do NOT write timed reminders into HEARTBEAT.md — that file is only for conditional self-checks reviewed at every heartbeat tick.",
 		map[string]interface{}{
@@ -57,7 +61,7 @@ func RegisterCronTools(r *Registry, st store.Store, userID, agentID string) {
 			},
 			"required": []string{"name", "schedule", "message"},
 		},
-		makeCreateCronJob(st, r, userID, agentID),
+		makeCreateCronJob(st, r, agentID),
 	)
 
 	r.Register("list_cron_jobs",
@@ -66,7 +70,7 @@ func RegisterCronTools(r *Registry, st store.Store, userID, agentID string) {
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
-		makeListCronJobs(st, userID, agentID),
+		makeListCronJobs(st, r, agentID),
 	)
 
 	r.Register("delete_cron_job",
@@ -81,11 +85,11 @@ func RegisterCronTools(r *Registry, st store.Store, userID, agentID string) {
 			},
 			"required": []string{"id"},
 		},
-		makeDeleteCronJob(st, userID),
+		makeDeleteCronJob(st, r, agentID),
 	)
 }
 
-func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) ToolFunc {
+func makeCreateCronJob(st store.Store, r *Registry, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args createCronJobArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -149,15 +153,16 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 		}
 
 		job := &store.CronJobRecord{
-			ID:        id,
-			AgentID:   agentID,
-			Name:      args.Name,
-			Type:      jobType,
-			Schedule:  args.Schedule,
-			Message:   args.Message,
-			Channel:   channel,
-			AccountID: accountID,
-			ChatID:    chatID,
+			ID:            id,
+			AgentID:       agentID,
+			CreatorUserID: r.ChatterUserID(),
+			Name:          args.Name,
+			Type:          jobType,
+			Schedule:      args.Schedule,
+			Message:       args.Message,
+			Channel:       channel,
+			AccountID:     accountID,
+			ChatID:        chatID,
 			// "" = server-local; the scheduler's LocationOf maps it
 			// the same way LoadLocationOrLocal did above, so creation
 			// and recurrence agree.
@@ -186,13 +191,22 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 	}
 }
 
-func makeListCronJobs(st store.Store, userID, agentID string) ToolFunc {
+func makeListCronJobs(st store.Store, r *Registry, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		jobs, err := st.ListCronJobsByAgent(ctx, agentID)
 		if err != nil {
 			return "", fmt.Errorf("list cron jobs: %w", err)
 		}
 		filtered := jobs
+		if !cronCallerIsAgentAdmin(r) {
+			caller := r.ChatterUserID()
+			filtered = nil
+			for _, j := range jobs {
+				if cronJobCreator(j) == caller {
+					filtered = append(filtered, j)
+				}
+			}
+		}
 
 		if len(filtered) == 0 {
 			return "No cron jobs found for this agent.", nil
@@ -203,7 +217,7 @@ func makeListCronJobs(st store.Store, userID, agentID string) ToolFunc {
 	}
 }
 
-func makeDeleteCronJob(st store.Store, userID string) ToolFunc {
+func makeDeleteCronJob(st store.Store, r *Registry, agentID string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
 		var args deleteCronJobArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
@@ -212,11 +226,48 @@ func makeDeleteCronJob(st store.Store, userID string) ToolFunc {
 		if args.ID == "" {
 			return "", fmt.Errorf("id is required")
 		}
+		job, err := st.GetCronJob(ctx, args.ID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return "", fmt.Errorf("delete cron job: %w", err)
+		}
+		// A job that belongs to another chatter, or to another agent,
+		// reads as "no such job" — confirming the id exists would leak
+		// the other chatter's schedule just as the list used to.
+		if job == nil || job.AgentID != agentID ||
+			(!cronCallerIsAgentAdmin(r) && cronJobCreator(*job) != r.ChatterUserID()) {
+			return "", fmt.Errorf("no cron job %s on this agent", args.ID)
+		}
 		if err := st.DeleteCronJob(ctx, args.ID); err != nil {
 			return "", fmt.Errorf("delete cron job: %w", err)
 		}
 		return fmt.Sprintf("Cron job %s deleted.", args.ID), nil
 	}
+}
+
+// cronCallerIsAgentAdmin reports whether this turn's chatter may see and
+// cancel every scheduled job of the agent. The loop flags the agent owner
+// (and configured channel admins) per turn; the agentOwnerUserID
+// comparison covers the same person arriving through a channel where no
+// admin allowlist is configured, since isAdminChatter falls back to deny
+// there.
+func cronCallerIsAgentAdmin(r *Registry) bool {
+	if r.callerIsAdmin {
+		return true
+	}
+	caller := r.ChatterUserID()
+	return caller != "" && r.agentOwnerUserID != "" && caller == r.agentOwnerUserID
+}
+
+// cronJobCreator names the account a job belongs to in chat. Rows written
+// before creator_user_id existed (and rows a non-chat caller saved
+// without one) fall back to user_id, which SaveCronJob fills from the
+// agent owner — never an anonymous value, so such a row stays reachable
+// by the owner and invisible to everyone else.
+func cronJobCreator(j store.CronJobRecord) string {
+	if j.CreatorUserID != "" {
+		return j.CreatorUserID
+	}
+	return j.UserID
 }
 
 func generateUUID() string {

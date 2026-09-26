@@ -23,7 +23,7 @@ func TestCreateCronJobPersistsMessageAccountID(t *testing.T) {
 	r.SetOwnerUserID("user-1")
 	r.SetChatterUserID("user-1")
 	r.SetMessageContext("telegram", "dclaw_official_bot", "8169894742")
-	RegisterCronTools(r, db, "user-1", "agent-1")
+	RegisterCronTools(r, db, "agent-1")
 
 	args, err := json.Marshal(createCronJobArgs{
 		Name:     "telegram reminder",
