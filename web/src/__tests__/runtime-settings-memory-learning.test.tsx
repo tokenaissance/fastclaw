@@ -105,12 +105,12 @@ describe("runtime settings — memory auto-persist and the skills learner", () =
     expect(payload.memory.autoPersist).toEqual({
       enabled: true,
       everyNTurns: 7,
-      model: undefined,
+      model: '',
     });
     expect(payload.skillsLearner).toEqual({
       enabled: true,
       minToolCalls: 4,
-      model: undefined,
+      model: '',
     });
     expect(payload.privacy).toEqual({ piiScrubbing: { enabled: true } });
     // The namespaces this page already owned must still be in the patch — the

@@ -140,14 +140,18 @@ export default function RuntimeSettingsPage() {
           autoPersist: {
             enabled: autoPersistEnabled,
             everyNTurns: Number.isFinite(cadence) && cadence > 0 ? cadence : 0,
-            model: autoPersistModel.trim() || undefined,
+            // '' means "use the agent's own model" and it has to travel: the pod MERGES the patch,
+            // so an omitted key would keep whatever model was set before and this form could never
+            // clear one (fastagent internal/setup/handlers.go, handleUpdateConfig).
+            model: autoPersistModel.trim(),
           },
         },
         skillsLearner: {
           enabled: skillsLearnerEnabled,
           minToolCalls:
             Number.isFinite(minToolCalls) && minToolCalls > 0 ? minToolCalls : 0,
-          model: skillsLearnerModel.trim() || undefined,
+          // Same rule as the distiller's model above: '' clears, omitting cannot.
+          model: skillsLearnerModel.trim(),
         },
         privacy: {
           piiScrubbing: {
