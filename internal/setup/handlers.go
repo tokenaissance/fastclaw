@@ -1532,6 +1532,21 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+
+	// Subscribe BEFORE the opening frame, not after it: the frame is the only
+	// "you are ready" signal a client (and every test) has, so it must not be
+	// flushed while there is still a window in which a published event has
+	// nowhere to land. Measured on the runner 2026-09-26: two live-only cases
+	// failed intermittently because a `Publish` right after the opening frame
+	// fell into the gap between the flush and the subscription — the gap
+	// contains a DB read (`GetSessionLease` below), so it is wide enough under
+	// load to lose a `content_delta`, which by design exists nowhere else.
+	// Persisted events would have been caught by the replay range either way;
+	// live-only events have no second chance.
+	hub := s.chatEventHub()
+	live, unsubscribeLive := hub.Subscribe(uid, agentID, sessionID)
+	defer unsubscribeLive()
+
 	// Initial flush so the client EventSource fires `open` immediately.
 	fmt.Fprintf(w, ": ok\n\n")
 	flusher.Flush()
@@ -1565,12 +1580,10 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	hub := s.chatEventHub()
-	// Subscribe BEFORE replay so any event that lands while we're
-	// scanning the DB ends up either in the replayed range OR in the
-	// live channel — never both, never lost.
-	live, unsubscribeLive := hub.Subscribe(uid, agentID, sessionID)
-	defer unsubscribeLive()
+	// (The subscription is established above, before the opening frame, for the
+	// same reason this used to sit before the replay: an event that lands while
+	// the DB is being scanned must be either in the replayed range or in the live
+	// channel — never both, never lost.)
 
 	// One writer for every source — replay, hub, and the tail below — so the
 	// cursor advances in exactly one place and an event cannot be sent twice
