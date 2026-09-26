@@ -340,7 +340,7 @@ func (m *Manager) buildAgent(rc config.ResolvedAgent, prov provider.Provider, mb
 		// jobs; the closure also reads channel/chatID off the registry
 		// at execute time (bindSession stamps them per-turn) so the
 		// fired message routes back to the originating chat.
-		tools.RegisterCronTools(ag.registry, m.opts.dataStore, m.uid, rc.ID)
+		tools.RegisterCronTools(ag.registry, m.opts.dataStore, rc.ID)
 		// set_timezone persists the chatter's IANA timezone into scope
 		// prefs — the same rows the system-prompt date line and cron
 		// scheduling resolve through. Needs the relational store, so it
