@@ -432,7 +432,12 @@ func (d envSnapshotDoc) snapshot() envSnapshot {
 // caller must then skip the diff rather than treat nil as an empty list: a
 // failed read reported as "your jobs are gone" would be the same class of error
 // this whole document is about.
-func (a *Agent) cronFingerprints() (map[string]string, bool) {
+//
+// The sample is scoped to chatterUID: the job list is per-agent data, but
+// what a chatter may learn about it is not — one chatter's job names must
+// not arrive in another chatter's context as "scheduled jobs added". The
+// agent owner keeps the agent-wide view, matching the tool's gate.
+func (a *Agent) cronFingerprints(chatterUID string) (map[string]string, bool) {
 	if a.dataStore == nil {
 		return nil, false
 	}
@@ -440,6 +445,15 @@ func (a *Agent) cronFingerprints() (map[string]string, bool) {
 	if err != nil {
 		slog.Warn("environment signal: cron job list unreadable", "agent", a.name, "error", err)
 		return nil, false
+	}
+	if chatterUID != "" && chatterUID != a.ownerUserID {
+		visible := make([]store.CronJobRecord, 0, len(jobs))
+		for _, j := range jobs {
+			if j.Creator() == chatterUID {
+				visible = append(visible, j)
+			}
+		}
+		jobs = visible
 	}
 	return cronFingerprint(jobs), true
 }
@@ -468,7 +482,7 @@ func (a *Agent) signalEnvironmentChanges(chatterUID, chatID string, history []pr
 	}
 	cur.identity = a.identityFingerprints(chatterUID)
 	cur.config = a.configFingerprint()
-	if jobs, ok := a.cronFingerprints(); ok {
+	if jobs, ok := a.cronFingerprints(chatterUID); ok {
 		cur.cron = jobs
 	} else if a.dataStore != nil {
 		cur.cronIncomplete = true

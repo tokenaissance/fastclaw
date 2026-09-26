@@ -202,7 +202,7 @@ func makeListCronJobs(st store.Store, r *Registry, agentID string) ToolFunc {
 			caller := r.ChatterUserID()
 			filtered = nil
 			for _, j := range jobs {
-				if cronJobCreator(j) == caller {
+				if j.Creator() == caller {
 					filtered = append(filtered, j)
 				}
 			}
@@ -234,7 +234,7 @@ func makeDeleteCronJob(st store.Store, r *Registry, agentID string) ToolFunc {
 		// reads as "no such job" — confirming the id exists would leak
 		// the other chatter's schedule just as the list used to.
 		if job == nil || job.AgentID != agentID ||
-			(!cronCallerIsAgentAdmin(r) && cronJobCreator(*job) != r.ChatterUserID()) {
+			(!cronCallerIsAgentAdmin(r) && job.Creator() != r.ChatterUserID()) {
 			return "", fmt.Errorf("no cron job %s on this agent", args.ID)
 		}
 		if err := st.DeleteCronJob(ctx, args.ID); err != nil {
@@ -256,18 +256,6 @@ func cronCallerIsAgentAdmin(r *Registry) bool {
 	}
 	caller := r.ChatterUserID()
 	return caller != "" && r.agentOwnerUserID != "" && caller == r.agentOwnerUserID
-}
-
-// cronJobCreator names the account a job belongs to in chat. Rows written
-// before creator_user_id existed (and rows a non-chat caller saved
-// without one) fall back to user_id, which SaveCronJob fills from the
-// agent owner — never an anonymous value, so such a row stays reachable
-// by the owner and invisible to everyone else.
-func cronJobCreator(j store.CronJobRecord) string {
-	if j.CreatorUserID != "" {
-		return j.CreatorUserID
-	}
-	return j.UserID
 }
 
 func generateUUID() string {
