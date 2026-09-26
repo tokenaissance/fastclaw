@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // chatEventWriter renders one event record into one SSE frame, and owns the
@@ -57,4 +59,22 @@ func (cw *chatEventWriter) emit(seq int64, typ string, data []byte) {
 	line, _ := json.Marshal(payload)
 	fmt.Fprintf(cw.w, "data: %s\n\n", line)
 	cw.flusher.Flush()
+}
+
+// emitPersisted renders the rows that arrived from the LOG — the two readers of it
+// are the connect replay and the tail, and they must answer this question the same
+// way, so it is answered once, here.
+//
+// A live-only type never travels on this path: the hub is its only transport, and a
+// copy replayed out of the store would be a second expression of one live stream,
+// which no cursor can dedupe (those events carry seq = -1 by definition). The tail
+// has always said that; the replay did not, and the gap was reachable — measured
+// 2026-09-26 as an intermittent CI failure, see isLiveOnlyEventType's note.
+func (cw *chatEventWriter) emitPersisted(rows []store.SessionEventRecord) {
+	for _, rec := range rows {
+		if isLiveOnlyEventType(rec.Type) {
+			continue
+		}
+		cw.emit(rec.Seq, rec.Type, rec.Data)
+	}
 }
