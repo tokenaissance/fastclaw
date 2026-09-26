@@ -120,17 +120,18 @@ func TestCron_AccountRoute_CloudPathE2E(t *testing.T) {
 		// CronJobRecord → StoreJob and the DB scheduler pre-flights the
 		// (channel, accountID) adapter before firing.
 		storeJobs := []StoreJob{{
-			ID:          due[0].ID,
-			AgentID:     due[0].AgentID,
-			OwnerUserID: due[0].UserID,
-			Name:        due[0].Name,
-			Type:        due[0].Type,
-			Schedule:    due[0].Schedule,
-			Message:     due[0].Message,
-			Channel:     due[0].Channel,
-			AccountID:   due[0].AccountID,
-			ChatID:      due[0].ChatID,
-			Timezone:    due[0].Timezone,
+			ID:            due[0].ID,
+			AgentID:       due[0].AgentID,
+			OwnerUserID:   due[0].UserID,
+			CreatorUserID: "u_visitor",
+			Name:          due[0].Name,
+			Type:          due[0].Type,
+			Schedule:      due[0].Schedule,
+			Message:       due[0].Message,
+			Channel:       due[0].Channel,
+			AccountID:     due[0].AccountID,
+			ChatID:        due[0].ChatID,
+			Timezone:      due[0].Timezone,
 		}}
 		mb := bus.New()
 		s := NewSchedulerFromStore(&fakeCronStore{due: storeJobs, locked: true}, mb)
@@ -145,6 +146,15 @@ func TestCron_AccountRoute_CloudPathE2E(t *testing.T) {
 			if msg.Channel != "telegram" || msg.ChatID != "chat-2" {
 				t.Errorf("fired triple = (%q,%q,%q), want (telegram,acct-bot,chat-2)",
 					msg.Channel, msg.AccountID, msg.ChatID)
+			}
+			// The fired message has to carry the creator through: the
+			// loop routes by OwnerUserID but keys per-chatter memory on
+			// this field.
+			if msg.CreatorUserID != "u_visitor" {
+				t.Errorf("fired InboundMessage.CreatorUserID=%q, want u_visitor", msg.CreatorUserID)
+			}
+			if msg.OwnerUserID != "u_owner" {
+				t.Errorf("fired InboundMessage.OwnerUserID=%q, want u_owner", msg.OwnerUserID)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("store-backed scheduler never fired the due job")
