@@ -929,6 +929,18 @@ type CronJobRecord struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
+// Creator names the account this job belongs to in chat: the explicit
+// creator when one was recorded, otherwise user_id — which SaveCronJob
+// fills from the agent owner, so a row written before the column existed
+// stays the owner's. Never empty for a row saved through SaveCronJob
+// against a real agent, so it cannot accidentally open a job to everyone.
+func (j CronJobRecord) Creator() string {
+	if j.CreatorUserID != "" {
+		return j.CreatorUserID
+	}
+	return j.UserID
+}
+
 // StorageType identifies the storage backend.
 type StorageType string
 
