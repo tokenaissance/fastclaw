@@ -418,6 +418,16 @@ When adding any mechanism that changes harness state, answer each line:
       true for the cases the first consumer could carry can be false for the cases the new one
       carries, and the transport test will stay green either way.
 - [ ] **If this change adds or moves a switch** (§10.8, O8): does the row have a reader on the
+- [ ] **Is the reader inside the harness or outside it?** ([00 §5.2](./00-formal-systems.md) — O9,
+      promoted 2026-09-26 from the MCP surface audit.) Every other line here assumes the reader is in
+      the loop, where the remedy is "attach it to the next tool result / the next prompt". An
+      **external consumer** (an MCP client, a dashboard outside the loop, a webhook subscriber) has no
+      forced read at all — it can also simply never ask again. So it needs an explicit delivery point:
+      a **pull reply that is authoritative**, and/or a **push notification it subscribed to that
+      carries only "changed"** (never the fact itself, or push becomes a second source), plus the rule
+      that a re-read reconciles any gap (notifications are best-effort, so correctness must not depend
+      on them). Worked example: the MCP task surface's state design was pull-only for a while and was
+      green in every test it had — because the tests were its only reader.
       production path — row → the resolved cfg → the option that carries it → the gate that acts on
       it, each hop witnessed, with a falsification that reddens the missing hop — and does the gate do
       what the row's own documentation says the value *means* (nil = inherit, `false` = veto)? Worked
@@ -829,3 +839,34 @@ Three consequences, stated because they are what make the operation honest rathe
 
 No witness is owed by this section: it adds no obligation, no gap, and no code. It is the design half of
 §5.1's rule — the same reason a delivery point is not a rule, a derived fact is not a state.
+
+### 10.10 O9 — an external consumer needs its own delivery point (2026-09-26)
+
+O1–O8 all describe a fact travelling to a reader **inside** the loop. That is why §6's item 4 can ask its
+question at all: "when this change happened, was the premise *the agent is reading something* true?" — for
+an in-harness reader the remedy is always "attach it to the next tool result / the next prompt". An
+**external consumer** (a process outside the harness: an MCP client, an out-of-loop dashboard, a webhook
+subscriber) has no such forcing function. It can call, it can subscribe, and it can also simply never ask
+again — and nothing in its loop will ever make it.
+
+> **O9 — an external consumer must be given a delivery point, or the contract must name who reads and
+> when.** "It can pull whenever it wants" is a delivery point only when the contract says the pulling
+> *is* the mechanism; silence is not delivery to a reader whose loop never forces it.
+
+The shape that satisfies it, worked out on the MCP task surface
+(`tokenaissance-cloud` `docs/mcp-task-submission.md` §14.2/§14.8):
+
+| Half | Role | Rule |
+| :--- | :--- | :--- |
+| **pull** — a call the consumer makes (MCP: `read_task`) | **authoritative** | the reply *is* the delivery point, so §5.1's C-family exemption applies: its rule witness is also its delivery-point witness |
+| **push** — a native notification the consumer subscribed to (MCP: `resources/subscribe` → `notifications/resources/updated`) | **a hint only** | it carries "something changed", never the fact itself — otherwise push becomes a second source for one fact |
+| **reconciliation** — one pull after any gap | required | notifications are best-effort (lost, duplicated, delivered after a reconnect); a design that needs `notifications/progress` to be reliable is a design with no pull point |
+
+**Its first instance** is the audit that promoted it (register row 65): the MCP state design was pull-only
+(`status`/`outcome` readable only if the client asked), every test it had was green, and the tests were its
+only reader. The user's ruling on 2026-09-26 was to give both halves — pull **and** a native push — with the
+roles above.
+
+No obligation is owed by the *harness* until something external consumes it: O9 binds a surface that
+advertises itself to an outside reader, and its witness is a test that **the reply or the notification
+actually left** — reddening only the rule witness is no evidence about the delivery point (§5.1).

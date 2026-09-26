@@ -157,6 +157,7 @@ Covered by none of them → §7's bucket E (the F4 candidate: concurrency and vi
 | **O7** a delivered fact whose meaning changed | the 2026-09-21 egress audit (no G number: recorded as [11](./11-change-register.md) row 38) | `skills-list-chain.test.ts` (the delivery point) + `catalog.test.ts`, `skills-service.test.ts`, `policy.test.ts`, `tools-service.test.ts` |
 | **O6** an absence must speak (promoted [08 §10.3](./08-state-observability-principle.md)) | the 2026-09-21 egress audit: two consumers of one fact, and only one could see it — they read different producers (no G number: [11](./11-change-register.md) row 40) | `skills-list-chain.test.ts` (MCP) + cloud `fastagent-proxy-route.test.ts` (**the panel's delivery point**) + `skills-service.test.ts` (one partition, two projections) |
 | **O8** a switch must have a reader on the production path, and its promise must be isomorphic to its effect (promoted [08 §10.8](./08-state-observability-principle.md)) | register rows 49 (`piiScrubbing`), 51 (`skillsLearner`), 52 (`memory.autoPersist`), 53 (`memory.fts` — resolved by deletion), plus the cloud panel's auto-remember switch, which is the render half (2026-09-22) | `TestThePiiScrubbingRowReachesEveryAgentProvider`, `TestTheSwitchRedactsEveryModelCallTheTurnMakes`, `TestTheSkillsLearnerRowReachesTheLearnerAndWritesThroughTheSingleWriter`, `TestTheSkillsLearnerRowReachesTheSingleWriter` (cloud path), `TestTheMemoryRowIsTheDefaultLayerAndThePerAgentFlagOverridesIt`, `TestTheMemoryRowIsWhatTurnsAutoPersistOn`, cloud `src/__tests__/fastagent/auto-persist-inherited-state.test.tsx`, and — for the writer half, all four rows — `TestRuntimePage_CanSetMemoryAndSkillLearning` plus web `src/__tests__/runtime-settings-memory-learning.test.tsx` |
+| **O9** an EXTERNAL consumer must be given a delivery point — or the contract must name who reads, and when (promoted [08 §10.10](./08-state-observability-principle.md), 2026-09-26) | the 2026-09-26 MCP surface audit (finding F1): the state design was pull-only, and the checklist's item 4 assumes a reader *inside* the harness ("the agent is reading something") — an out-of-process MCP client has no forced read, so "the event happened and the client never learns" was a design consequence rather than a bug (cloud `docs/mcp-task-submission.md` §14.8; register row 65) | pull side: cloud `mcp-surface-e2e.test.ts` (the tool reply **is** the delivery point) + the `read_task` behaviour witnesses; push side: the resource-subscribe notification witness (to be written with the channel). The falsification must redden the **delivery**, not only the rule (00 §5.1) |
 | **F1** preconditions / zero migration | ~~the incident, D~~ | `TestSyncContract_StoreEditIsNotOverwritten`, `TestSyncContract_SecondReconcileWritesNothing`, `TestSyncContract_DomainUnchanged`, `TestE2BLive*` |
 | **F1** boundary (inside / outside) | **G4** (a deletion is irreversible; no snapshot) | — (a missing witness is itself part of that gap) |
 
@@ -201,6 +202,38 @@ grep fact, two opposite meanings — the difference is only whether the fact rea
 (This is the other side of [08 §6.1](./08-state-observability-principle.md): that section states
 "a signal that is *produced* is not a signal that *arrives*" from the producing side, and this is its
 mirror on the verification side.)
+
+### 5.2 The reader may be outside the harness: O9 (2026-09-26, promoted from the MCP surface audit)
+
+Every clause so far silently assumed the reader is **inside** the harness: item 4 of 08 §6 asks "when this
+change happened, was the premise *the agent is reading something* true?", and the answer's remedy is
+always "attach it to the next tool result / put it in the next prompt". That premise does not hold for an
+**external consumer** — a process outside the loop, with no tool result to attach anything to and no
+prompt of ours to ride. An MCP client is exactly that reader: it can call, it can subscribe, and it can
+also simply never ask again.
+
+> **O9 — an external consumer must be given a delivery point, or the contract must name who reads and
+> when.** "It can pull whenever it wants" is a delivery point only if the contract says the pulling is
+> the mechanism; silence is not delivery for a reader whose loop never forces it.
+
+The shape that satisfies it (worked out on the MCP task surface, cloud
+`docs/mcp-task-submission.md` §14.2/§14.8, and now the shape this repo's MCP egress uses):
+
+1. **a pull point that is authoritative** — a call the consumer makes and whose reply carries the fact
+   (for MCP: `read_task`'s reply; the reply *is* the delivery point, so the C-family exemption in §5.1
+   applies: its rule witness is also its delivery-point witness);
+2. **a push point that is only a hint** — a native notification the consumer subscribed to, carrying
+   "something changed", never the fact itself, so that push can never become a second source
+   (for MCP: `resources/subscribe` + `notifications/resources/updated`, then re-read);
+3. **reconciliation by re-reading** — notifications are best-effort (lost, duplicated, or delivered
+   after a reconnect), so correctness must not depend on them: one pull after any gap restores the
+   consumer's picture. A design that needs `notifications/progress` to be reliable is a design with no
+   pull point.
+
+No obligation is owed by the *harness* until something external consumes it: O9 binds a surface that
+advertises itself to an outside reader, and its witness is a test that **the reply/notification actually
+left** (reddening only the rule witness is no evidence about the delivery point — §5.1). Its first
+instance and the reason it exists are register row 65.
 
 ## 6. What is still open, sorted by formal system
 
