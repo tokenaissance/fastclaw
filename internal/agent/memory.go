@@ -303,8 +303,13 @@ func AutoPersistMemory(ctx context.Context, mem *Memory, prov provider.Provider,
 			continue
 		}
 		content := m.Content
-		if len(content) > 300 {
-			content = content[:300] + "..."
+		// Rune-counted, not byte-counted: 300 bytes is not a character
+		// boundary in UTF-8 (a CJK rune is 3 bytes), so the byte form split
+		// a Chinese character in half and handed the model a broken
+		// sequence. Same defect, same fix as TestUTF8Truncation's session
+		// half — see the header of memory_prompt_utf8_test.go.
+		if len([]rune(content)) > 300 {
+			content = string([]rune(content)[:300]) + "..."
 		}
 		sb.WriteString(fmt.Sprintf("[%s]: %s\n", m.Role, content))
 	}
@@ -405,11 +410,17 @@ If nothing worth saving, output: {"memory_facts": [], "user_notes": []}`,
 	}
 }
 
+// truncateStr cuts s to at most n RUNES. Byte slicing (s[:n]) splits multi-byte
+// characters: 500 bytes is 166 Chinese characters plus two bytes of the 167th,
+// and the caller below feeds exactly that — the agent's own Chinese MEMORY.md /
+// USER.md — into a prompt the model then reads. The session-side truncations
+// were converted in 0a5a6b5; this one was missed because only the preview it
+// sits next to had a test.
 func truncateStr(s string, n int) string {
-	if len(s) <= n {
+	if len([]rune(s)) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string([]rune(s)[:n]) + "..."
 }
 
 // stripJSONFence removes a leading ```json (or ```) / trailing ```
