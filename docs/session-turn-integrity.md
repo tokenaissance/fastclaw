@@ -410,6 +410,18 @@ handler — so the entry's **lifetime is the connection's**. Affinity cannot hel
 store-visible queue only as insurance for when affinity stops covering (its trigger, not "frequent
 withdrawals"). The live spec keeps its fixture to one live POST and says so.
 
+**Fix 1 landed (2026-09-26).** `registerPendingTurn` / `unregisterPendingTurn` moved out of the
+handler and into the turn goroutine (`internal/setup/handlers.go`), so the entry's lifetime is the
+*wait*: created before the agent is asked to start, released when the goroutine returns — whether the
+turn started or was withdrawn. Nothing else about the mechanism changed (same key, same cancel func,
+same "started" signal). Witness: `TestAQueuedTurnOutlivesItsConnectionE2E` drops the POST's
+connection while the turn is still queued, then cancels with the id the `queued` σ carried and
+requires `{canceled:true, wasRunning:false}` plus an empty session and a model that was never
+reached. **Falsification run for real**: putting the unregister back in the handler reddens it with
+the exact body the dev check measured — `{"canceled":false,"isRunning":false,"wasRunning":false}`.
+Still open, and not a code question: the two-replica live check, and a fastagent dev redeploy (dev
+still runs the pre-rollback image, so the live symptom is unchanged there until it ships).
+
 Not implemented yet: pausing auto-send after an interrupt the way Codex does
 (`suppress_queue_autosend`). We have no "interrupt and keep queued" state —
 Cancel removes the queued turn outright.

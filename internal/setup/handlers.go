@@ -1336,25 +1336,36 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		// session_events for the next load to pick up), and the WithTimeout
 		// ceiling still bounds a runaway loop.
 		defer cancel()
+
+		// Register this turn so a *queued* one can be withdrawn from the UI
+		// (Codex offers the same for its queued follow-up inputs). The signal fires
+		// when the agent actually holds the session's turn slot; before that,
+		// canceling this context makes the turn never start.
+		//
+		// This pair lives HERE, not in the handler, because the entry's lifetime has
+		// to be the *wait*, not the connection (docs/mcp-task-submission.md §14.6 path
+		// 1). Registered in the handler, a client that reloaded or switched tabs
+		// deleted the entry on its way out while the turn was still queued, and the
+		// reloaded tab's Cancel then answered {"canceled":false} — measured on dev
+		// 2026-09-26, with the root cause narrowed to this lifetime rather than to
+		// addressing (affinity decides *which pod*, never *whether the entry is still
+		// there*). Nothing else about the mechanism changes: same key, same cancel
+		// func, same "started" signal.
+		turnKey := chatTurnKey(uid, agentID, req.SessionID, req.TurnID)
+		s.registerPendingTurn(turnKey, cancel)
+		defer s.unregisterPendingTurn(turnKey)
+		go func() {
+			select {
+			case <-admissionStarted:
+				s.markPendingTurnStarted(turnKey)
+			case <-agentDone:
+			}
+		}()
+
 		// events param stays nil — emitEvent now fans out via the
 		// streamCtx attached above (persist + hub). The legacy channel
 		// path is no longer needed for this handler.
 		_ = ag.HandleWebChatStream(agentCtx, req.SessionID, req.ProjectID, uid, msgText, imageURLs, req.Params, nil)
-	}()
-
-	// Register this turn so a *queued* one can be withdrawn from the UI
-	// (Codex offers the same for its queued follow-up inputs). The signal
-	// fires when the agent actually holds the session's turn slot; before
-	// that, canceling this context makes the turn never start.
-	turnKey := chatTurnKey(uid, agentID, req.SessionID, req.TurnID)
-	s.registerPendingTurn(turnKey, cancel)
-	defer s.unregisterPendingTurn(turnKey)
-	go func() {
-		select {
-		case <-admissionStarted:
-			s.markPendingTurnStarted(turnKey)
-		case <-agentDone:
-		}
 	}()
 
 	// Heartbeat keeps proxies (nginx 60s default, Cloudflare 100s, ELB

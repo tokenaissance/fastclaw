@@ -199,6 +199,88 @@ func TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E(t *testing.T) {
 	}
 }
 
+// A turn that is still queued has to outlive the connection that submitted it
+// (docs/mcp-task-submission.md §14.6 path 1): a reload or a tab switch drops the POST,
+// and the reloaded tab's Cancel — with the id the `queued` σ carried — must still
+// withdraw it. Measured on dev 2026-09-26: a direct cancel with the right id answered
+// {"canceled":false}, because the pending entry died with its handler. The entry now
+// belongs to the turn goroutine, so its lifetime is the wait.
+func TestAQueuedTurnOutlivesItsConnectionE2E(t *testing.T) {
+	s, ag, prov := newQueuedChatHarness(t)
+	sess := ag.Sessions().Get("web", "", "chat-reload", "")
+	if !sess.AcquireTurn(context.Background()) {
+		t.Fatal("could not take the turn slot for the test")
+	}
+
+	rec := newSSERecorder()
+	ctx, dropConnection := context.WithCancel(context.Background())
+	req := chatStreamRequest(t, chatRequest{AgentID: "agt_e2e", SessionID: "chat-reload", Message: "queued then reloaded", TurnID: "turn-reload"}).
+		WithContext(auth.WithIdentity(ctx, auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		s.handleChatStream(rec, req)
+	}()
+
+	// The turn is queued and says so. That σ is the only thing a reloaded tab has to
+	// render its Cancel from, so the test waits for it rather than for a timer.
+	announced := time.Now().Add(5 * time.Second)
+	for !rec.seen("queued") {
+		if time.Now().After(announced) {
+			t.Fatalf("stream never announced the queued turn; body=%q", rec.body.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The tab reloads: the request's context dies and the handler returns immediately.
+	// The turn keeps waiting — agentCtx is detached from the request on purpose.
+	dropConnection()
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after its client went away")
+	}
+
+	// The reloaded tab's Cancel, with the id the σ carried.
+	cancelRec := httptest.NewRecorder()
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-reload","turnId":"turn-reload"}`))
+	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(), auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	s.handleChatCancel(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s; want 200", cancelRec.Code, cancelRec.Body.String())
+	}
+	var cancelBody map[string]any
+	if err := json.Unmarshal(cancelRec.Body.Bytes(), &cancelBody); err != nil {
+		t.Fatalf("decode cancel body: %v", err)
+	}
+	// wasRunning=false is the honest half of the answer: nothing had started yet, so
+	// nothing was interrupted — the running turn belongs to someone else and is untouched.
+	if cancelBody["canceled"] != true || cancelBody["wasRunning"] != false {
+		t.Fatalf("cancel body = %v; want the queued turn withdrawn (canceled=true, wasRunning=false)", cancelBody)
+	}
+
+	// The withdrawal is real, not just an answer: the entry is released when the turn
+	// goroutine returns, the model is never reached, and the session stays empty.
+	key := chatTurnKey("u_1", "agt_e2e", "chat-reload", "turn-reload")
+	released := time.Now().Add(5 * time.Second)
+	for lookupForTest(s, key) != nil {
+		if time.Now().After(released) {
+			t.Fatal("the withdrawn turn's pending entry was never released")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	sess.ReleaseTurn()
+	select {
+	case <-prov.started:
+		t.Fatal("withdrawn turn still reached the model")
+	default:
+	}
+	if msgs := sess.GetMessages(); len(msgs) != 0 {
+		t.Fatalf("withdrawn turn wrote %d messages into the session", len(msgs))
+	}
+}
+
 // Once the turn has started, withdrawal is refused (409) and the turn runs to
 // completion — the client falls back to plain Stop semantics.
 func TestStartedChatTurnCannotBeWithdrawnE2E(t *testing.T) {
