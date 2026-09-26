@@ -77,13 +77,19 @@ type StoreJob struct {
 	ID          string
 	AgentID     string
 	OwnerUserID string
-	Name        string
-	Type        string
-	Schedule    string
-	Message     string
-	Channel     string
-	ChatID      string
-	AccountID   string
+	// CreatorUserID is the chatter whose turn scheduled the job. The
+	// tick routes by OwnerUserID but reads and writes per-chatter
+	// state (MEMORY.md, USER.md) for the creator — see
+	// agent.autonomousActorUserID. Empty on rows written before the
+	// column existed; those act for the owner.
+	CreatorUserID string
+	Name          string
+	Type          string
+	Schedule      string
+	Message       string
+	Channel       string
+	ChatID        string
+	AccountID     string
 	// Timezone is the IANA zone the schedule is interpreted in —
 	// captured from the chatter at creation time. Legacy rows carry
 	// "UTC" (the old hardcoded value); empty means server-local.
@@ -278,15 +284,16 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 		}
 
 		s.bus.Inbound <- bus.InboundMessage{
-			Channel:     j.Channel,
-			AccountID:   j.AccountID,
-			ChatID:      j.ChatID,
-			UserID:      "cron",
-			OwnerUserID: j.OwnerUserID,
-			AgentID:     j.AgentID,
-			Text:        text,
-			PeerKind:    "dm",
-			Source:      bus.SourceCron,
+			Channel:       j.Channel,
+			AccountID:     j.AccountID,
+			ChatID:        j.ChatID,
+			UserID:        "cron",
+			OwnerUserID:   j.OwnerUserID,
+			CreatorUserID: j.CreatorUserID,
+			AgentID:       j.AgentID,
+			Text:          text,
+			PeerKind:      "dm",
+			Source:        bus.SourceCron,
 		}
 
 		// Calculate next run based on job type.

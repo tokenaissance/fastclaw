@@ -33,17 +33,18 @@ func (a *cronStoreAdapter) GetDueCronJobs(ctx context.Context, now time.Time) ([
 			ownerByAgent[r.AgentID] = owner
 		}
 		out = append(out, cron.StoreJob{
-			ID:          r.ID,
-			AgentID:     r.AgentID,
-			OwnerUserID: owner,
-			Name:        r.Name,
-			Type:        r.Type,
-			Schedule:    r.Schedule,
-			Message:     r.Message,
-			Channel:     r.Channel,
-			ChatID:      r.ChatID,
-			AccountID:   r.AccountID,
-			Timezone:    r.Timezone,
+			ID:            r.ID,
+			AgentID:       r.AgentID,
+			OwnerUserID:   owner,
+			CreatorUserID: r.CreatorUserID,
+			Name:          r.Name,
+			Type:          r.Type,
+			Schedule:      r.Schedule,
+			Message:       r.Message,
+			Channel:       r.Channel,
+			ChatID:        r.ChatID,
+			AccountID:     r.AccountID,
+			Timezone:      r.Timezone,
 		})
 	}
 	return out, nil
