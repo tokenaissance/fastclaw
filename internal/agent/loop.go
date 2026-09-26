@@ -3623,8 +3623,10 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				sess.Append(msg)
 				// Fire PostTurn now that the assistant message is
 				// persisted. Auto-persist (memory.go) lives behind
-				// runPostTurn; without this call the streaming path
-				// silently skipped it — see the FIXME at runPostTurn.
+				// runPostTurn, and without this call the streaming path
+				// silently skipped it. (This line used to point at "the
+				// FIXME at runPostTurn"; there has never been one — the call
+				// below is what closed the gap, so the pointer is retired.)
 				a.runPostTurn(ctx, inboundMsg, append(messagesAtTurnStart, msg), capturedToolCalls, capturedChatterMem)
 			}()
 			return outReader
