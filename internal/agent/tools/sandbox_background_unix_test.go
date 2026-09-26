@@ -108,6 +108,15 @@ func TestSandboxBackgroundMechanismCapturesExitCode(t *testing.T) {
 	cleanupJobFiles(t, job)
 
 	deadline := time.Now().Add(10 * time.Second)
+	// Two facts, two moments: the exit marker (written by the launcher as soon as
+	// the command returns) and the command's own output (flushed by the shell's own
+	// descriptor). They are ordered in the script but *observed* through separate
+	// reads, so requiring both in the same snapshot is an assertion the mechanism
+	// never promised — it failed intermittently on the runner (2026-09-26) with
+	// `"[status] exited (code=3)\n"` and nothing else. Poll until both are there
+	// inside one deadline; a genuine loss still fails, because the text never
+	// arrives at all.
+	sawExit, sawOutput := false, false
 	for {
 		out, err := job.output(ctx, nil)
 		if err != nil {
@@ -117,13 +126,16 @@ func TestSandboxBackgroundMechanismCapturesExitCode(t *testing.T) {
 			if !strings.Contains(out, "[status] exited (code=3)") {
 				t.Fatalf("exit code was lost: %q", out)
 			}
-			if !strings.Contains(out, "about to fail") {
-				t.Fatalf("output written before the exit was lost: %q", out)
-			}
+			sawExit = true
+		}
+		if strings.Contains(out, "about to fail") {
+			sawOutput = true
+		}
+		if sawExit && sawOutput {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("job never reported its exit: %q", out)
+			t.Fatalf("job never reported exit=%v and output=%v; last body=%q", sawExit, sawOutput, out)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
