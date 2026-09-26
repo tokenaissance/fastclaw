@@ -4261,14 +4261,22 @@ var autonomousUserIDs = map[string]bool{
 // autonomousActorUserID returns the account a scheduled / machine-driven
 // turn acts for, or "" when msg is a real user turn.
 //
-// Cron and goal messages carry the job owner explicitly. A heartbeat
-// tick has no owner field at all — it is the agent checking its own
-// HEARTBEAT.md conditions — so it falls back to the agent owner.
-// Sub-agent spawns are deliberately absent: they inherit the parent
-// turn's chatter and must keep writing to the same memory.
+// Cron messages carry the job owner (for routing) and, since
+// 2026-09-27, the creator of the job. The creator wins for per-chatter
+// state: a reminder a visitor scheduled must read and write the
+// visitor's MEMORY.md, not the agent owner's. Rows written before the
+// column existed have no creator, so they keep acting for the owner.
+//
+// Goal messages carry the goal owner explicitly. A heartbeat tick has no
+// owner field at all — it is the agent checking its own HEARTBEAT.md
+// conditions — so it falls back to the agent owner. Sub-agent spawns are
+// deliberately absent: they inherit the parent turn's chatter and must
+// keep writing to the same memory.
 func autonomousActorUserID(msg bus.InboundMessage, agentOwner string) string {
 	switch msg.Source {
-	case bus.SourceCron, bus.SourceHeartbeat, bus.SourceGoalContext:
+	case bus.SourceCron:
+		return firstNonEmptyUserID(msg.CreatorUserID, msg.OwnerUserID, agentOwner)
+	case bus.SourceHeartbeat, bus.SourceGoalContext:
 		return firstNonEmptyUserID(msg.OwnerUserID, agentOwner)
 	}
 	if autonomousUserIDs[msg.UserID] {
