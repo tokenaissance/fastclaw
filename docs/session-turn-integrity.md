@@ -373,6 +373,20 @@ session's turn slot), not from the session event hub — the hub is
 session-scoped and also carries *other* turns' events (cron ticks stream into
 the same chat panel).
 
+**When the block comes down (repaired 2026-09-26 on the cloud client).** The hub's session scope cuts
+both ways: while a submission is parked, the events arriving on *its* connection are the holder's, so
+"any real event means my turn started" erased the block — and with it the only withdraw control — a
+moment after it appeared. Measured on the live two-tab spec
+(`tokenaissance-cloud`, `e2e/tests/live/queue-send-behind-a-peer.spec.ts`, gated by
+`E2E_LIVE_QUEUE=1`): the parked tab's first event was the holder's `content_delta`. `ChatEvent` is
+`{type, data}` — no turn identity — and turns are serialized, so the earliest derivable "this turn
+started" is **the holder's end**: the cloud client now clears the block on `done` / `error` only
+(`use-stream-pipeline.ts`; witness `queued-turn-holder-events.test.tsx`, falsified by restoring the
+old rule). If a third waiter wins the slot first, the lease wait re-emits `queued` on every retry, so
+the block comes straight back. The structural alternative — stamping each event with the turn that
+produced it — is recorded here as the follow-up to reach for if the client ever needs to attribute
+events in general rather than in this one place.
+
 Not implemented yet: pausing auto-send after an interrupt the way Codex does
 (`suppress_queue_autosend`). We have no "interrupt and keep queued" state —
 Cancel removes the queued turn outright.
