@@ -45,6 +45,15 @@ type InboundMessage struct {
 	ProjectID   string
 	UserID      string // user identifier
 	OwnerUserID string // fastagent user that owns the agent (for multi-user routing)
+	// CreatorUserID is the account a machine-produced message acts for
+	// when that differs from OwnerUserID — currently only cron: the
+	// chatter whose turn created the job. Routing still follows
+	// OwnerUserID (the UserSpace and the originating channel/chat);
+	// this field only decides whose per-chatter state (MEMORY.md,
+	// USER.md) the tick reads and writes, so a reminder a visitor
+	// scheduled cannot edit the agent owner's memory. Empty means "no
+	// separate creator" — the turn falls back to OwnerUserID.
+	CreatorUserID string
 	// AgentID is an *explicit* agent target. Non-empty when the source
 	// of the message already knows which agent should handle it (cron
 	// jobs, web chat, sub-agent spawns) — bypasses binding lookup +
