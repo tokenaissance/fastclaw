@@ -41,6 +41,19 @@ func TestChatterUserID_AutonomousTurnsActAsOwner(t *testing.T) {
 			want: "u_binder",
 		},
 		{
+			// The job knows who scheduled it. Routing still follows
+			// OwnerUserID; the per-chatter state the tick touches must
+			// not — otherwise a visitor's reminder edits the owner's
+			// MEMORY.md.
+			name: "cron job acts for the chatter who created it",
+			msg: bus.InboundMessage{
+				Channel: "web", UserID: "cron",
+				OwnerUserID: "u_owner", CreatorUserID: "u_visitor",
+				Source: bus.SourceCron,
+			},
+			want: "u_visitor",
+		},
+		{
 			name: "heartbeat tick has no owner field at all",
 			msg:  bus.InboundMessage{Channel: "heartbeat", ChatID: "heartbeat_sakurain", UserID: "system", Source: bus.SourceHeartbeat},
 			want: "u_owner",
