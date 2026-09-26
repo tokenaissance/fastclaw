@@ -215,6 +215,36 @@ func TestChatSubscribeNeverTailsLiveOnlyEvents(t *testing.T) {
 	}
 }
 
+// The connect replay reads the same log as the tail, so the live-only rule has to hold there
+// too — and with the rows already in the table this is not a race. This is the deterministic
+// half of the test above, which caught the same defect by luck in CI (the subscriber wrote its
+// rows between the opening frame and the replay scan; measured 2026-09-26).
+func TestAChatSubscribeReplaySkipsLiveOnlyEvents(t *testing.T) {
+	_, podB, db := newReplicaPair(t, &e2eProvider{reply: "unused"}, 2)
+
+	// Seeded BEFORE subscribing, so both rows are certainly inside the replay range. A
+	// subscriber with no cursor gets the whole log (sinceSeq = -1 ⇒ `seq > -1`), which is the
+	// path a page load takes when it has nothing to resume from.
+	if _, err := db.AppendSessionEvent(context.Background(), "u_1", "agt_e2e", "chat-replay-live-only",
+		"content_delta", json.RawMessage(`{"delta":"tick"}`)); err != nil {
+		t.Fatalf("seed content_delta row: %v", err)
+	}
+	if _, err := db.AppendSessionEvent(context.Background(), "u_1", "agt_e2e", "chat-replay-live-only",
+		"content", json.RawMessage(`{"content":"full text"}`)); err != nil {
+		t.Fatalf("seed content row: %v", err)
+	}
+
+	sub, _, stopSub := subscribeOn(t, podB, "agt_e2e", "chat-replay-live-only")
+	defer stopSub()
+
+	// The persisted event proves the replay ran...
+	waitForBody(t, sub, "full text", 3*time.Second)
+	// ...and the live-only one must not ride along, out of the replay or the tail.
+	if sub.seen(`"type":"content_delta"`) {
+		t.Fatalf("the replay forwarded a live-only event; body=%q", sub.body.String())
+	}
+}
+
 // failingTailStore is a real store whose tail query always fails: the handler
 // must degrade to hub-only, not drop the subscription.
 type failingTailStore struct {

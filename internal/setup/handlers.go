@@ -1607,9 +1607,9 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("session_events replay failed", "agent", agentID, "session", sessionID, "since", events.cursor(), "error", err)
 		}
-		for _, rec := range rows {
-			events.emit(rec.Seq, rec.Type, rec.Data)
-		}
+		// Same rule as the tail below, because it is the same log: a live-only type is not
+		// fanned out from here either (`emitPersisted` carries the reason).
+		events.emitPersisted(rows)
 	}
 
 	// Legacy webChan path: cron-fired bus.Outbound messages. Kept until
@@ -1641,12 +1641,7 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
 		case <-tail.C:
-			for _, rec := range s.tailSessionEvents(ctx, uid, agentID, sessionID, events.cursor()) {
-				if isLiveOnlyEventType(rec.Type) {
-					continue
-				}
-				events.emit(rec.Seq, rec.Type, rec.Data)
-			}
+			events.emitPersisted(s.tailSessionEvents(ctx, uid, agentID, sessionID, events.cursor()))
 		case env, ok := <-live:
 			if !ok {
 				return

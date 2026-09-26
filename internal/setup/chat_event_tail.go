@@ -14,17 +14,24 @@ import (
 // dwarf session_events for no replay value (the trailing `content` event carries
 // the full text).
 //
-// The predicate guards the **tail** only. The hub branch forwards these like
-// anything else: a tab that did not start the turn has no other transport for
-// them (the log does not keep them, so the tail cannot carry them either), and
-// "I already have this from my own POST" is a judgement only the client can
-// make — see docs/chat-event-delivery-placement.md §3.
+// The predicate guards **every reader of the persisted log** — the connect replay
+// and the tail — which is one rule with two call sites, so it lives in one
+// function (`chatEventWriter.emitPersisted`) instead of an `if` copied into each.
+// It used to guard the tail only; the replay had no guard, and the difference was
+// not theoretical (measured 2026-09-26: a subscriber that wrote its rows between
+// the opening frame and the replay scan got the `content_delta` back on the wire —
+// the intermittent `TestChatSubscribeNeverTailsLiveOnlyEvents` in CI).
 //
-// The tail guard is a no-op by construction today (the table cannot contain a
-// type the emitter refuses to persist). It stays because it is what keeps that
-// true the day one of these types does get persisted: a token chunk replayed
-// from the store would be a second copy of a live stream, and no seq cursor
-// could dedupe it (a live-only event carries seq = -1 by definition).
+// The hub branch still forwards these like anything else: a tab that did not start
+// the turn has no other transport for them (the log does not keep them, so the
+// tail cannot carry them either), and "I already have this from my own POST" is a
+// judgement only the client can make — see docs/chat-event-delivery-placement.md §3.
+//
+// The guard is a no-op by construction today (the table cannot contain a type the
+// emitter refuses to persist). It stays because it is what keeps that true the day
+// one of these types does get persisted: a token chunk replayed from the store
+// would be a second copy of a live stream, and no seq cursor could dedupe it (a
+// live-only event carries seq = -1 by definition).
 var liveOnlyEventTypes = map[string]bool{
 	"content_delta": true,
 }
