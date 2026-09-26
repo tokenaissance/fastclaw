@@ -2617,6 +2617,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
+	// Everything above is this turn's own scaffolding (system prompt, channel
+	// hints, sender, client params, persistence reminder) — it is not part of
+	// the session and must never be compacted, replaced or written back.
+	// Everything below is history, and history is what a round boundary is
+	// allowed to compact. See compactPromptAtRoundBoundary.
+	historyStart := len(messages)
 	// The prompt is a NORMALISED PROJECTION of stored history: the session
 	// keeps what actually happened, the model only ever sees well-formed
 	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
@@ -3003,6 +3009,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				"agent", a.name, "segment", segmentsUsed,
 				"segments", 1+a.maxToolContinues, "rounds", rounds)
 		}
+
+		// The turn's own appends are the other half of compaction: everything
+		// above this line arrived AFTER the turn's one compaction check ran, and
+		// a round can add tens of KB of tool output. Re-check it here, on the
+		// same history, before the next model call is the one that overflows.
+		messages = a.compactPromptAtRoundBoundary(ctx, sess, messages, historyStart, chatterUID)
 	}
 
 	if stopReason != "" {
@@ -3465,6 +3477,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
+	// Same boundary as the non-streaming loop: the scaffolding above is not
+	// history, everything below is. See compactPromptAtRoundBoundary.
+	historyStart := len(messages)
 	// The prompt is a NORMALISED PROJECTION of stored history: the session
 	// keeps what actually happened, the model only ever sees well-formed
 	// call/reply pairs (docs/session-turn-integrity.md, clause P). Without
@@ -3705,6 +3720,10 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 				"agent", a.name, "segment", segmentsUsed,
 				"segments", 1+a.maxToolContinues, "rounds", rounds)
 		}
+
+		// Same boundary as the non-streaming loop, and for the same reason: the
+		// turn-start check cannot see what this round appended.
+		messages = a.compactPromptAtRoundBoundary(ctx, sess, messages, historyStart, chatterUID)
 	}
 
 	if stopReason != "" {
@@ -3821,6 +3840,55 @@ func extractToolMeta(result string) (string, map[string]any) {
 		return strings.TrimPrefix(result, tools.MetaSandboxPrefix), map[string]any{"sandbox": true}
 	}
 	return result, nil
+}
+
+// compactPromptAtRoundBoundary is compaction's second moment.
+//
+// CompactMessages runs once at the top of a turn (HandleMessage and
+// HandleMessageStream) on the history the turn starts with. Everything the turn
+// appends after that went unmeasured — two messages per round, one of them an
+// unbounded tool result — so a long turn walked past the window with the harness
+// watching, and the request the provider refused was one the harness could have
+// fixed by compacting (2026-09-26 finding: the witness turn's final call carried
+// 84k estimated tokens against an 80k threshold, having never been re-checked).
+//
+// It is the same function on the same history; only the moment is new. `prefix`
+// is how many leading messages belong to the prompt itself rather than to
+// history — history is messages[prefix:], and only that part is compacted or
+// written back.
+//
+// The compacted history is re-projected exactly as the turn-start one was
+// (normalizeForPromptWith answers an orphaned call; the timestamps are the ones
+// the model already saw) and written to the session, so the next turn does not
+// pay for the same compaction again.
+//
+// Compaction stays a repair, not a decision: it never starts, extends or ends a
+// turn. Continuation belongs to the goal loop alone.
+func (a *Agent) compactPromptAtRoundBoundary(ctx context.Context, sess *session.Session, messages []provider.Message, prefix int, chatterUID string) []provider.Message {
+	tokens := EstimateTokens(messages)
+	if tokens < DefaultTokenThreshold {
+		return messages
+	}
+
+	sessionMsgs := sess.GetMessages()
+	result, err := CompactMessages(ctx, sessionMsgs, a.homePath, a.provider, a.model)
+	if err != nil {
+		slog.Warn("mid-turn compaction failed", "agent", a.name, "error", err)
+	}
+	if result == nil || !result.Pruned {
+		return messages
+	}
+
+	sess.ReplaceMessages(result.Messages)
+	history := a.withMessageTimestampsForChatter(
+		normalizeForPromptWith(result.Messages, a.openCallAnswer(ctx, sess)), chatterUID)
+	slog.Info("context compacted mid-turn",
+		"agent", a.name,
+		"tokens_before", tokens,
+		"tokens_after", EstimateTokens(history),
+		"messages_before", len(messages),
+		"history_after", len(history))
+	return append(messages[:prefix:prefix], history...)
 }
 
 // capReachedNudge is the system message we append before the forced
