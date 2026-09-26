@@ -796,9 +796,9 @@ cases, and saving at user scope instead of system scope reddens the Go test on e
 ### 10.9 No state for a derived fact — stopping a task is an operation over its turns (2026-09-26)
 
 A design rule written down *before* the capability is built, because the shape it would take by default is
-the wrong one. The MCP surface stops **one step** at a time (today `cancel_task(session, turnId)`, planned
-`cancel_turn(task, turnId)`; cloud `docs/mcp-task-submission.md` §14.2), and the obvious next ask is "stop the
-whole task". The obvious implementation — a `cancelled` status on the session/task row — is a **second source
+the wrong one. The MCP surface stops things **one step at a time** — `stop_task` (the turn that is running) and
+`withdraw_task` (the one still queued); cloud `docs/mcp-task-submission.md` §14.2/§14.7 — and the obvious next
+ask is "stop the whole task". The obvious implementation — a `cancelled` status on the session/task row — is a **second source
 for a fact that is already derived**: a task is stopped exactly when none of its turns is still queued or
 running, and that is read off the same two inputs `cancelTurn` already consults
 (`internal/setup/turn_cancel.go`: the request's own pending entry, then the session's live lease row). A stored
@@ -806,10 +806,10 @@ flag would then have to answer questions the turn facts already answer — what 
 flag mean? does the flag lie when a queued turn starts anyway? — and each answer is a new way for σ to be false
 (O1) or for an absence not to speak (O6).
 
-> **A state may only be added for a fact that has no derivation.** "Stop the whole task" is
-> `stop_task(task)`, defined as *cancel every turn of this task that has not completed* — one operation
-> applied to the turn set, whose whole effect is visible in the per-turn facts it changes. It invents no
-> task-level state, and it is idempotent for the same reason `cancelTurn` is (withdrawing twice is one
+> **A state may only be added for a fact that has no derivation.** Stopping everything a task still has
+> unfinished is *one operation applied to that set* — today two calls (`stop_task` + `withdraw_task`), and if a
+> single one is ever added it carries the same shape: whose whole effect is visible in the per-turn facts it
+> changes, no task-level state, and idempotent for the same reason `cancelTurn` is (withdrawing twice is one
 > withdrawal; stamping twice is one request on the same possession).
 
 Three consequences, stated because they are what make the operation honest rather than merely flag-free:

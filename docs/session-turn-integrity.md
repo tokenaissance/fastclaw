@@ -400,12 +400,15 @@ every other rule, and a wire field with no second reader is the kind of thing th
 **What the receipt does NOT fix, measured while tuning the live spec (2026-09-26): a reload.** The
 reloaded tab still renders the block (from the replayed `queued` row) but its Cancel sends nothing —
 the replayed payload predates the field — and even a direct `POST /api/chat/cancel` with the right id
-answers `{"canceled":false}`: **the pending entry died with the POST that created it**. So after a
-reload a queued turn is not withdrawable at all, and the block also cannot learn "the wait is over"
-(the subscription path only sets the fact). Both are the same missing piece — the queued state is not
-store-visible — which is `tokenaissance-cloud` `docs/mcp-task-submission.md` §14.6 option ①. That
-option's reopen trigger ("frequent queued withdrawals, multi-replica") is now met from a second
-direction; the live spec keeps its fixture to one live POST and says so.
+answers `{"canceled":false}`: **the pending entry died with the POST that created it**. The root cause
+is narrower than "the queue is not in the store": `registerPendingTurn` stores the *turn's own* cancel
+func (`defer cancel()` lives in the turn goroutine), yet the register/unregister pair sits in the HTTP
+handler — so the entry's **lifetime is the connection's**. Affinity cannot help: it fixes *addressing*
+(which pod), not lifetime (whether the entry is still there). `tokenaissance-cloud`
+`docs/mcp-task-submission.md` §14.6 now orders the fixes: (1) move the entry's lifetime onto the wait
+(the turn goroutine) — about five lines, no new table; (2) narrow the tool's wording until then; (3) the
+store-visible queue only as insurance for when affinity stops covering (its trigger, not "frequent
+withdrawals"). The live spec keeps its fixture to one live POST and says so.
 
 Not implemented yet: pausing auto-send after an interrupt the way Codex does
 (`suppress_queue_autosend`). We have no "interrupt and keep queued" state —
