@@ -879,8 +879,9 @@ func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 //
 //   - per-user files (USER.md, MEMORY.md) are state that genuinely
 //     differs per chatter. They're keyed by the caller's effective
-//     user_id; a non-owner caller can author their own override and the
-//     read path falls back to the owner's row when none exists.
+//     user_id; a non-owner caller reads and writes only their own row
+//     (Exact, no owner fallback) so one chatter never inherits another's
+//     accumulated memory.
 //
 // Filename allowlist gates which files this endpoint can touch at all;
 // agent-runtime tool calls go through the workspace store instead.
@@ -929,36 +930,25 @@ func (s *Server) handleGetAgentSystemFile(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Per-user files: prefer caller's own row, fall back to the owner's.
-	// `source: "db"` means the caller has authored an override; "owner"
-	// means we're showing the agent owner's row by fallback. The
-	// frontend uses this to decide whether to show the "Edited" badge
-	// and enable the Revert action.
+	// Per-user files (USER.md / MEMORY.md) are per-chatter state, so this
+	// read answers with the caller's OWN row or with nothing. The owner's
+	// row is deliberately not a fallback here: the runtime read path is
+	// Exact for the same reason (internal/agent/memory_store_adapter.go —
+	// "a public-link visitor must not inherit the agent owner's accumulated
+	// memories"), and the write path already agrees (resolveSystemFileTarget
+	// saves per-user files to the caller's row). `source: "db"` means the
+	// caller has a row of their own; "default" means an empty file.
+	//
+	// The owner's own read is unchanged: for them the caller's row IS the
+	// owner's row. What used to be handed out here — the owner's row as
+	// `content` for a caller with none, and as `baseContent` for one with
+	// their own — was the leak, not the diff view it was meant to feed.
 	if data, err := s.dataStore.GetAgentFileExact(r.Context(), id, caller, name); err == nil {
-		baseContent := ""
-		if rec.UserID != caller {
-			if base, err2 := s.dataStore.GetAgentFileExact(r.Context(), id, rec.UserID, name); err2 == nil {
-				baseContent = string(base)
-			}
-		}
-		resp := map[string]any{"content": string(data), "source": "db"}
-		if baseContent != "" {
-			resp["baseContent"] = baseContent
-		}
-		jsonResponse(w, http.StatusOK, resp)
+		jsonResponse(w, http.StatusOK, map[string]any{"content": string(data), "source": "db"})
 		return
 	} else if !errors.Is(err, store.ErrNotFound) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
-	}
-	if rec.UserID != caller {
-		if data, err := s.dataStore.GetAgentFileExact(r.Context(), id, rec.UserID, name); err == nil {
-			jsonResponse(w, http.StatusOK, map[string]any{"content": string(data), "source": "owner"})
-			return
-		} else if !errors.Is(err, store.ErrNotFound) {
-			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-			return
-		}
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"content": "", "source": "default"})
 }
