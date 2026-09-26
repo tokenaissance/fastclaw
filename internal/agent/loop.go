@@ -2420,10 +2420,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if sess.TurnActive() {
 		// Tell the dashboard why nothing is happening yet: its turn is queued
 		// behind the turn that currently owns the session (a cron/goal tick or
-		// another client). Position 1 = next in line.
-		emitEvent(ctx, ChatEvent{Type: "queued", Data: map[string]any{
-			"position": sess.TurnWaiters() + 1,
-		}})
+		// another client). Position 1 = next in line, and the turn id says
+		// *whose* submission is waiting — the same field the lease-wait emitter
+		// sends, for the same reason (a tab that did not POST can only withdraw
+		// the turn it can name).
+		data := map[string]any{"position": sess.TurnWaiters() + 1}
+		if id := TurnIDFromContext(ctx); id != "" {
+			data["turnId"] = id
+		}
+		emitEvent(ctx, ChatEvent{Type: "queued", Data: data})
 	}
 	if !sess.AcquireTurn(ctx) {
 		slog.Info("turn admission: caller gave up while queued",

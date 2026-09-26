@@ -387,6 +387,26 @@ the block comes straight back. The structural alternative — stamping each even
 produced it — is recorded here as the follow-up to reach for if the client ever needs to attribute
 events in general rather than in this one place.
 
+**The queue σ carries whose submission is waiting (2026-09-26).** `turnlease.go` and `loop.go` now put
+the submitting turn's id into the `queued` payload (`data["turnId"]`), because this is the one queue
+fact whose reader has to *act on a submission*: a tab that learns "something of mine is queued" from a
+re-emission — a reload, or any tab that did not POST — can only withdraw it if it knows the id the
+submitter minted, and the cloud client was already reading that field (`use-chat-subscription.ts`),
+so it was a dead key until the producer sent it. Witness:
+`TestSecondReplicaQueuesBehindTheRunningTurnE2E` (falsified by removing the field). Deliberately not
+done: identity on the event envelope. Turns are serialized per session, so "the holder ended" answers
+every other rule, and a wire field with no second reader is the kind of thing this roster deletes.
+
+**What the receipt does NOT fix, measured while tuning the live spec (2026-09-26): a reload.** The
+reloaded tab still renders the block (from the replayed `queued` row) but its Cancel sends nothing —
+the replayed payload predates the field — and even a direct `POST /api/chat/cancel` with the right id
+answers `{"canceled":false}`: **the pending entry died with the POST that created it**. So after a
+reload a queued turn is not withdrawable at all, and the block also cannot learn "the wait is over"
+(the subscription path only sets the fact). Both are the same missing piece — the queued state is not
+store-visible — which is `tokenaissance-cloud` `docs/mcp-task-submission.md` §14.6 option ①. That
+option's reopen trigger ("frequent queued withdrawals, multi-replica") is now met from a second
+direction; the live spec keeps its fixture to one live POST and says so.
+
 Not implemented yet: pausing auto-send after an interrupt the way Codex does
 (`suppress_queue_autosend`). We have no "interrupt and keep queued" state —
 Cancel removes the queued turn outright.

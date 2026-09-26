@@ -186,6 +186,15 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 			// fact, one shape (contract C1, docs 08 §10.4).
 			data["expiresAt"] = busy.ExpiresAt.UTC().Format(time.RFC3339)
 		}
+		// Whose submission is waiting. This is the one fact whose reader has to act on a specific
+		// submission: a tab that learns "something of mine is queued" from a re-emission (a reload,
+		// or any tab that did not POST) can only withdraw it if it knows the id the submitter minted.
+		// The event ENVELOPE deliberately carries no identity of its own — turns are serialized per
+		// session, so "the holder ended" answers every other question, and a wire field with no
+		// second reader is the kind of thing this roster keeps deleting.
+		if id := TurnIDFromContext(ctx); id != "" {
+			data["turnId"] = id
+		}
 		emit(ChatEvent{Type: "queued", Data: data})
 		retry := turnLeaseRetry
 		if a.turnLeaseRetryOverride > 0 {

@@ -107,6 +107,13 @@ func TestSecondReplicaQueuesBehindTheRunningTurnE2E(t *testing.T) {
 	if !strings.Contains(queued, `"expiresAt":"`) {
 		t.Fatalf("the queue σ did not say when the possession lapses: %q", queued)
 	}
+	// …nor whose submission it is. The client that POSTed knows its own id; a tab that learns the
+	// queue fact from a re-emission (a reload, a second tab) does not, and without it its withdraw
+	// control cannot name the turn to `POST /api/chat/cancel`. Measured on the live two-tab spec
+	// (cloud e2e/tests/live/queue-send-behind-a-peer.spec.ts) before this field existed.
+	if !strings.Contains(queued, `"turnId":"turn-xreplica-b"`) {
+		t.Fatalf("the queue σ did not name the waiting submission: %q", queued)
+	}
 	// The announcement is the only thing that may have happened on B: a model
 	// round here would mean a second turn started on a session A is running.
 	if n := prov.rounds.Load(); n != 1 {
