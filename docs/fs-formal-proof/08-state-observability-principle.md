@@ -870,3 +870,43 @@ roles above.
 No obligation is owed by the *harness* until something external consumes it: O9 binds a surface that
 advertises itself to an outside reader, and its witness is a test that **the reply or the notification
 actually left** — reddening only the rule witness is no evidence about the delivery point (§5.1).
+
+
+### 10.11 A declared degradation is a registered state, not an absence (2026-09-27)
+
+Sometimes an obligation **cannot be met yet, and the shortfall is stated** to the consumer: the surface
+says only what it actually knows instead of guessing. The register had no slot for that — it records
+`未做`, which loses both halves (nothing lies today; the promise is not kept). So it gets one, with
+three parts: **the obligation**, **the reduced promise actually delivered**, and **the unlock** (what
+must exist before the full promise can be made). A declared degradation is neither a defect nor "done".
+
+First instance: **F2 on the MCP task surface** — `status` has one producer half (the lease) and not the
+other (the queue), and `read_task` now *says* that `pending` covers "waiting its turn **or** running"
+instead of implying it knows which. Reduced promise: the reply is true. Unlock: the queue fact (cloud
+`docs/mcp-task-submission.md` §14.6 path 3). Register row 67.
+
+**Its falsification is one question**: could a consumer tell, from what it receives, that the promise
+is reduced? If not — if the surface still implies the full promise — this is not a degradation, it is
+the false σ the obligation exists to prevent.
+
+### 10.12 O9′ — delivery inside the process is still delivery (2026-09-27)
+
+O9 binds a surface that advertises itself to an **outside** reader. This is the other half: a fact that
+must travel **between two layers of the same process** has to name its producer and its consumer too,
+and the moment it is taken. "Some layer will read it later" is the in-process form of "no delivery
+point". The cost is one sentence naming both ends; the instance that forced it is concrete — the
+turn-identity design wants a submission's identity minted **in the admission critical section** while
+the registry that must use it lives in another layer, a hop no clause above covers because the consumer
+is inside (cloud `docs/fastagent/design/14-turn-identity.md` §3 I1 and §6).
+
+### 10.13 O10 — a duty owed to an outside reader must land on the surface that reader sees (2026-09-27)
+
+O1–O9 are about **facts**: what must be said, and where it must arrive. This is about **duties**: when
+the contract requires the consumer to *do* something to be correct, that instruction has to appear
+where the consumer actually reads. A rule that lives only in a design document is a rule the model
+never sees, and the failure is silent — the client is wrong while every test on our side is green.
+
+Instance: the MCP surface's idempotency contract — "appending a second instruction requires a **new**
+`idempotencyKey`" (cloud `docs/mcp-task-submission.md` §14.2, `design/14-turn-identity.md` §3.1 rule 2).
+The reader that must obey it is the model, and its only surface is `run_task`'s tool description. Same
+shape as O9: give the reader a delivery point, or the obligation does not exist for it.
