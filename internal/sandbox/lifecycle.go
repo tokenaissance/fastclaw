@@ -219,6 +219,14 @@ const extendThreshold = 60 * time.Second
 // operation ends rather than exactly at it.
 const extendSlack = 2 * time.Minute
 
+// postExecSyncBudget bounds one post-exec sync that runs DETACHED from the turn
+// that produced the work (see syncRecordCtx). Long enough for a normal
+// snapshot's round trip plus its uploads — the E2B snapshot call has its own 60 s
+// bound, and anything that cannot finish here is delivered by the next exec or
+// by the eviction flush anyway — and short enough that IO for a turn which is
+// already over cannot pin the marker or the goroutine for long.
+const postExecSyncBudget = 15 * time.Second
+
 // beginUse marks one operation as running against sc and refreshes the idle
 // clock. Paired with endUse.
 func (p *LifecyclePool) beginUse(sc sandboxScope) {
@@ -707,6 +715,15 @@ type delta struct {
 	problem string
 }
 
+// syncRecordCtx is this package's `recordCtx` (internal/agent/ctxkind.go): it keeps every value the
+// caller's ctx carries and drops both the cancellation and the deadline, then adds a short bound of
+// its own. The rule it serves is row 76's, extended to the post-exec sync by row 85: a write that
+// records what HAPPENED is allowed to fail because the store is unavailable, never because the turn
+// that produced it is already dead.
+func syncRecordCtx(ctx context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), budget)
+}
+
 // changed reports whether the delta has anything to say.
 func (r delta) changed() bool {
 	return len(r.moved) > 0 || len(r.blocked) > 0 || len(r.storeOnly) > 0 || r.problem != ""
@@ -742,7 +759,13 @@ func snapshotFailureProblem(ctx context.Context, err error) string {
 			"Move the large or growing files out of /workspace — run logs and scratch belong in /tmp, which is not mirrored — and the next sync goes through. %s %v",
 			consequence, err)
 	case ctx.Err() != nil:
-		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store: this turn's context ended before the sync could run. %s", consequence)
+		// The ctx here is the SYNC's own (syncRecordCtx), not the turn's — that is the whole point of
+		// row 85: a cut turn no longer reaches this branch, because the sync no longer shares its
+		// cancellation. What is left is the sync's own budget running out, and saying THAT is the
+		// honest sentence. (This branch used to read "this turn's context ended", which was true when
+		// the sync ran on the turn's ctx; after the detach it would have been the same defect row 84
+		// removed — a message about a cause the failure no longer has.)
+		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store: the sync did not finish inside its own %s budget. %s It runs detached from the turn, so the next sync — or the eviction flush — will deliver the same changes.", postExecSyncBudget, consequence)
 	default:
 		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store (%v). %s", err, consequence)
 	}
@@ -1192,7 +1215,23 @@ func (l *lazyExecutor) execOnce(ctx context.Context, command string, timeout tim
 		// file inside /workspace is invisible to it (07 §3.11.1). Attach what
 		// moved, and what could not be moved, to the exec result — the shortest
 		// path from "the sandbox did something" to "the agent knows".
-		d := l.pool.syncSnapshot(ctx, l.scope, ex, "post-exec")
+		//
+		// Two jobs, two contexts, and the split is the point:
+		//
+		//   * the SYNC persists what the sandbox did. It needs no reader, so it must not die with the
+		//     reader: a turn cut by its budget, superseded, or abandoned by its caller would otherwise
+		//     take the delivery of its own work with it, and the store would stay behind until the
+		//     next exec or the eviction flush. That flush has always run on a background ctx
+		//     (flushIfSupported), so this is the same class of write — just earlier, which matters
+		//     because the next turn's first action is usually a read. Same rule as row 76's recordCtx
+		//     for terminal events (change-register §13.3 row 85).
+		//
+		//   * takeSignals DELIVERS to the reader that is holding this tool result. It stays on the
+		//     turn's ctx: with no reader there is nothing to deliver to, and the note keeps until a
+		//     turn that has one (row 81's guard).
+		syncCtx, cancelSync := syncRecordCtx(ctx, postExecSyncBudget)
+		d := l.pool.syncSnapshot(syncCtx, l.scope, ex, "post-exec")
+		cancelSync()
 		// Whatever an earlier (evict-time) sync parked comes out here, with this
 		// call's own delta after it: one delivery point, delivered once.
 		out += l.pool.takeSignals(ctx, l.scope) + signalsFor(d)

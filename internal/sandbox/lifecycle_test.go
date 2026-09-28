@@ -813,6 +813,9 @@ func mapKeys(m map[string]string) []string {
 type snapshottingExecutor struct {
 	fakeExecutor
 	files map[string][]byte
+	// onExec runs at the START of Exec — the place a test puts "the turn dies while the command is
+	// running". Used by the post-exec-sync witness (row 85): the sync must survive it.
+	onExec func()
 	// snapshotErr, when set, is what SnapshotWorkspace reports — the shape of a
 	// workspace too large to snapshot.
 	snapshotErr error
@@ -833,9 +836,24 @@ func (s *snapshottingExecutor) TakeWorkspaceReplaced() bool {
 	return true
 }
 
+// Exec delegates to the fake and gives the test its one hook: a turn that dies while its command is
+// running. (The fake's Exec ignores the ctx on purpose — the command itself ran; what a cut takes is
+// the stream and, without row 85, the sync.)
+func (s *snapshottingExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (string, error) {
+	if s.onExec != nil {
+		s.onExec()
+	}
+	return s.fakeExecutor.Exec(ctx, command, timeout)
+}
+
 func (s *snapshottingExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte, error) {
 	if s.snapshotErr != nil {
 		return nil, s.snapshotErr
+	}
+	// A cancelled request fails, the way e2b's does — without this the fake would answer a dead ctx
+	// with a full snapshot and the post-exec-sync witness could not tell the two behaviours apart.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	out := make(map[string][]byte, len(s.files))
 	for k, v := range s.files {
