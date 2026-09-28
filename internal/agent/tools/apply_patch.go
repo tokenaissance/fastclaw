@@ -560,14 +560,9 @@ func (r *Registry) writeForPatch(ctx context.Context, path, content, previous st
 			}
 			return err
 		}
-		// Mirror to disk so this pod's in-process readers (context builder,
-		// skills loader) see the new content immediately. Same invariant as
-		// makeWriteFile.
-		if r.systemRoot != "" {
-			disk := filepath.Join(r.systemRoot, name)
-			_ = os.MkdirAll(filepath.Dir(disk), 0o755)
-			_ = os.WriteFile(disk, []byte(content), 0o644)
-		}
+		// Mirror to disk so this pod's in-process readers (context builder, skills loader) see the
+		// new content immediately. Same invariant as makeWriteFile, including its owner-only gate.
+		r.mirrorToAgentHome(r.systemFileUserID(name), name, []byte(content))
 		return nil
 	}
 	root := r.rootForPath(path)
