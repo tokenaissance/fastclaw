@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,7 +36,24 @@ type MemoryStore interface {
 	GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	GetWorkspaceFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error
+	// SaveWorkspaceFileIfUnchanged is the conditional form: the write lands only
+	// if the row still holds `expected` — the content this caller read — and
+	// ErrMemoryConflict comes back otherwise. It exists because the Identity
+	// files have several writers (the file tools, the distiller, the panel, the
+	// CLI) and one key; a read-modify-write that ignores that is last-write-wins,
+	// and the loser is whoever read last (docs/fs-formal-proof/11-change-register.md §13.2).
+	//
+	// The comparison belongs to the resource: a caller cannot make its own
+	// read-then-write atomic, which is why this is a port method and not a
+	// helper here.
+	SaveWorkspaceFileIfUnchanged(ctx context.Context, agentID, userID, filename string, data []byte, expected string) error
 }
+
+// ErrMemoryConflict reports that a conditional write found the row changed since
+// the caller read it. The caller refuses and says so — retrying blindly is how
+// the winner gets overwritten. (The store package has its own sentinel for the
+// same outcome; the adapter translates, so this layer never names store.)
+var ErrMemoryConflict = errors.New("agent: memory changed since it was read")
 
 type Memory struct {
 	workspace string
@@ -134,6 +152,34 @@ func (m *Memory) SaveMemory(content string) error {
 	return os.WriteFile(m.memoryPath(), []byte(content), 0o644)
 }
 
+// SaveMemoryIfUnchanged overwrites MEMORY.md only if the row still holds
+// `expected` — the content the caller read before it decided what to write.
+//
+// This is the form every read-modify-write writer must use (the distiller, the
+// review sweep). Two writers that read the same MEMORY.md and both write the
+// whole string back is a lost update: the second one silently reverts the first,
+// which is exactly how a `write_file` from the model got undone by the distiller
+// putting back the memory it had read before that tool call.
+//
+// Without a store (legacy single-host installs) this degrades to
+// compare-then-write: best effort, and declared as such — the same posture
+// workspace.LocalFS documents for its own precondition.
+func (m *Memory) SaveMemoryIfUnchanged(content, expected string) error {
+	if m.store != nil {
+		if m.userID == "" {
+			return fmt.Errorf("agent.Memory.SaveMemoryIfUnchanged: userID required")
+		}
+		return m.store.SaveWorkspaceFileIfUnchanged(m.ctx(), m.agentID, m.userID, memoryFilename, []byte(content), expected)
+	}
+	if current, err := os.ReadFile(m.memoryPath()); err == nil && string(current) != expected {
+		return ErrMemoryConflict
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	os.MkdirAll(m.workspace, 0o755)
+	return os.WriteFile(m.memoryPath(), []byte(content), 0o644)
+}
+
 // AppendHistory adds an entry to the history log.
 func (m *Memory) AppendHistory(entry string) error {
 	os.MkdirAll(m.workspace, 0o755)
@@ -211,8 +257,14 @@ func (m *Memory) ReviewAndUpdateMemory(workspace string) {
 		sb.WriteString(fmt.Sprintf("- %s\n", fact))
 	}
 
-	if err := m.SaveMemory(sb.String()); err != nil {
-		slog.Warn("failed to update memory", "error", err)
+	// Same precondition as the distiller: this sweep read currentMemory and
+	// appends to it, so a row that moved meanwhile must not be overwritten.
+	if err := m.SaveMemoryIfUnchanged(sb.String(), currentMemory); err != nil {
+		if errors.Is(err, ErrMemoryConflict) {
+			slog.Warn("memory review: MEMORY.md changed while the review ran — refused to write over it")
+		} else {
+			slog.Warn("failed to update memory", "error", err)
+		}
 		return
 	}
 
@@ -231,6 +283,17 @@ func containsAny(s string, keywords []string) bool {
 // SaveMemoryWithScan scans content for threats before writing to MEMORY.md.
 // Logs warnings for any detected threats but still writes (to avoid data loss).
 func (m *Memory) SaveMemoryWithScan(content string) error {
+	return m.scanMemory(content, func() error { return m.SaveMemory(content) })
+}
+
+// SaveMemoryWithScanIfUnchanged is SaveMemoryWithScan with the precondition: the
+// scan happens first (a rejected write should not depend on whether the row moved),
+// then the conditional write.
+func (m *Memory) SaveMemoryWithScanIfUnchanged(content, expected string) error {
+	return m.scanMemory(content, func() error { return m.SaveMemoryIfUnchanged(content, expected) })
+}
+
+func (m *Memory) scanMemory(content string, write func() error) error {
 	if threats := privacy.Scan(content); len(threats) > 0 {
 		for _, t := range threats {
 			slog.Warn("memory safety threat detected in MEMORY.md write",
@@ -240,11 +303,22 @@ func (m *Memory) SaveMemoryWithScan(content string) error {
 			)
 		}
 	}
-	return m.SaveMemory(content)
+	return write()
 }
 
 // SaveUserFile writes USER.md with threat scanning.
 func (m *Memory) SaveUserFile(content string) error {
+	return m.saveUserFile(content, func() error { return m.writeUserFile(content) })
+}
+
+// SaveUserFileIfUnchanged is SaveUserFile with the same precondition as
+// SaveMemoryIfUnchanged, and for the same reason: USER.md has the same several
+// writers on one key.
+func (m *Memory) SaveUserFileIfUnchanged(content, expected string) error {
+	return m.saveUserFile(content, func() error { return m.writeUserFileIfUnchanged(content, expected) })
+}
+
+func (m *Memory) saveUserFile(content string, write func() error) error {
 	if threats := privacy.Scan(content); len(threats) > 0 {
 		for _, t := range threats {
 			slog.Warn("memory safety threat detected in USER.md write",
@@ -254,6 +328,10 @@ func (m *Memory) SaveUserFile(content string) error {
 			)
 		}
 	}
+	return write()
+}
+
+func (m *Memory) writeUserFile(content string) error {
 	if m.store != nil {
 		if m.userID == "" {
 			return fmt.Errorf("agent.Memory.SaveUserFile: userID required")
@@ -262,6 +340,23 @@ func (m *Memory) SaveUserFile(content string) error {
 	}
 	os.MkdirAll(m.workspace, 0o755)
 	return os.WriteFile(filepath.Join(m.workspace, "USER.md"), []byte(content), 0o644)
+}
+
+func (m *Memory) writeUserFileIfUnchanged(content, expected string) error {
+	if m.store != nil {
+		if m.userID == "" {
+			return fmt.Errorf("agent.Memory.SaveUserFileIfUnchanged: userID required")
+		}
+		return m.store.SaveWorkspaceFileIfUnchanged(m.ctx(), m.agentID, m.userID, "USER.md", []byte(content), expected)
+	}
+	path := filepath.Join(m.workspace, "USER.md")
+	if current, err := os.ReadFile(path); err == nil && string(current) != expected {
+		return ErrMemoryConflict
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	os.MkdirAll(m.workspace, 0o755)
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 // LoadUserFile reads the USER.md file for this Memory's user. Same
@@ -384,8 +479,18 @@ If nothing worth saving, output: {"memory_facts": [], "user_notes": []}`,
 		for _, fact := range result.MemoryFacts {
 			memSB.WriteString(fmt.Sprintf("- %s\n", fact))
 		}
-		if err := mem.SaveMemoryWithScan(memSB.String()); err != nil {
-			slog.Warn("auto-persist: failed to save MEMORY.md", "error", err)
+		// Conditional on the memory this call read: if the model wrote MEMORY.md
+		// itself during the same turn (write_file/edit_file), this append would
+		// otherwise put the pre-write content back and silently undo it. Losing
+		// one distillation cycle is the cheap side of that trade — the next turn
+		// reads the new memory and appends to it.
+		if err := mem.SaveMemoryWithScanIfUnchanged(memSB.String(), currentMemory); err != nil {
+			if errors.Is(err, ErrMemoryConflict) {
+				slog.Warn("auto-persist: MEMORY.md changed while this turn ran — refused to write over it",
+					"current_facts", len(result.MemoryFacts))
+			} else {
+				slog.Warn("auto-persist: failed to save MEMORY.md", "error", err)
+			}
 		} else {
 			slog.Info("auto-persist: updated MEMORY.md", "facts", len(result.MemoryFacts))
 		}
@@ -402,8 +507,13 @@ If nothing worth saving, output: {"memory_facts": [], "user_notes": []}`,
 		for _, note := range result.UserNotes {
 			userSB.WriteString(fmt.Sprintf("- %s\n", note))
 		}
-		if err := mem.SaveUserFile(userSB.String()); err != nil {
-			slog.Warn("auto-persist: failed to save USER.md", "error", err)
+		if err := mem.SaveUserFileIfUnchanged(userSB.String(), currentUser); err != nil {
+			if errors.Is(err, ErrMemoryConflict) {
+				slog.Warn("auto-persist: USER.md changed while this turn ran — refused to write over it",
+					"current_notes", len(result.UserNotes))
+			} else {
+				slog.Warn("auto-persist: failed to save USER.md", "error", err)
+			}
 		} else {
 			slog.Info("auto-persist: updated USER.md", "notes", len(result.UserNotes))
 		}

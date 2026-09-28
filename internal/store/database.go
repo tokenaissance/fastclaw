@@ -3842,6 +3842,80 @@ func (d *DBStore) SaveAgentFile(ctx context.Context, agentID, userID, filename s
 	return err
 }
 
+// SaveAgentFileIfVersion writes only when the row still carries `expected`.
+//
+// The comparison is part of the INSERT/UPDATE statement, not a read of ours
+// followed by a write: that is the whole point. A caller that reads, decides, and
+// then writes is a last-write-wins race regardless of how carefully it reads —
+// the check has to be evaluated by the resource, in the same statement as the
+// effect (obligation L4(a)/L7 of docs/fs-formal-proof/12-lease-formal-design.md,
+// applied to a key that had five writers and no precondition at all: §13.2 of 11).
+//
+// `expected` is what the caller read; the write lands iff the row still matches,
+// and ErrAgentFileConflict comes back otherwise. The caller refuses and says so —
+// it must not retry blindly, because the retry would overwrite whoever won.
+//
+// RowsAffected is the witness in both dialects: an INSERT that conflicts and whose
+// DO UPDATE's WHERE does not match affects zero rows, exactly like a DO NOTHING
+// that conflicted. Zero rows is the conflict, and it is not an error the driver
+// will report — it is an outcome we have to read.
+func (d *DBStore) SaveAgentFileIfVersion(ctx context.Context, agentID, userID, filename string, data []byte, expected AgentFileVersion) error {
+	if agentID == "" {
+		return errors.New("store: SaveAgentFileIfVersion requires agent_id")
+	}
+	if userID == "" {
+		return errors.New("store: SaveAgentFileIfVersion requires user_id")
+	}
+	now := time.Now().UTC()
+	var res sql.Result
+	var err error
+	if expected.Absent {
+		// Create-only: nothing to update, and a conflict is a conflict.
+		if d.dialect == "postgres" {
+			res, err = d.handle().ExecContext(ctx,
+				`INSERT INTO agent_files (agent_id, user_id, filename, content, updated_at)
+					VALUES ($1, $2, $3, $4, $5)
+					ON CONFLICT (agent_id, user_id, filename) DO NOTHING`,
+				agentID, userID, filename, string(data), now)
+		} else {
+			res, err = d.handle().ExecContext(ctx,
+				`INSERT INTO agent_files (agent_id, user_id, filename, content, updated_at)
+					VALUES (?, ?, ?, ?, ?)
+					ON CONFLICT (agent_id, user_id, filename) DO NOTHING`,
+				agentID, userID, filename, string(data), now)
+		}
+	} else if d.dialect == "postgres" {
+		res, err = d.handle().ExecContext(ctx,
+			`INSERT INTO agent_files (agent_id, user_id, filename, content, updated_at)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (agent_id, user_id, filename) DO UPDATE SET content=$4, updated_at=$5
+				WHERE agent_files.content = $6`,
+			agentID, userID, filename, string(data), now, string(expected.Content))
+	} else {
+		res, err = d.handle().ExecContext(ctx,
+			`INSERT INTO agent_files (agent_id, user_id, filename, content, updated_at)
+				VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT (agent_id, user_id, filename) DO UPDATE SET
+				  content=excluded.content, updated_at=excluded.updated_at
+				WHERE agent_files.content = ?`,
+			agentID, userID, filename, string(data), now, string(expected.Content))
+	}
+	if err != nil {
+		return err
+	}
+	// A driver that cannot report rows affected would let every stale write
+	// through silently, which is worse than refusing the write — so treat "cannot
+	// tell" as a conflict the caller will see, not as success.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: SaveAgentFileIfVersion cannot read RowsAffected: %w", err)
+	}
+	if n == 0 {
+		return ErrAgentFileConflict
+	}
+	return nil
+}
+
 func (d *DBStore) DeleteAgentFile(ctx context.Context, agentID, userID, filename string) error {
 	if agentID == "" {
 		return errors.New("store: DeleteAgentFile requires agent_id")

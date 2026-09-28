@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
@@ -53,6 +54,20 @@ func (a *MemoryStoreAdapter) GetWorkspaceFileExact(ctx context.Context, agentID,
 
 func (a *MemoryStoreAdapter) SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error {
 	return a.st.SaveAgentFile(ctx, agentID, userID, filename, data)
+}
+
+// SaveWorkspaceFileIfUnchanged is the belt the identity files were missing: the
+// store compares `expected` (the bytes this caller read) inside the write, and a
+// row that moved in between comes back as the agent layer's ErrMemoryConflict —
+// the store's own sentinel stops at this boundary, so callers above never import
+// it (docs/fs-formal-proof/11-change-register.md §13.2).
+func (a *MemoryStoreAdapter) SaveWorkspaceFileIfUnchanged(ctx context.Context, agentID, userID, filename string, data []byte, expected string) error {
+	err := a.st.SaveAgentFileIfVersion(ctx, agentID, userID, filename, data,
+		store.AgentFileVersion{Content: []byte(expected)})
+	if errors.Is(err, store.ErrAgentFileConflict) {
+		return ErrMemoryConflict
+	}
+	return err
 }
 
 // ListKnowledgeDocs / SearchKnowledgeChunks expose the owner-uploaded

@@ -10,6 +10,7 @@ type memoryStoreSpy struct {
 	saveMemoryCalls           int
 	getWorkspaceFileExactCall int
 	saveWorkspaceFileCalls    int
+	saveIfUnchangedCalls      int
 }
 
 func (s *memoryStoreSpy) GetMemory(context.Context, string, string) (string, error) {
@@ -36,6 +37,11 @@ func (s *memoryStoreSpy) SaveWorkspaceFile(context.Context, string, string, stri
 	return nil
 }
 
+func (s *memoryStoreSpy) SaveWorkspaceFileIfUnchanged(context.Context, string, string, string, []byte, string) error {
+	s.saveIfUnchangedCalls++
+	return nil
+}
+
 func TestNewMemoryWithStoreForUserEmptyUserIDFailsClosed(t *testing.T) {
 	store := &memoryStoreSpy{}
 	mem := NewMemoryWithStoreForUser(t.TempDir(), store, "", "agent-1")
@@ -53,6 +59,17 @@ func TestNewMemoryWithStoreForUserEmptyUserIDFailsClosed(t *testing.T) {
 	}
 	if store.saveMemoryCalls != 0 {
 		t.Fatalf("SaveMemory store calls = %d, want 0", store.saveMemoryCalls)
+	}
+	// The conditional form must fail closed too — a belt that skips the guard on
+	// an empty userID would let an unscoped Memory overwrite a real row.
+	if err := mem.SaveMemoryIfUnchanged("x", ""); err == nil {
+		t.Fatal("SaveMemoryIfUnchanged() error = nil, want error")
+	}
+	if err := mem.SaveUserFileIfUnchanged("x", ""); err == nil {
+		t.Fatal("SaveUserFileIfUnchanged() error = nil, want error")
+	}
+	if store.saveIfUnchangedCalls != 0 {
+		t.Fatalf("conditional store calls = %d, want 0", store.saveIfUnchangedCalls)
 	}
 	if got := mem.LoadUserFile(); got != "" {
 		t.Fatalf("LoadUserFile() = %q, want empty", got)
