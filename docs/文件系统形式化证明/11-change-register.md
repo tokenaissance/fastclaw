@@ -917,3 +917,12 @@ cloud 比对的是一份列表；pod 不知道令牌的受众与 scope。这里�
 * **MCP 面的粒度是账号，不是 end-user。** `internalConnection` 不带 `X-Fastagent-End-User`，所以整个 MCP 会话
   就是账号本人。账号内多 end-user 的隔离是另一个维度，pod 有它（`internal/auth/identity_e2e_test.go` 里的
   app-user 路径），而任何 MCP 工具在两个方向上都够不到它。
+### 13.9 goal 自己的转录（第 88 行）
+
+两条规则，问的都是**转录里说这话的是谁**，而且两条各自的边界都钉住。
+
+| # | 变更 | 形式（职责） | 代码锚点 | UT | 真机 e2e | 已发布 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 88 | **`/goal …` 那行按真用户消息入档；goal 的续跑则由 web 按"事实"渲染。** slash 的短路返回发生在"归档 inbound"的回合路径之前，于是用户自己那行只活在 web 的乐观气泡里：刷新就没了，MCP 的 `read_task(full:true)` 更是从来没见过——**一份"goal 的工作却没有 goal"的转录**。现在它会被追加进归档（只对 goal 这一族；`/status` 之类不进，否则每看一眼机器状态都会进模型的上下文）。续跑通过 `WebChatHistory(sessionId, includeSynthetic)` 曝光：`role=user`、`synthetic: true`、正文是 `（继续执行目标）<objective>`——**不是**注入行真正携带的那段审计提示（它含给模型的指令与预算快照；用 `role:user` 气泡展示等于宣称用户写了它，这正是本行要防的 O1 失败）。web 会要（`includeSynthetic=1` → 一个 "目标续跑" 标记），MCP 那条读**不要**，于是 §14.3 的投影照旧跳过注入行 | **O1**（气泡不得就"谁说的"说假话）+ F2/§5.1（投递点必须存在） | fastagent `internal/agent/slash.go`（`archiveSlashInput` 与 `/goal` 调用点）、`internal/agent/loop.go`（`WebChatHistory` / `goalObjective` / `goalContinuationLabel`）、`internal/setup/handlers.go` + `server.go`（查询开关与接口）；cloud `src/features/chat/utils.ts`（带开关）、`types.ts`（`synthetic`）、`components/session/message-list.tsx`（标记）、两份 `chat.json` | 先红后绿：`goal_transcript_test.go`（5 条）——那行入档且刷新后可见；**工具类** slash 不入档（窄的边界）；默认读没有 synthetic 行且仍隐藏提示；要开关的读带上 objective 与标记；objective 读不到时不编造；`bus.SourceGoalContext == provider.OriginGoalContext`（标签与过滤器不能漂）。**已实跑的反证**：去掉归档调用 ⇒ 两条转录用例红（`the user's own /goal … line is not in the transcript: []`）；忽略开关 ⇒ 默认读渲染出 synthetic 行（红，原文） | dev：用三轮 objective 通过 MCP 起一条 goal —— **默认**读 20 行，第 `[0]` 行就是用户的 `/goal …`，无 synthetic 行；**带开关**读 23 行 = 同样 20 行 + 3 条续跑（`role=user synthetic=True origin=goal_context`，正文 `（继续执行目标）…`）；MCP `read_task(full:true)` 20 条消息，第 `[0]` 行是 goal 那行、**没有 `synthetic` 字段** | ✅ dev（fastagent rev 104 + cloud `93c3fd4e`） |
+
+> **发布上的一处小瑕疵，如实记**：dev 镜像的 tag 是 `20260928160255-fastagent-fea371e`（构建时看到的 commit），而它跑的代码是 `b11b3cf`（构建发生在提交之前）。与第 87 行那条同类；重建一次 tag 就对了。
