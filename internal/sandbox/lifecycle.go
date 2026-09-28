@@ -1266,7 +1266,16 @@ func signalsFor(d delta) string {
 		}
 		sb.WriteString("[workspace] NOT synced (the store's copy differs and neither side may be chosen automatically): ")
 		sb.WriteString(strings.Join(d.blocked, ", "))
-		sb.WriteString(" — both versions are intact.")
+		// The fact is not enough, and this is the one state in this package where that is true: it
+		// does not resolve on its own (nothing here writes), so a reader who is not told the two ways
+		// out is looking at a permanent refusal (register §13.4: 269 refusals on one path over ten
+		// hours, with the agent reasoning about it correctly and having no move to make).
+		//
+		// Both directions, in the reader's own terms, because the runtime cannot tell a log from a
+		// deliverable — and the mechanics, because the obvious action does not work: `read_file`
+		// answers from the STORE, so reading the sandbox's copy means `exec cat`.
+		sb.WriteString(" — both versions are intact. If one of these is only a run log or scratch, remove it (both copies, or the next sync reports it as a path the sandbox no longer has) or move it out of /workspace, and the sync stops refereeing it. ")
+		sb.WriteString("If it is a deliverable, decide which version you mean and write that one back through the file tools — read the sandbox's copy with `exec cat` first, because `read_file` answers from the store; the mirror then makes the two copies agree and the path syncs again.")
 	}
 	if len(d.storeOnly) > 0 {
 		sb.WriteString(StoreOnlyLine(d.storeOnly))

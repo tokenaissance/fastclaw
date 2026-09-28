@@ -29,6 +29,17 @@ it without a pod restart.
   ❌ exec(command="mkdir -p /skills/domain-check && ...")
        → sandbox overlay, same fate as above
 
+**A skill that runs anything long must keep its run logs out of `/workspace`.**
+`/workspace` is mirrored into the durable store after every command, and the
+mirror refuses to choose between two versions that differ. A log that grows
+while a script runs therefore stops being syncable **and stays that way** —
+the file itself is fine, but the copy in the store freezes at whatever size it
+had when the two first disagreed (measured in production: one run log was
+mirrored at 1,459 bytes and then refused 27 times in two and a half minutes).
+Write run logs to `/tmp` (never mirrored), or delete them before the skill
+returns. Files you want the user to keep — reports, images, data — belong in
+`/workspace`.
+
 Note: the new skill becomes visible to the LLM on the **next turn**,
 not mid-turn — the current message's system prompt is already frozen.
 Tell the user something like "skill saved — invoke it on your next
