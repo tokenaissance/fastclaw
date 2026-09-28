@@ -1163,6 +1163,12 @@ func annotateMessageWithAttachments(message string, paths []string) string {
 	return b.String()
 }
 
+// handleChat is the non-streaming write, and it carries its session in the BODY — which the ingress
+// cannot hash: `upstream-hash-by` is `$arg_sessionId`, a QUERY argument
+// (deploy/helm/fastagent/templates/ingress.yaml:24). A caller that needs placement to be correct
+// therefore has to add `?sessionId=` to the URL even though the body already names the session. Nothing
+// in this repository calls this endpoint today; the note is here so the first caller does not have to
+// rediscover why the other write paths all carry the key twice.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1852,7 +1858,7 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	// The queue half of §14.8's F2: `status` is lease + queue, and the lease half already rides
 	// `turnActive` (read from the store, cross-replica). This is the other half — how many submissions
 	// are WAITING behind the holder — and it is served by the pod that owns this session, which is the
-	// pod the read lands on because the ingress hashes `$arg_session_id`
+	// pod the read lands on because the ingress hashes `$arg_sessionId`
 	// (docs/chat-event-delivery-placement.md §3). It is emitted even when zero: an absent field would
 	// make "nobody is queued" indistinguishable from "this pod cannot say", and the two boundaries that
 	// make the second case real are enumerated in §4 of that document (a rolling deploy, or a caller
