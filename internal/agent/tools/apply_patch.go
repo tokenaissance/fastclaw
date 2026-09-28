@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 // -----------------------------------------------------------------------------
@@ -536,7 +537,7 @@ func (r *Registry) readForPatch(ctx context.Context, path string) (string, error
 	return string(data), nil
 }
 
-func (r *Registry) writeForPatch(ctx context.Context, path, content string) error {
+func (r *Registry) writeForPatch(ctx context.Context, path, content, previous string) error {
 	if r.identityFileBlocked(path) {
 		return fmt.Errorf("%s", IdentityFileRefusal)
 	}
@@ -550,7 +551,13 @@ func (r *Registry) writeForPatch(ctx context.Context, path, content string) erro
 	}
 	if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(path) {
 		name := filepath.Clean(path)
-		if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content)); err != nil {
+		// Conditional on the pre-image runApplyPatch read and handed down: an identity file has
+		// several writers, and a patch that reports success while somebody else's version survives
+		// is the same false σ edit_file used to produce (§13.2 / row 83).
+		if err := r.systemFileStore.SaveWorkspaceFileIfUnchanged(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content), previous); err != nil {
+			if errors.Is(err, store.ErrAgentFileConflict) {
+				return fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", path)
+			}
 			return err
 		}
 		// Mirror to disk so this pod's in-process readers (context builder,
@@ -630,7 +637,7 @@ func (r *Registry) readForPatchSandbox(ctx context.Context, ex sandbox.Executor,
 	return ex.ReadFile(ctx, path)
 }
 
-func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor, path, content string) error {
+func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor, path, content, previous string) error {
 	if r.identityFileBlocked(path) {
 		return fmt.Errorf("%s", IdentityFileRefusal)
 	}
@@ -639,7 +646,13 @@ func (r *Registry) writeForPatchSandbox(ctx context.Context, ex sandbox.Executor
 	}
 	if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(path) {
 		name := filepath.Clean(path)
-		return r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content))
+		if err := r.systemFileStore.SaveWorkspaceFileIfUnchanged(ctx, r.agentID, r.systemFileUserID(name), name, []byte(content), previous); err != nil {
+			if errors.Is(err, store.ErrAgentFileConflict) {
+				return fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", path)
+			}
+			return err
+		}
+		return nil
 	}
 	if r.workspaceStore != nil && r.agentID != "" && r.isWorkspacePath(path) {
 		// The SAME family-B guard as writeForPatch above. registerSandboxedApplyPatch
@@ -739,7 +752,7 @@ func registerApplyPatch(r *Registry) {
 		}
 		return runApplyPatch(ctx, args.Input,
 			func(ctx context.Context, p string) (string, error) { return r.readForPatch(ctx, p) },
-			func(ctx context.Context, p, c, _ string) error { return r.writeForPatch(ctx, p, c) },
+			func(ctx context.Context, p, c, previous string) error { return r.writeForPatch(ctx, p, c, previous) },
 			func(ctx context.Context, p string) error { return r.deleteForPatch(ctx, p) },
 		)
 	})
@@ -762,7 +775,7 @@ func registerSandboxedApplyPatch(r *Registry, ex sandbox.Executor) {
 		out, err := runApplyPatch(ctx, args.Input,
 			func(ctx context.Context, p string) (string, error) { return r.readForPatchSandbox(ctx, ex, p) },
 			func(ctx context.Context, p, c, previous string) error {
-				if err := r.writeForPatchSandbox(ctx, ex, p, c); err != nil {
+				if err := r.writeForPatchSandbox(ctx, ex, p, c, previous); err != nil {
 					return err
 				}
 				r.addSignal(ctx, r.writeThroughSignal(ctx, p, c, previous))

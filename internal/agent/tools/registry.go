@@ -371,6 +371,16 @@ type SystemFileStore interface {
 	GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	GetWorkspaceFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error
+	// SaveWorkspaceFileIfUnchanged is the conditional form: the write lands only when the row still
+	// holds `expected` — the bytes this caller just read — and answers store.ErrAgentFileConflict
+	// otherwise. edit_file and apply_patch read the file inside their own call, so they hold the
+	// fact and can pass it; write_file deliberately does not (its semantics are "this file is now
+	// this"), which is why only the read-modify-write tools use it.
+	//
+	// The comparison belongs to the resource, not to the caller: a caller cannot make its own
+	// read-then-write atomic. Same rule as putGuarded's on the workspace store, same vocabulary —
+	// the missing half of §13.2 of docs/fs-formal-proof/11-change-register.md.
+	SaveWorkspaceFileIfUnchanged(ctx context.Context, agentID, userID, filename string, data []byte, expected string) error
 }
 
 // SetWorkspaceStore installs a workspace store on the registry. File tools

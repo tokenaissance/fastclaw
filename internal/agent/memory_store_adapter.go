@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
@@ -58,14 +59,21 @@ func (a *MemoryStoreAdapter) SaveWorkspaceFile(ctx context.Context, agentID, use
 
 // SaveWorkspaceFileIfUnchanged is the belt the identity files were missing: the
 // store compares `expected` (the bytes this caller read) inside the write, and a
-// row that moved in between comes back as the agent layer's ErrMemoryConflict —
-// the store's own sentinel stops at this boundary, so callers above never import
-// it (docs/fs-formal-proof/11-change-register.md §13.2).
+// row that moved in between comes back as a conflict.
+//
+// Two readers check it and they live in two packages, so the error carries BOTH
+// sentinels (multi-%w): the distiller asks errors.Is(err, ErrMemoryConflict) and
+// must not have to import the store, while the file tools ask
+// errors.Is(err, store.ErrAgentFileConflict) and are in a package this one
+// imports (tools ← agent, so tools cannot see ErrMemoryConflict without a
+// cycle). One write, one conflict, two vocabularies — rather than two methods
+// that could drift apart.
+// (docs/fs-formal-proof/11-change-register.md §13.2, row 83)
 func (a *MemoryStoreAdapter) SaveWorkspaceFileIfUnchanged(ctx context.Context, agentID, userID, filename string, data []byte, expected string) error {
 	err := a.st.SaveAgentFileIfVersion(ctx, agentID, userID, filename, data,
 		store.AgentFileVersion{Content: []byte(expected)})
 	if errors.Is(err, store.ErrAgentFileConflict) {
-		return ErrMemoryConflict
+		return fmt.Errorf("%w (%w)", ErrMemoryConflict, store.ErrAgentFileConflict)
 	}
 	return err
 }

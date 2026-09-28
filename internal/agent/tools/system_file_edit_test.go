@@ -35,6 +35,21 @@ func (m *missingRowStore) SaveWorkspaceFile(_ context.Context, _ /* agentID */, 
 	return nil
 }
 
+// SaveWorkspaceFileIfUnchanged enforces the precondition the way the store does, so a witness built
+// on this fake is a witness about the rule rather than about a stub that always says yes.
+//
+// The shape is the store's SQL, not a stricter reading of it: a row that EXISTS and holds something
+// else is a conflict, while an absent row makes this a create — the caller's base may have come from
+// the disk copy (`readSystemFileWithFallback`), so "expected" is a statement about the row only when
+// there is one. Pinned for the real store in agent_file_version_test.go.
+func (m *missingRowStore) SaveWorkspaceFileIfUnchanged(_ context.Context, _ /* agentID */, userID, filename string, data []byte, expected string) error {
+	if cur, ok := m.saved[userID+"/"+filename]; ok && cur != expected {
+		return store.ErrAgentFileConflict
+	}
+	m.saved[userID+"/"+filename] = string(data)
+	return nil
+}
+
 func newSystemFileRegistry(st SystemFileStore, systemRoot string) *Registry {
 	r := NewRegistry(systemRoot, "") // file tools + a live tools map
 	r.systemFileStore = st
