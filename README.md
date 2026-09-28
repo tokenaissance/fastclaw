@@ -112,6 +112,41 @@ table and is edited through the dashboard or `fastagent agents config`.
 | User accounts, billing | Application | Your app (ChatClaw, etc.) |
 | Output files | Application | Your app / S3 |
 
+### How a Turn Runs (and what bounds it)
+
+One **instruction** — a chat message, an API call, a cron tick, a subagent's work — is one
+**turn**. A turn owns its session from the moment it is admitted until it ends, and inside it the
+agent runs a ReAct loop: each **iteration** is one model call plus the tool calls it asked for.
+A turn is therefore 1..N iterations, and the two are not the same unit.
+
+```text
+turn ─┬─ iteration 1: model → tools → results
+      ├─ iteration 2: model → tools → results
+      └─ iteration N: model → final answer            (or a stop, a failure, an empty answer)
+        ▲                                            ▲
+        │ stop / supersede are READ here             │ the turn's ceiling lives here
+```
+
+- **Closing the tab does not stop the work.** The turn's context is deliberately detached from the
+  request (`context.WithoutCancel`), so a refresh, a closed browser or an MCP client that hangs up
+  right after submitting leaves the turn running; its reply still lands in the session and is
+  delivered to whoever reads next.
+- **A stop is cooperative, and it is read at an iteration boundary** — the top of the loop, next to
+  "did another turn take this session over". A turn parked inside one long tool call (`sleep 40`)
+  notices the stop when that call returns, not in the middle of it. The notice it emits names both
+  the ending (`stopped`) and the reason (`cancelled` / `superseded`).
+- **The ceiling is `agentTurnTimeout`** (`internal/setup/handlers.go`), the upper bound on how long
+  a detached turn may keep running. It exists so a runaway loop cannot pin a goroutine forever, and
+  it is deliberately generous (browser-automation fan-outs legitimately take tens of minutes).
+- **Admission has two gates**, in this order: the cross-replica **lease** (a row in the store —
+  whoever holds it owns the session) and then the local **session slot** (a FIFO queue so two turns
+  on one pod never interleave their writes). A second turn for a busy session parks at the lease
+  gate and re-tries every couple of seconds, announcing itself as `queued` (holder, expiry,
+  position) while it waits.
+- **A live turn is kept alive by renewal, not by a long lease.** The lease's TTL bounds only how
+  long a *dead* holder may look alive; the holder renews it on a timer, so a long turn survives
+  without widening that bound.
+
 ## Features
 
 ### LLM Providers
