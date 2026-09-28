@@ -890,3 +890,30 @@ FASTAGENT_E2B_LIVE=1 E2B_API_KEY=e2b_... \
 **第 87 行不声称的东西。** 它不负责 §13.4 里身份文件那一半（`MEMORY.md` 的两个写者：那是第 77、86 行的故事，
 它们消掉的 269 条拒绝是一个更早的镜像产生的）。它不改 store-owned 路径的守卫（那些路径在任何一步之前就被跳过）。
 而且它**未发布**：dev 与 prod 仍在跑"每一对分歧都拒绝"的那个版本，这正是本册 Deployed 列在这一行仍是 ❌ 的原因。
+
+### 13.8 MCP 的账号边界，被钉住（三条见证，每条都跑过反证）
+
+**不变量**（用户 2026-09-28 裁决）：令牌一旦授权，每一次 `tools/call` 只能碰到该令牌所属**账号**名下的
+agent / skills / session / tasks。它本来就已经成立，而且是**两半**各自成立——这正是关键：
+
+| 半 | 它看得见什么 | 位置 |
+| --- | --- | --- |
+| cloud（`mcp-oauth-server`） | 令牌的 `userId`，以及**该账号**拥有的 agent | `index.ts`（`internalConnection`、`agentForCall`）、`tools-service.ts`（`matchAgent`） |
+| pod（fastagent） | 交给它的凭证能碰什么：`type=user` 键 = "该 owner 名下的全部 agent，按请求实时解析" | `internal/auth/auth.go`（`CanAccessAgent`）、`internal/users/apikey.go`（按类型的解析） |
+
+cloud 比对的是一份列表；pod 不知道令牌的受众与 scope。这里同样适用第 87 行的纪律——一个断言要有见证，
+而"两半互为备份"恰恰是那种会无声腐烂的断言。现在三条见证各钉住一个风险：
+
+| 见证 | 钉住什么 | 实跑的反证 | 观察到的红 |
+| --- | --- | --- | --- |
+| cloud `mcp-surface-e2e`："an agent that is not this account's is refused before the pod is asked" | 陌生 agent id 是**可修的参数错**（走文本，不是 500）；pod **从未被问过那个 agent**（没有任何 URL 提到它）；真正发出去的每一次调用都带**账号自己的**键 | 让 `matchAgent` 直接放行原始 id，不去比对账号列表 | `expected false to be true`——`isError` 回来是 false：陌生 id 被接受了 |
+| fastagent `internal/auth`：`TestAPIKeyScope_UserKeySeesOnlyItsOwnersAgents` | `type=user` 键能碰 owner 的 agent、碰不到别的账号的；键签发**之后**新建的 agent 不用动键就在范围内；而 `type=agent` 键**不会**跟着账号长大 | 让 `CanAccessAgent` 把所有 apikey 当成 admin 层 | 红 4 处：两个跨账号方向、重新解析后的键、以及 ACL 层的增长 |
+| cloud `fastagent-provisioning`："the key it mints is scoped to the account — type=user, never admin" | 签发的键请求的是 `type: 'user'`——pod 那一半所依赖的层级 | 请求体改成 `admin` | `expected 'admin' to be 'user'` |
+
+随它们记下两条边界，因为这是"以不同方式响亮失败"的两条路：
+
+* **缺 type 时 pod 是 fail closed 的。** 它的默认值是 `type=agent`，而那一层要求非空 ACL，所以漏传 type 是
+  **报错**而不是放宽——风险是"层级错了"，不是"没人管"。这也是第三条见证值得存在的原因。
+* **MCP 面的粒度是账号，不是 end-user。** `internalConnection` 不带 `X-Fastagent-End-User`，所以整个 MCP 会话
+  就是账号本人。账号内多 end-user 的隔离是另一个维度，pod 有它（`internal/auth/identity_e2e_test.go` 里的
+  app-user 路径），而任何 MCP 工具在两个方向上都够不到它。

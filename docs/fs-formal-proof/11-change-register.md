@@ -1046,3 +1046,34 @@ writers: rows 77 and 86 are that story, and the 269 refusals they remove were pr
 predates them). It does not change the store-owned-path guard (`storeOwned` paths are still skipped
 before any of this). And it is **not deployed**: dev and prod are still running the build that refuses
 every divergent pair, which is why the register's Deployed column reads ❌ for this row.
+
+### 13.8 The MCP account boundary, pinned (three witnesses, each falsified)
+
+**The invariant** (user's ruling, 2026-09-28): once a token is authorized, every `tools/call` reaches
+only the agents / skills / sessions / tasks of that token's own account. It already held, in two halves
+that cannot see each other — and that is the point:
+
+| half | what it can see | where |
+| --- | --- | --- |
+| cloud (`mcp-oauth-server`) | the token's `userId`, and the agents *that account* owns | `index.ts` (`internalConnection`, `agentForCall`), `tools-service.ts` (`matchAgent`) |
+| pod (fastagent) | what the credential it was handed may touch: a `type=user` key is "every agent owned by the key's owner, resolved per request" | `internal/auth/auth.go` (`CanAccessAgent`), `internal/users/apikey.go` (the per-type resolution) |
+
+The cloud compares a list; the pod does not know the token's audience or scopes. Row 87's discipline
+applies here too — a claim needs a witness, and "the two halves are each other's backup" is exactly the
+kind of claim that rots silently. Three witnesses now pin one risk each:
+
+| witness | what it pins | falsification, run for real | observed red |
+| --- | --- | --- | --- |
+| cloud `mcp-surface-e2e`: "an agent that is not this account's is refused before the pod is asked" | a foreign agent id is a *fixable argument* refusal (text, not a 500); the pod is never asked **about that agent** (no URL names it); and every call that does go out carries the account's **own** key | `matchAgent` returns the raw id instead of consulting the account's list | `expected false to be true` — `isError` came back false: the foreign id was accepted |
+| fastagent `internal/auth`: `TestAPIKeyScope_UserKeySeesOnlyItsOwnersAgents` | a `type=user` key reaches the owner's agents and not another account's; an agent created *after* the key was minted is in scope without touching the key; a `type=agent` key does **not** grow | `CanAccessAgent` treats every apikey as the admin tier | 4 red: both cross-account directions, the re-resolved key, and the ACL tier's growth |
+| cloud `fastagent-provisioning`: "the key it mints is scoped to the account — type=user, never admin" | the minted key asks for `type: 'user'` — the tier the pod's half depends on | the request body asks for `admin` | `expected 'admin' to be 'user'` |
+
+Two boundaries recorded with them, because they are the ways this could fail *loudly differently*:
+
+* **The pod fails closed on a missing type.** Its default is `type=agent`, which requires a non-empty
+  ACL, so forgetting the type is an error rather than a wider grant — the risk is the wrong tier, not
+  silence. That is what makes the third witness above worth having.
+* **The MCP surface's grain is the ACCOUNT, not the end-user.** `internalConnection` sends no
+  `X-Fastagent-End-User`, so the whole MCP session is the account's own user. Per-end-user isolation
+  inside one account is a different axis, and the pod has it (the app-user path in
+  `internal/auth/identity_e2e_test.go`); no MCP tool can reach it, in either direction.
