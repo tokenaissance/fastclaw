@@ -152,6 +152,10 @@ go test ./internal/sandbox/ -run 'TestALongOperationIsNotStartedOnAnInstanceTheS
 # row 77's live leg (§13.3): a goal continuation's own lease, read off the pod (cloud repo)
 #   scripts/mcp-goal-budget-live-check.sh   → VERDICT=cron best≈3657 with cronTimeoutSec=3600
 #                                             VERDICT=pre-a1 best≈355 with it set to 300
+
+# row 83: the read-modify-write tools present the copy they read
+go test ./internal/agent/tools/ -run 'TestEditFileRefusesAnIdentityFileThatMovedUnderIt|TestEditFileStillLandsWhenNobodyElseWrote|TestApplyPatchRefusesAnIdentityFileThatMovedUnderIt|TestWriteFileStillReplacesAnIdentityFile|TestTheConflictIsIdentifiedByValue' -count=1
+go test ./internal/store/ -run TestSaveAgentFileIfVersionTreatsAMissingRowAsACreate -count=1  # the create-vs-conflict semantics the tools' expectations rely on
 ```
 
 ## 7. Rows with no live e2e, and why
@@ -697,14 +701,14 @@ witness says so.
    what they need is not another guard but a **version precondition on `SaveAgentFile`** (A3's
    belt): `PutIfVersion`, refusing and reporting like W3's `BLOCKED` — one rule, not four. **That
    rule landed (row 80)**, and W2 — the only writer that reads, decides, and writes the whole string
-   back *inside the pod* — is its consumer. W1 (the file tools), W4 (the panel) and W5 (the CLI) are
-   still listed as open, and the reason is not effort: a precondition needs the writer to hold the
-   fact it read, and those three hand the decision to someone else — the model gets the content from
-   a `read_file` call it made earlier (a different tool call, so no token crosses), the browser GETs
-   and later PUTs. Giving them one means putting a version token on their surface (the tool result /
-   the HTTP payload) and then carrying it back. Until then their writes are *replacements*, which is
-   what they mean to be: `write_file` says "MEMORY.md is now this". The pair that can still lose a
-   real update is therefore two replacements racing, not a replacement and the distiller.
+   back *inside the pod* — was its first consumer. **W1's read-modify-write half closed on the same
+   rule (row 83)**: `edit_file` and `apply_patch` read the file inside their own call, so the fact was
+   already theirs and no surface had to carry it. What is still open is the part that genuinely
+   belongs to someone else: `write_file` (a *replacement* — "MEMORY.md is now this" is its promise,
+   and a guard there would refuse the one thing it offers), the panel (W4: the browser GETs and later
+   PUTs, so the token would have to ride the HTTP payload), and the CLI (W5). Two replacements racing
+   is still the pair that can lose an update, and for the panel that is a deliberate human action,
+   not the silent interleaving F1 is about.
 2. **The read fallback still holds an un-scoped home** (`systemRoot/MEMORY.md`): it belongs to no
    (agent,user), and only the "owner may read it" patch keeps visitors out. The real fix is to
    retire it (or migrate it explicitly), or "one fact, two expressions" comes back in a fifth form.
@@ -713,7 +717,7 @@ witness says so.
 interleaving on one `(agent,user,MEMORY.md)`, where the second is refused rather than merged;
 falsification: drop the version precondition and the first writer's content is silently overwritten.
 
-### 13.3 Four rows that close things this pass left open (79–82)
+### 13.3 Five rows that close things this pass left open (79–83)
 
 Row 79 is the noisy-signal half of the same forensics (five `context canceled` WARNs in one prod log
 window, no store incident behind any of them). Row 80 is §13.2's belt, landed with the one writer
@@ -734,9 +738,12 @@ that can hold the token.
 | 81  | **A parked signal is not taken once the turn is over**: `takeSignals` returns early when the ctx is already done. The whole note is still there — `TakeSignals` consumes it only after a SUCCESSFUL read, and a failed delete even returns the text — so a turn with no reader leaves it parked for the next one instead of buying a canceled round trip and a WARN that reads like a store fault. Prod 2026-09-28 had exactly one such line (`error="context canceled"`), the same shape row 79 stopped reporting for the setup package's own reads                                            | **O1/O5** applied to a carrier read (a line must carry a fact about the thing it names)              | `internal/sandbox/lifecycle.go` (`takeSignals`)                                                                                                                                            | green, red first: `internal/sandbox/signal_carrier_test.go` — the carrier fake now honours the ctx the way the real one does (a store read fails before its delete), so the case asserts BOTH that the carrier was not read (`takes == 0`) and that it still holds the fact, then that a live ctx delivers it and clears the row. **Falsification run**: drop the guard ⇒ red, "the carrier was read with a dead ctx (1 reads)"                                                                                        | none (a log rule; the prod line it removes is quoted in the code)                                                                                                        | ❌ (dev ✅) |
 | 82  | **A failed budget extension says what it is, and a gone instance loses no work**: `extendBudget` classifies its error with the predicate the post-exec path already trusts (`UnusableClassifier`) — the gone case logs the INSTANCE ("the sandbox this scope held is gone; the long operation will not be started on it"), the transient case keeps the old sentence — and returns the error for exactly one of them. `execOnce` then does not start the operation at all, handing the verdict to `Exec`'s existing replacement path (Release + the "sandbox replaced" note), so the retry lands on a fresh sandbox. Prod evidence: 4/4 occurrences were `e2b extend timeout <id> HTTP 404` (the instance was already gone) and each was reported as "could not extend the sandbox timeout", a sentence about the operation; the long op then ran on the corpse and the lease went unrenewed for its whole duration | **F1/F2** (the resource, not the caller, decides; one fact one wording) + O1                             | `internal/sandbox/lifecycle.go` (`extendBudget`, `execOnce`), `internal/sandbox/lifecycle_extend_budget_test.go`                                                                            | green, red first: `internal/sandbox/lifecycle_extend_budget_test.go` (3) — gone ⇒ the command stream is EMPTY, the instance is released, and the caller's error carries both "was not started" and "sandbox replaced"; transient ⇒ the operation runs first on the same instance, is not replayed, nothing is released, and the log does not say "gone"; a 30 s operation never asks to extend. **Falsifications run**: drop the classification ⇒ red on the log; drop the early return ⇒ red, "the command was started anyway" (the pre-B5 behaviour)                    | none (the shapes are e2b's; the prod lines are quoted in the code)                                                                                                                                                                       | ❌ (dev ✅) |
 
-> **All four rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
-> (`…-8b63ddf`) and 81–82 with revision 95 (`…-ada56f9`), both `./build-image.sh dev`. The 95
-> rollout is also the A1 probe's third positive reading (below).
+| 83  | **The read-modify-write tools present the copy they read** (③a of §13.2's writer audit): the identity-file branch of `edit_file` / `apply_patch` now goes through `SaveWorkspaceFileIfUnchanged` with the bytes it just read, refusing with "another writer changed … nothing was overwritten" — the same guard their workspace branch has had since `putGuarded`, and the same voice. `write_file` deliberately keeps overwriting ("this file is now this" is its semantics). The port method is one method with two vocabularies: tools check `store.ErrAgentFileConflict`, the distiller checks `agent.ErrMemoryConflict`, and the packages cannot see each other's names (tools ← agent), so the adapter returns a multi-`%w` error that answers both `errors.Is` questions | **F1** (preconditions) + **O1** (a "Edited …" over a version that is gone is a false σ, not a missing nicety) + §13.2 conclusion 1 | `internal/agent/tools/registry.go` (the port), `internal/agent/tools/file.go` (`edit_file`), `internal/agent/tools/apply_patch.go` (both call sites; the host closure stopped discarding the pre-image), `internal/agent/memory_store_adapter.go` (the multi-`%w`), `internal/store/agent_file_version_test.go` (the missing-row-is-a-create pin) | green, red first: `internal/agent/tools/system_file_lost_update_test.go` (5) — a store double lets a competitor land BETWEEN the read and the write: both tools refuse and the competitor's bytes remain; a lone edit still lands; `write_file` still replaces (the boundary, pinned so the guard cannot leak into it); the refusal is identified by value, not by message shape. **Falsifications run**: revert either call site to the unconditional write ⇒ that case reddens with "reported success over somebody else's version" (verbatim: `Edited MEMORY.md (1 replacement(s))` / `U MEMORY.md (1 hunk(s))`) | none (in-process; the store's own create-vs-conflict semantics are pinned in the store package, sqlite + Postgres) | ❌ (dev ✅) |
+
+> **All five rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
+> (`…-8b63ddf`), 81–82 with revision 95 (`…-ada56f9`), and 83 with revision 96
+> (`…-ac662ed`), all `./build-image.sh dev`. The 95 rollout is also the A1 probe's third positive
+> reading (below).
 
 > **The A1 live check, and a finding it turned up.** Row 77's claim ("a goal continuation is
 > budgeted by `cronTimeoutSec`, not the 300 s default") now has a live witness: cloud

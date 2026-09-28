@@ -138,6 +138,10 @@ go test ./internal/sandbox/ -run 'TestALongOperationIsNotStartedOnAnInstanceTheS
 # 第 77 行的真机腿（§13.3）：读 goal 续跑自己那条租约（cloud 仓）
 #   scripts/mcp-goal-budget-live-check.sh   → cronTimeoutSec=3600 时 VERDICT=cron best≈3657
 #                                            设成 300 时 VERDICT=pre-a1 best≈355
+
+# 第 83 行：读-改-写的工具交出它刚读到的那一份
+go test ./internal/agent/tools/ -run 'TestEditFileRefusesAnIdentityFileThatMovedUnderIt|TestEditFileStillLandsWhenNobodyElseWrote|TestApplyPatchRefusesAnIdentityFileThatMovedUnderIt|TestWriteFileStillReplacesAnIdentityFile|TestTheConflictIsIdentifiedByValue' -count=1
+go test ./internal/store/ -run TestSaveAgentFileIfVersionTreatsAMissingRowAsACreate -count=1  # 工具期望依赖的 create-vs-conflict 语义
 ```
 
 ## 7. 没有真机 e2e 的条目，以及为什么
@@ -605,20 +609,19 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 
 1. **"谁拥有"必须先于"怎么合并"**：W3 之所以能删，是因为 identity 文件的写者唯一（商店）。剩下的 W1/W2/W4/W5 之间
    没有这个唯一性，所以它们要的不是更多守卫，而是 **`SaveAgentFile` 的版本前置**（A3 的 belt）：`PutIfVersion`，
-   冲突时**拒绝 + 上报**（同 W3 的 `BLOCKED` 语义，一套规矩）。**这套规矩已落（第 80 行）**，W2——唯一一个
-   "读、决定、整段写回"都发生在 pod 内部的写者——是它的消费者。W1（文件工具）、W4（面板）、W5（CLI）仍列开放，
-   原因不是工作量：**前置条件要求写者手里握着它读到的那份事实**，而这三个把决定交给了别人——模型的内容来自
-   它更早一次 `read_file` 调用（另一个工具调用，没有 token 跨过来），浏览器是先 GET 后 PUT。要给它们前置条件，
-   就得先把版本 token 放上它们的面（工具结果 / HTTP 载荷）再带回来。在那之前它们的写是**替换**，而替换正是它们
-   的本意：`write_file` 说的是"MEMORY.md 现在是这个"。所以今天还可能丢一次真实更新的组合是**两个替换相撞**，
-   不是"替换 vs 蒸馏"。
+   冲突时**拒绝 + 上报**（同 W3 的 `BLOCKED` 语义，一套规矩）。**这套规矩已落（第 80 行）**，W2（"读、决定、
+   整段写回"都发生在 pod 内部）是它的第一个消费者；**W1 的读-改-写那半也在同一条规矩上落了（第 83 行）**——
+   `edit_file` / `apply_patch` 在自己这次调用里就读过文件，那份事实本来就在它手里，不需要任何面向模型的载荷。
+   仍列开放的是真正属于别人的那部分：`write_file`（**替换**——"MEMORY.md 现在是这个"就是它的承诺，给它加守卫
+   等于拒绝它唯一提供的东西）、W4 面板（浏览器先 GET 后 PUT，token 得走 HTTP 载荷）、W5 CLI。今天还可能丢一次
+   真实更新的组合仍是**两个替换相撞**；对面板来说那是一次**人**的动作，不是 F1 关心的静默交错。
 2. **读取兜底里仍有一个无作用域的家**（`systemRoot/MEMORY.md`）：它不属于 (agent,user)，只能靠"owner 才准读"这一条
    补丁把访客挡在外面——真正的修法是让它退休（或明确迁移），否则"同一事实两个表达"会以第五种形式复现。
 
 **本节要的那条见证就是第 80 行**：给 W1/W2 补一条丢失更新的用例——两个写者对同一 `(agent,user,MEMORY.md)`
 交错写入，**第二个必须被拒绝**（不是被合并）；反证＝去掉版本前置 ⇒ 第一份内容被静默覆盖。
 
-### 13.3 四行：把本趟留下的口子收掉（第 79–82 行）
+### 13.3 五行：把本趟留下的口子收掉（第 79–83 行）
 
 第 79 行是同一批取证里"噪音信号"的那一半（一个 prod 日志窗口里 5 条 `context canceled` 的 WARN，背后没有
 任何存储事故）。第 80 行是 §13.2 的 belt，连同**唯一能握住那个 token 的写者**一起落。
@@ -642,8 +645,10 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 | 81  | **回合已经结束，就别去取那份 parked 信号**：`takeSignals` 在 ctx 已结束时直接返回。note 一点没丢——`TakeSignals` 只在**读成功之后**才消费（删除失败时反而把文本照样返回）——所以没有读者的这一轮把它留给下一轮，而不是白花一次注定被取消的往返、再挂一条读起来像存储故障的 WARN。prod 2026-09-28 那一条正是这个形状（`error="context canceled"`），与第 79 行替 setup 包自己的读取消掉的那条同源                                          | **O1/O5** 用在"取信号"这个动作上（一行日志必须携带它点名那件事的事实）                                  | `internal/sandbox/lifecycle.go`（`takeSignals`）                                                                                                             | 先红后绿：`internal/sandbox/signal_carrier_test.go` —— 夹具现在按真实载体的行为尊重 ctx（存储读在删除之前就失败），所以用例同时断言**载体根本没被读**（`takes == 0`）与**事实还在**，再由一次活 ctx 的调用交付并清行。**已实跑的反证**：去掉守卫 ⇒ 红，"the carrier was read with a dead ctx (1 reads)"                                                                                                                    | 无（一条日志规矩；它去掉的那条 prod 行逐字写在代码注释里）                                                                                                                        | ❌（dev ✅） |
 | 82  | **延长失败要说清它是什么，且已死的实例不白花一次长活**：`extendBudget` 用 post-exec 路径已经信过的判据（`UnusableClassifier`）分类——已死那类说**实例**（"the sandbox this scope held is gone; the long operation will not be started on it"），瞬时那类保留老句子——并且**只对其中一类**把错误交给调用方。`execOnce` 于是根本不启动这次操作，把结论交给 `Exec` 既有的替换路径（Release + "sandbox replaced" 那句），重试落在一个新沙箱上。线上证据：4/4 都是 `e2b extend timeout <id> HTTP 404`（实例早已不在），却都被记成"could not extend the sandbox timeout"——一句关于**操作**的话；随后长活照跑在那具尸体上，租约还整段没续 | **F1/F2**（由资源而非调用方裁决；一个事实一种措辞）+ O1                                        | `internal/sandbox/lifecycle.go`（`extendBudget`、`execOnce`）、`internal/sandbox/lifecycle_extend_budget_test.go`                                                 | 先红后绿：`internal/sandbox/lifecycle_extend_budget_test.go`（3 条）——已死 ⇒ 命令流**为空**、实例被释放、调用方的错误同时带 "was not started" 与 "sandbox replaced"；瞬时 ⇒ 操作在同一实例上跑第一个、不重放、什么都没释放、日志不说 "gone"；30 秒的操作根本不会去问延长。**已实跑的反证**：去掉分类 ⇒ 日志那条红；去掉早返回 ⇒ "the command was started anyway"（B5 之前的行为） | 无（形状是 e2b 的；线上那几行原文引在代码里）                                                                                                                                      | ❌（dev ✅） |
 
-> **四行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
-> （`…-ada56f9`），都是 `./build-image.sh dev`。95 这次滚动也顺带给出了 A1 探针的第三次正向读数（见下）。
+| 83  | **读-改-写的工具要交出它刚读到的那一份**（§13.2 写者审计的 ③a）：`edit_file` / `apply_patch` 的 identity 文件分支改走 `SaveWorkspaceFileIfUnchanged`，把它刚读到的字节当 `expected`，冲突时回"another writer changed … nothing was overwritten"——与它们 workspace 分支自 `putGuarded` 起就有的守卫同一套、同一句措辞。`write_file` **有意**保持覆盖（"这个文件现在是这个"就是它的语义）。端口只有一个方法却有两种词汇：工具查 `store.ErrAgentFileConflict`，蒸馏查 `agent.ErrMemoryConflict`，而两个包互相看不到对方的名字（tools ← agent），所以 adapter 返回多 `%w` 的错误，一次写入同时回答两个 `errors.Is` | **F1**（前置条件）+ **O1**（对着一个已经被换掉的版本回 "Edited …" 是假 σ，不是"少一层保险"）+ §13.2 结论 1 | `internal/agent/tools/registry.go`（端口）、`internal/agent/tools/file.go`（`edit_file`）、`internal/agent/tools/apply_patch.go`（两个调用点；宿主侧不再丢弃 pre-image）、`internal/agent/memory_store_adapter.go`（多 `%w`）、`internal/store/agent_file_version_test.go`（"缺行=create"那条语义钉） | 先红后绿：`internal/agent/tools/system_file_lost_update_test.go`（5 条）——夹具让竞争对手**落在读与写之间**：两个工具都拒绝、留下的仍是竞争对手那份；单独一次编辑照常落；`write_file` 仍是替换（边界钉住，防止守卫漏进去）；拒绝是按值识别的，不是按消息形状。**已实跑的反证**：任一把调用点退回无条件写 ⇒ 那条立刻红，报 "reported success over somebody else's version"（原文：`Edited MEMORY.md (1 replacement(s))` / `U MEMORY.md (1 hunk(s))`） | 无（进程内；store 侧的 create-vs-conflict 语义在 store 包里钉着，sqlite + Postgres 两条腿） | ❌（dev ✅） |
+
+> **五行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
+> （`…-ada56f9`），第 83 行随 revision 96（`…-ac662ed`），都是 `./build-image.sh dev`。95 这次滚动也顺带给出了 A1 探针的第三次正向读数（见下）。
 
 > **A1 的真机验证，以及它顺带挖出的一个事实。** 第 77 行那句主张（"goal 的续跑按 `cronTimeoutSec`
 > 计预算，而不是 300s 默认"）现在有了真机见证：cloud 的 `scripts/mcp-goal-budget-live-check.sh` 用一个真客户端
