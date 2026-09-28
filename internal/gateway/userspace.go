@@ -1570,30 +1570,7 @@ func (r *userSpaceRegistry) startEvictor(ctx context.Context) {
 			// The release sweep runs even when the idle TTL is disabled: a
 			// space retired by a config write still owes its clients back.
 			r.releaseRetired()
-			r.sweepStalledGoals(ctx)
 		}
-	}
-}
-
-// goalWatchdogStaleAfter is how long a goal may go untouched before the sweep re-fires its
-// continuation. Ten minutes is well past a normal turn's cadence (production goal turns ran
-// 2–3 minutes apart) and well short of the 86 minutes of silence the first stall cost.
-const goalWatchdogStaleAfter = 10 * time.Minute
-
-// sweepStalledGoals gives every live user space one pass of the goal watchdog
-// (agent.Manager.SweepStalledGoals): a goal whose chain went quiet — a killed pod, a lost event, a
-// failed state write — gets its next continuation without waiting for the user to type something.
-func (r *userSpaceRegistry) sweepStalledGoals(ctx context.Context) {
-	r.mu.RLock()
-	spaces := make([]*UserSpace, 0, len(r.spaces))
-	for _, e := range r.spaces {
-		if e.space != nil && e.space.Agents != nil {
-			spaces = append(spaces, e.space)
-		}
-	}
-	r.mu.RUnlock()
-	for _, sp := range spaces {
-		sp.Agents.SweepStalledGoals(ctx, goalWatchdogStaleAfter)
 	}
 }
 

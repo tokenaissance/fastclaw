@@ -2,7 +2,6 @@ package goal
 
 import (
 	"context"
-	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
@@ -29,9 +28,4 @@ type Store interface {
 	GetGoalBySession(ctx context.Context, agentID, sessionKey string) (*Goal, error)
 	UpdateGoal(ctx context.Context, g *Goal) error
 	DeleteGoal(ctx context.Context, goalID string) error
-	// ListStaleActiveGoals returns the active goals nobody has touched since `before`. The reader
-	// is the goal watchdog (Manager.SweepStalledGoals): a goal's chain is held together by
-	// PostTurn hooks, so anything that keeps one from firing leaves the row active with nobody
-	// scheduled to move it.
-	ListStaleActiveGoals(ctx context.Context, before time.Time) ([]*Goal, error)
 }

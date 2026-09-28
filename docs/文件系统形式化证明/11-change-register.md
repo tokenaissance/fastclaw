@@ -557,6 +557,12 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 | 77  | **goal 复用 cron 的预算设置项**：`taskTimeoutFor` 对 `SourceGoalContext` 与 `SourceCron` 一视同仁（`TaskQueueCfg.CronTimeoutSec`）。线上证据：goal 回合 `duration_ms=300002/300006/300418/301184`，而 cron 本来就能特批 | **P5 / F2**（同一个"长活"概念不该有两个口径）                                 | `internal/gateway/gateway.go`（`taskTimeoutFor` 的 switch）                                                                                                        | green：`TestTaskTimeoutForSourcePolicy`（goal ⇒ 配置值；未配置 ⇒ 队列默认）；**反证跑过**：恢复"只特批 cron" ⇒ goal 那条读到 0                                                                                                  | 无（**prod 还需要把 `cronTimeoutSec` 配成一个非零值**，否则仍是 300s）                                        | ❌（工作区） |
 | 78  | **失败收尾也要跑 PostTurn 钩子**（`Agent.afterFailedTurn`，内部 `recordCtx` 5s）：goal 的续跑就是 PostTurn 钩子，跑干净的收尾才触发它——所以一次 provider 错误就能把链断掉，goal 留在 `active` 无人推动。**被停/被顶掉不触发**（那两个决定刚发生过，不该被推翻） | **O9′**（投递点必须存在）+ 线上取证结论                                       | `internal/agent/loop.go`（三个错误返回点 + `afterFailedTurn`）                                                                                                     | green：`TestAFailedTurnStillFiresTheGoalContinuation`（provider 缺失 / provider 以 `context.DeadlineExceeded` 失败 ⇒ 总线仍收到 `goal_context`）；**反证跑过**：去掉三处调用 ⇒ 两条子用例都报"no continuation"（正是线上症状） | 无（等发布）                                                                                                  | ❌（工作区） |
 
-| 79  | **goal 看门狗**：active 且 `updated_at` 已陈旧（>10 分钟）的 goal，若其 agent 没有回合在飞，就补发一条 continuation。链因此"不管断在哪儿都会自愈"——pod 被杀、事件丢、状态写入失败都算 | **O9′**（投递点必须存在）+ §13.1 的结论                                              | `internal/store/database.go`（`ListStaleActiveGoals`）、`internal/agent/manager.go`（`SweepStalledGoals`，manager 现在保留 messageBus）、`internal/gateway/userspace.go`（挂在既有的 evictor ticker 上，逐 live space 扫） | green：`TestTheGoalWatchdogRefiresAStalledGoal` 两条子用例——①停滞的 goal 被补发（>10 分钟规则的等价物用负阈值触发，不真等）、②**agent 有回合在飞时绝不补发**；**反证跑过**：把 `SweepStalledGoals` 变空操作 ⇒ ①红；去掉 `TurnInFlight` 守卫 ⇒ ②红（补发撞进一个正在跑的会话） | 无（等 dev/prod 发布后的日志 `goal watchdog: re-firing a stalled continuation`） | ❌（工作区） |
-
-> **随那个 parked 分支一起丢掉、但以"重开条件"留档的一个想法**：45m → 24h 的回合预算改动被丢弃（线上证明真正卡住的是队列的 300s，见第 77 行）。它有一半值得记下来：**租约的陈旧上界不该跟着回合预算走**。`defaultTurnLeaseTTLFor` 从调用方的 deadline 推导 τ，所以把预算提到 24h 就等于让**死掉的持有者**把会话锁一天；而活着的持有者会续租（TTL/3），给 τ 加一个上限对长回合毫无代价。**下次有人再抬 `agentTurnTimeout` 时重开**：改法是 `internal/agent/turnlease.go` 里 `min(deadline+grace, cap)`，cap 取"大家愿意接受的最长陈旧时间"。
+> **一项"建了又撤回"的改动，写在这里以免下一个人重建它**：**goal 看门狗**（active + 会话空闲 N 分钟 ⇒ 补发 continuation）
+> 曾落地（`9d7ead1`：`ListStaleActiveGoals` + `Manager.SweepStalledGoals` + 挂在 evictor ticker），
+> 用户裁决**撤回**——第 78 行（失败收尾也跑 PostTurn 钩子）已经把**观察到的**断链原因堵住，看门狗属于为未证实的
+> 场景加机制（Musk 第 2 步：先删）。**残余缺口的声明**：链被"pod 被杀 / 事件丢 / 状态写入失败"打断时，仍然只能等
+> 一次真人回合——这是**已知且接受**的边界，不是漏做；真出现再按上面的形状重建（那三块可以照抄）。
+>
+> **另一件随撤回保留的东西**：看门狗那批发时我记录过一个**重开条件**——*租约的陈旧上界不该跟着回合预算走*。
+> `defaultTurnLeaseTTLFor` 从调用方 deadline 推导 τ：预算一旦抬到 24h，死掉的持有者就能把会话锁一天。活着的持有者会续租
+> （TTL/3），所以给 τ 加 `min(deadline+grace, cap)` 对长回合零代价。**下次有人再抬 `agentTurnTimeout` 时重开。**

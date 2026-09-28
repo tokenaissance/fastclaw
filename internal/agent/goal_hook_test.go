@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
@@ -55,20 +54,6 @@ func (m *memGoalStore) UpdateGoal(_ context.Context, g *goal.Goal) error {
 	m.row = &clone
 	return nil
 }
-
-// ListStaleActiveGoals is the watchdog's read. The fixture keeps one row, so "stale" here just
-// means "it exists, it is active, and the caller's clock says look" — the real staleness rule is
-// the store's query and the sweep's own guard (see goal_watchdog_test.go).
-func (m *memGoalStore) ListStaleActiveGoals(_ context.Context, before time.Time) ([]*goal.Goal, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.row == nil || m.row.Status != goal.StatusActive || !m.row.UpdatedAt.Before(before) {
-		return nil, nil
-	}
-	clone := *m.row
-	return []*goal.Goal{&clone}, nil
-}
-
 func (m *memGoalStore) DeleteGoal(_ context.Context, goalID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

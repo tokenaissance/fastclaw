@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 )
@@ -63,11 +62,6 @@ func (m *memStore) UpdateGoal(_ context.Context, g *Goal) error {
 }
 
 func (m *memStore) DeleteGoal(_ context.Context, _ string) error { return nil }
-
-// ListStaleActiveGoals is the watchdog's read. This fixture never reports a stale goal: the
-// continuation gate it exercises is reached through PostTurn, and the sweep has its own fixture in
-// internal/agent (goal_watchdog_test.go).
-func (m *memStore) ListStaleActiveGoals(context.Context, time.Time) ([]*Goal, error) { return nil, nil }
 
 func seedActive(t *testing.T, st *memStore) *Goal {
 	t.Helper()

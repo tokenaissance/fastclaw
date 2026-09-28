@@ -5752,34 +5752,6 @@ func (d *DBStore) GetGoalBySession(ctx context.Context, agentID, sessionKey stri
 	return scanGoal(row)
 }
 
-// ListStaleActiveGoals returns the active goals nobody has touched since `before`. It is the
-// query behind the goal watchdog (internal/agent: Manager.SweepStalledGoals): a goal's chain is
-// held together by PostTurn hooks, so anything that keeps a hook from firing — a killed pod, a
-// lost event, an error exit before this change — leaves the row `active` with nobody scheduled to
-// move it. `updated_at` is the progress clock: the token-accounting hook stamps it on every model
-// call, so a stale row really does mean "nothing is happening".
-func (d *DBStore) ListStaleActiveGoals(ctx context.Context, before time.Time) ([]*GoalRecord, error) {
-	rows, err := d.handle().QueryContext(ctx,
-		fmt.Sprintf(`SELECT `+goalSelectCols+` FROM agent_goals
-			WHERE status = %s AND updated_at < %s
-			ORDER BY updated_at ASC`,
-			d.ph(1), d.ph(2)),
-		"active", before.UTC())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*GoalRecord
-	for rows.Next() {
-		g, err := scanGoal(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, g)
-	}
-	return out, rows.Err()
-}
-
 func (d *DBStore) UpdateGoal(ctx context.Context, g *GoalRecord) error {
 	if g.ID == "" {
 		return errors.New("store: goal.id is required for UpdateGoal")
@@ -5809,11 +5781,7 @@ func (d *DBStore) DeleteGoal(ctx context.Context, goalID string) error {
 
 // scanGoal reads one row (from QueryRow) into a GoalRecord. Returns
 // ErrNotFound (via scanErr) when the query matched nothing.
-// goalScanner is what scanning one goal row needs: `*sql.Row` for a point read, `*sql.Rows` for a
-// listing. One scanner, so the column order lives in exactly one place.
-type goalScanner interface{ Scan(dest ...any) error }
-
-func scanGoal(row goalScanner) (*GoalRecord, error) {
+func scanGoal(row *sql.Row) (*GoalRecord, error) {
 	var g GoalRecord
 	var tokenBudget sql.NullInt64
 	if err := row.Scan(&g.ID, &g.AgentID, &g.SessionKey, &g.OwnerUserID,
