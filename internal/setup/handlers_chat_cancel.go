@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // pendingWebTurn is a dashboard chat POST that has been accepted but whose turn
@@ -18,6 +19,12 @@ import (
 type pendingWebTurn struct {
 	cancel  context.CancelFunc
 	started bool
+	// seq is the order this submission was ACCEPTED in. The map has no order of its own, and "the
+	// earliest queued instruction" is a contract (§14.2's withdraw_task), so the registration assigns
+	// one. It is a per-process counter on purpose: this queue's lifetime is the process (path 1 gave the
+	// entry the wait's lifetime; a pod restart or a hand-off still loses it, and that boundary is
+	// declared rather than papered over — see docs/mcp-task-submission.md §14.6).
+	seq int64
 }
 
 // chatTurnKey identifies one client's chat POST. turnID is chosen by the
@@ -27,14 +34,44 @@ func chatTurnKey(uid, agentID, sessionID, turnID string) string {
 }
 
 func (s *Server) registerPendingTurn(key string, cancel context.CancelFunc) *pendingWebTurn {
-	turn := &pendingWebTurn{cancel: cancel}
 	s.pendingTurnsMu.Lock()
 	defer s.pendingTurnsMu.Unlock()
 	if s.pendingTurns == nil {
 		s.pendingTurns = make(map[string]*pendingWebTurn)
 	}
+	s.pendingSeq++
+	turn := &pendingWebTurn{cancel: cancel, seq: s.pendingSeq}
 	s.pendingTurns[key] = turn
 	return turn
+}
+
+// withdrawEarliestPendingTurn cancels the OLDEST queued submission for this (user, agent, session) and
+// names it. One map, one lock: the scan is over that session's entries only, and the seq assigned at
+// registration is what makes "earliest" decidable — a map iteration order would make it arbitrarily
+// whichever entry the runtime happened to visit first.
+//
+// What it deliberately does NOT do: report the withdrawn instruction's text or its position. Neither
+// lives in the pending entry (the text never reached this layer, and the position is a live count the
+// emitter owns), so the answer names the submission and nothing else rather than inventing the rest.
+func (s *Server) withdrawEarliestPendingTurn(uid, agentID, sessionID string) (string, bool) {
+	s.pendingTurnsMu.Lock()
+	defer s.pendingTurnsMu.Unlock()
+	prefix := uid + "|" + agentID + "|" + sessionID + "|"
+	var best *pendingWebTurn
+	var bestTurnID string
+	for key, turn := range s.pendingTurns {
+		if turn.started || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if best == nil || turn.seq < best.seq {
+			best, bestTurnID = turn, strings.TrimPrefix(key, prefix)
+		}
+	}
+	if best == nil {
+		return "", false
+	}
+	best.cancel()
+	return bestTurnID, true
 }
 
 func (s *Server) unregisterPendingTurn(key string) {
@@ -57,6 +94,11 @@ type chatCancelRequest struct {
 	AgentID   string `json:"agentId"`
 	SessionID string `json:"sessionId"`
 	TurnID    string `json:"turnId"`
+	// WithdrawEarliest asks for the OTHER operation this endpoint answers (§14.2's withdraw_task):
+	// cancel the oldest still-queued submission of the session, not the running turn. It is an explicit
+	// field rather than "an empty turnId means withdraw" because an empty turnId already means "stop
+	// whatever is running" to the dashboard's Stop path — measured, and load-bearing.
+	WithdrawEarliest bool `json:"withdrawEarliest,omitempty"`
 }
 
 // handleChatCancel stops a turn the user no longer wants.
@@ -90,6 +132,15 @@ func (s *Server) handleChatCancel(w http.ResponseWriter, r *http.Request) {
 	uid := s.effectiveUserID(r)
 	if uid == "" {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+
+	if req.WithdrawEarliest {
+		turnID, withdrawn := s.withdrawEarliestPendingTurn(uid, ag.Name(), req.SessionID)
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"withdrawn": withdrawn,
+			"turnId":    turnID,
+		})
 		return
 	}
 

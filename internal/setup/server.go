@@ -96,6 +96,9 @@ type Server struct {
 	// handlers_chat_cancel.go.
 	pendingTurnsMu sync.Mutex
 	pendingTurns   map[string]*pendingWebTurn
+	// pendingSeq numbers submissions in acceptance order, which is the only order this queue has
+	// (see pendingWebTurn.seq).
+	pendingSeq int64
 	// runtimeMgr powers the coding-agent project runtime (live dev server
 	// + preview). Optional: nil when the deployment hasn't wired a
 	// sandbox-backed runtime, in which case the /runtime endpoints return
