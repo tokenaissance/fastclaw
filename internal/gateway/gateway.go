@@ -276,15 +276,24 @@ func (g *Gateway) submitTask(agentName, chatKey string, msg bus.InboundMessage, 
 }
 
 // taskTimeoutFor resolves the turn budget for one inbound message. Zero means
-// "queue default"; only cron ticks can currently differ, and only when the
-// operator set TaskQueueCfg.CronTimeoutSec.
+// "queue default"; the autonomous sources that are deliberately long — cron ticks and goal
+// continuations — can differ, and only when the operator set TaskQueueCfg.CronTimeoutSec.
 //
-// Why cron alone: an interactive reply that outlives the default budget is a
-// wedged turn the user should be told about, while a scheduled tick is often
-// deliberately long agent work. Web turns never reach the queue — the dashboard
+// Why only those two: an interactive reply that outlives the default budget is a wedged turn the
+// user should be told about, while a scheduled tick (or a goal the user asked to run until it is
+// done) is often deliberately long agent work. Web turns never reach the queue — the dashboard
 // handler carries its own 45-minute budget.
 func (g *Gateway) taskTimeoutFor(msg bus.InboundMessage) time.Duration {
-	if msg.Source == bus.SourceCron {
+	// Autonomous work that is DELIBERATELY long shares one budget knob with cron: a goal
+	// continuation is the same kind of work as a scheduled tick — the agent runs a long job on its
+	// own — and the 300 s default is a guard for INTERACTIVE turns ("a reply that outlives it is a
+	// wedged turn the user should be told about"), not a budget for work nobody is waiting on.
+	//
+	// Measured 2026-09-28 on production: a goal turn was cut at exactly 300 s, its terminal events
+	// could not be persisted, and the goal sat `active` for 86 minutes until the user typed
+	// "continue". The user's ruling: reuse the cron setting rather than invent a second one.
+	switch msg.Source {
+	case bus.SourceCron, bus.SourceGoalContext:
 		if ns := g.cronTaskTimeoutNs.Load(); ns > 0 {
 			return time.Duration(ns)
 		}

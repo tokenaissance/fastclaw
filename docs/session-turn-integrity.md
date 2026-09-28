@@ -2245,3 +2245,42 @@ path exists that A1 does not already serialise.
 **No code before step 0 is complete**: design first, then implement in this
 order — the order is the Musk gate's output (delete the second writer, simplify
 the vocabulary, and only then add surface).
+
+## The four lifetimes of a context (2026-09-28, from production forensics)
+
+A turn lives inside several clocks, and every one of them is spelled "timeout". The choice between
+them is a choice about **who is allowed to make a write fail**, so the code now names the two kinds
+at the call site (`internal/agent/ctxkind.go`) instead of leaving the choice implicit:
+
+| Lifetime | Who creates it | Ends when | What it is for |
+|---|---|---|---|
+| **client** | `r.Context()` (net/http) | the response finishes or the client goes away | noticing that nobody is listening |
+| **work** | the turn: `WithTimeout(WithoutCancel(r.Context()), agentTurnTimeout)` (`internal/setup/handlers.go`); the queue's per-task budget (`Gateway.taskTimeoutFor`) | the turn ends, the ceiling fires, or the queue budget expires (300 s by default) | bounding model and tool calls — being cut off here is the *point* |
+| **record** | `recordCtx(ctx, budget)` = `WithTimeout(WithoutCancel(ctx), budget)`; `session.Manager.ctx()` = `Background` + values | its own short budget (3 s events, 5 s PostTurn hooks), or never (session writes) | writing down what happened |
+
+Three manipulations look alike and are not:
+
+- `ctx` — inherits the parent's death.
+- `WithoutCancel(ctx)` — keeps the values, drops **both** cancellation and the deadline; the result
+  is unbounded unless something else bounds it.
+- `recordCtx(ctx, d)` — `WithoutCancel` **plus** its own bound: that is the shape a fact needs.
+
+Two subtler cases worth naming, because they are where "which ctx?" gets answered wrong:
+
+- **A tool's grace context is unbounded on purpose, and carries the turn's deadline as a *value*
+  (`withTurnDeadline`)** — `delegate_task` has to *know* when the turn ends without being *killed*
+  at that instant. Knowing a deadline and being governed by it are different things.
+- **A failure path is where the turn's ctx is most likely already dead** — the failure IS the
+  deadline. Anything a reader needs (the `error`/`done` events, the goal's token accounting, the
+  goal continuation decision) must therefore run on `recordCtx`, not on the ctx that just expired.
+
+**Measured, 2026-09-28** (production, session `PAdDjGNT5Xy2bv12nSmxIp`): two goal turns were cut at
+the queue's 300 s budget, and `persist chat event failed … context deadline exceeded` swallowed both
+the `error` and the `done` — the transcript showed a turn that simply stopped, and the goal sat
+`active` for 86 minutes because the failure exit also skipped the PostTurn hook that would have
+published its next continuation. The three fixes: events appended through `recordCtx`; the goal's
+budget taken from the same setting cron uses (`TaskQueueCfg.CronTimeoutSec`, i.e. the
+`cronTimeoutSec` field of the task-queue settings); failed turns run their
+PostTurn hooks through `recordCtx` (`Agent.afterFailedTurn`) — while a **stopped or superseded**
+turn deliberately does not, because a stop is the user's decision and a supersede means another
+holder owns the session.
