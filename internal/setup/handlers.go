@@ -1040,14 +1040,16 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 type chatRequest struct {
 	AgentID   string `json:"agentId,omitempty"`
 	SessionID string `json:"sessionId"`
-	// TurnID used to be this submission's identity; since 2026-09-28 the identity is
-	// minted here (internal/agent/turn_id.go), so the field is accepted and IGNORED —
-	// old callers keep working, and their string buys nothing. It becomes the dedupe
-	// key's legacy spelling (`idempotencyKey`) in the same commit that adds the store
-	// enforcing it (§3.1 of docs/fastagent/design/14-turn-identity.md): a field read
-	// into no decision is a promise with no witness, which is what this roster deletes.
-	// Delete it once no caller sends it.
+	// TurnID is the LEGACY spelling of IdempotencyKey. It used to be this submission's
+	// identity; since 2026-09-28 the identity is minted here (internal/agent/turn_id.go),
+	// and the caller's string is de-duplication input only — see idempotencyKeyOf.
+	// Delete this field once no caller sends it.
 	TurnID string `json:"turnId,omitempty"`
+	// IdempotencyKey names ONE instruction so a retry of it does not become a second one
+	// (docs/fastagent/design/14-turn-identity.md §3.1). Same key + same content ⇒ the first
+	// submission stands; same key + different content ⇒ refused; appending a NEW instruction
+	// means choosing a NEW key.
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 	// ProjectID, when non-empty AND the session row doesn't yet exist,
 	// is the "this chat belongs to project X" hint the URL carries
 	// (`?project=<pid>`) before the first message. Once the row exists
@@ -1229,7 +1231,33 @@ func (s *Server) handleChatSteer(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "empty message"})
 		return
 	}
+	// The same de-duplication as a submission, in its own verb domain: a retried steer must
+	// fold the sentence once, and a steer with the same key but different words is a caller
+	// error rather than a silent second fold (§3.1).
+	dupKey := idempotencyKeyOf(req)
+	dupScope := ""
+	dupDigest := ""
+	if dupKey != "" {
+		uid := s.effectiveUserID(r)
+		dupScope = idempotencyScopeKey("steer", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
+		dupDigest = instructionDigest([]string{req.Message})
+		switch verdict, _ := s.idempotencyVerdictFor(dupScope, dupDigest); verdict {
+		case idempotencyConflict:
+			jsonResponse(w, http.StatusConflict, map[string]any{
+				"error": "idempotency_conflict",
+				"message": "this idempotencyKey was already used with different content; " +
+					"a new instruction needs a new key",
+			})
+			return
+		case idempotencyDuplicate:
+			jsonResponse(w, http.StatusOK, map[string]any{"buffered": true, "duplicate": true})
+			return
+		}
+	}
 	if ag.SteerWeb(req.SessionID, req.ProjectID, req.Message) {
+		if dupScope != "" {
+			s.rememberIdempotency(dupScope, dupDigest, "")
+		}
 		jsonResponse(w, http.StatusOK, map[string]any{"buffered": true})
 		return
 	}
@@ -1267,6 +1295,45 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
+
+	// De-duplication runs BEFORE the response is committed, because one of its two outcomes is
+	// a 409 and a stream that has already been flushed as 200 cannot say so. The check and the
+	// registration further down are one acceptance, not two steps with a window between them
+	// (§3.1 item 7, §3.2). The digest is over the normalized payload — body + attachment names
+	// and URLs — never over raw JSON: a retry that differs only in framing is a retry
+	// (§3.1 item 5).
+	dupKey := idempotencyKeyOf(req)
+	dupScope := ""
+	dupDigest := ""
+	if dupKey != "" {
+		parts := []string{req.Message}
+		for _, a := range req.allAttachments() {
+			parts = append(parts, a.Name, a.URL)
+		}
+		dupScope = idempotencyScopeKey("run", uid, ag.Name(), req.SessionID, clientIdentityOf(r), dupKey)
+		dupDigest = instructionDigest(parts)
+		switch verdict, firstTurnID := s.idempotencyVerdictFor(dupScope, dupDigest); verdict {
+		case idempotencyConflict:
+			jsonResponse(w, http.StatusConflict, map[string]any{
+				"error": "idempotency_conflict",
+				"message": "this idempotencyKey was already used with different content; " +
+					"a new instruction needs a new key",
+			})
+			return
+		case idempotencyDuplicate:
+			// The first submission stands and this call creates nothing. The answer names it —
+			// in the stream's own shape, so a client that parses SSE can read it like any other
+			// event — and the caller can go read the turn it already has.
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			forwardSyntheticEvent(w, flusher, agent.ChatEvent{
+				Type: "duplicate",
+				Data: map[string]any{"turnId": firstTurnID},
+			})
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1333,6 +1400,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// messages — see internal/agent/turn_id.go for why that half was removed.
 	turnID := agent.MintTurnID()
 	agentCtx = agent.ContextWithTurnID(agentCtx, turnID)
+	// Remembered in the same breath as the mint, before the turn's goroutine exists: a retry
+	// that arrives while this one is starting must find the entry, not a gap.
+	if dupScope != "" {
+		s.rememberIdempotency(dupScope, dupDigest, turnID)
+	}
 	// admissionStarted closes when the agent holds the session's turn slot;
 	// until then this turn is still queued and may be withdrawn.
 	agentCtx, admissionStarted := agent.WithAdmissionSignal(agentCtx)
