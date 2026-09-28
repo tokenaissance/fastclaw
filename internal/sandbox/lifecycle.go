@@ -68,6 +68,9 @@ type LifecyclePool struct {
 	// flush + release paths can talk to the right workspace scope without
 	// re-parsing the key.
 	scopes map[string]sandboxScope
+	// storeOwned answers "does the store own the writes to this path?" (SetStoreOwnedPaths). The
+	// reconcile delivers these into the sandbox but never collects them back.
+	storeOwned func(string) bool
 	// signals is where a delta waits when it is produced while nobody is
 	// reading — the idle-eviction sync. It is a PORT, not a field: the durable
 	// implementation lives outside this package, because an in-process queue
@@ -295,6 +298,19 @@ type SignalStore interface {
 // SetSignalStore wires the durable carrier. Nil is allowed: the pool then logs
 // what it would have carried (see parkSignal) instead of pretending.
 func (p *LifecyclePool) SetSignalStore(s SignalStore) { p.signals = s }
+
+// SetStoreOwnedPaths names the paths whose WRITES belong to the store, not to the sandbox: they
+// are delivered into the sandbox for reading, and the reconcile must never collect them back.
+//
+// Why this exists (2026-09-28 forensics): the identity files (SOUL/IDENTITY/MEMORY/USER/… — see
+// tools.IsIdentityFile) have exactly one writer in the store, but the sandbox also holds a
+// delivered copy. The reconcile compared the two, found them different as soon as the store had
+// moved, and refused with `BLOCKED` — 268 times on `MEMORY.md` in a single production session.
+// Refusing is right when both sides are legitimate writers; here there is only one, so the second
+// expression is deleted instead of guarded.
+func (p *LifecyclePool) SetStoreOwnedPaths(isStoreOwned func(string) bool) {
+	p.storeOwned = isStoreOwned
+}
 
 // workspaceAware is implemented by inner pools that fold workspace
 // hydration into their own create-time bulk upload (so LifecyclePool
@@ -741,6 +757,12 @@ func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Ex
 
 	written := 0
 	for path, data := range files {
+		// A store-owned path is delivered INTO the sandbox and never collected back: the tools
+		// write it through the store, so a copy that differs here is not a conflict to referee —
+		// it is the second expression of one fact, and the store's copy is the one that stands.
+		if p.storeOwned != nil && p.storeOwned(path) {
+			continue
+		}
 		info, statErr := p.workspace.Stat(ctx, ws.agentID, ws.projectID, ws.sessionID, path)
 		switch {
 		case errors.Is(statErr, workspace.ErrNotFound):
