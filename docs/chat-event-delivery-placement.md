@@ -134,6 +134,20 @@ session in two browsers and check that both subscriptions report the same holder
 
 ## 4. What affinity does not cover
 
+**A second consumer of the same mechanism (2026-09-28): `idempotencyKey` checking.**
+`docs/fastagent/design/14-turn-identity.md` §3.1 rules that the de-dupe check must run in the
+**acceptance critical section** and be valid across replicas and restarts, and the user chose
+option (b) — a process-local check — on the explicit condition that session affinity holds:
+the ingress hashes `$arg_sessionId` (§3 of this document), so a client's retry with the same
+session lands on the pod that accepted the first attempt and therefore on the same checker.
+The guarantee that buys is **"at most once per (account, task, authorized client, key) while
+that pod's process lives"** — and it fails exactly on the rows of the table below, in the same
+way and for the same reason as the queue: a rolling deploy, a restart, or a caller the ingress
+cannot pin (no session id, i.e. an empty-session path) turns a retry into a second
+instruction. That boundary is declared in both documents rather than papered over; the upgrade
+path, if affinity ever stops holding, is the store (a table keyed the same way), not a bigger
+map.
+
 | Producer | Covered? | Why |
 |---|---|---|
 | Browser `POST /chat/stream` | ✅ | goes through the proxy with a session id |
