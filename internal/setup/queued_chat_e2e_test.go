@@ -50,6 +50,32 @@ func (r *sseRecorder) seen(substr string) bool {
 	return strings.Contains(r.body.String(), substr)
 }
 
+// snapshot is the body as a string. `seen` is enough for waiting; the identity of a queued
+// submission has to be PARSED out of the σ, which needs the whole body under the same lock.
+func (r *sseRecorder) snapshot() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.body.String()
+}
+
+// queuedTurnID is how a caller learns which submission is waiting: the `queued` σ carries
+// the identity the server minted at acceptance (internal/agent/turn_id.go), and a tab that
+// did not POST has no other way to name it. Tests read it the same way a client does —
+// there is no second channel, which is the point of the invariant.
+func queuedTurnID(t *testing.T, rec *sseRecorder) string {
+	t.Helper()
+	for _, evt := range sseEvents(t, rec.snapshot()) {
+		if evt["type"] != "queued" {
+			continue
+		}
+		data, _ := evt["data"].(map[string]any)
+		if id, _ := data["turnId"].(string); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 // e2eProvider counts the turns that actually reached the model.
 type e2eProvider struct {
 	mu      sync.Mutex
@@ -149,6 +175,8 @@ func TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E(t *testing.T) {
 	}
 
 	rec := newSSERecorder()
+	// The caller's "turn-abc" is now only a dedupe key: it must NOT become the identity, and the
+	// assertion below is what says so (W1). Pass it anyway — an old client does.
 	req := chatStreamRequest(t, chatRequest{AgentID: "agt_e2e", SessionID: "chat-queued", Message: "queued please", TurnID: "turn-abc"})
 	done := make(chan struct{})
 	go func() {
@@ -156,10 +184,10 @@ func TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E(t *testing.T) {
 		s.handleChatStream(rec, req)
 	}()
 
-	// Wait until the handler registered its (still queued) turn.
-	key := chatTurnKey("u_1", "agt_e2e", "chat-queued", "turn-abc")
+	// Wait until the handler registered its (still queued) turn. The test cannot name it in
+	// advance any more — that is the change: the registry key is the id MINTED at acceptance.
 	deadline := time.Now().Add(5 * time.Second)
-	for lookupForTest(s, key) == nil {
+	for len(pendingTurnIDsForTest(s, "u_1", "agt_e2e", "chat-queued")) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("chat POST never registered a pending turn")
 		}
@@ -171,11 +199,21 @@ func TestQueuedChatTurnIsAnnouncedAndWithdrawableE2E(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	minted := queuedTurnID(t, rec)
+	if minted == "" {
+		t.Fatalf("the queued σ carried no turnId; body=%q", rec.snapshot())
+	}
+	if minted == "turn-abc" {
+		t.Fatalf("the surface adopted the caller's string as the identity (%q) — identity is the server's", minted)
+	}
+	if got := pendingTurnIDsForTest(s, "u_1", "agt_e2e", "chat-queued"); len(got) != 1 || got[0] != minted {
+		t.Fatalf("pending registry holds %v; want exactly the minted id %q — the registry key IS the identity (I1)", got, minted)
+	}
 
 	// Withdraw it (the dashboard's Cancel / Edit).
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
-		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-queued","turnId":"turn-abc"}`))
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-queued","turnId":"`+minted+`"}`))
 	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(), auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
 	s.handleChatCancel(cancelRec, cancelReq)
 	if cancelRec.Code != http.StatusOK {
@@ -241,10 +279,15 @@ func TestAQueuedTurnOutlivesItsConnectionE2E(t *testing.T) {
 		t.Fatal("handler did not return after its client went away")
 	}
 
-	// The reloaded tab's Cancel, with the id the σ carried.
+	// The reloaded tab's Cancel, with the id the σ carried — the minted one, not the string
+	// this POST sent ("turn-reload"), which bought nothing.
+	minted := queuedTurnID(t, rec)
+	if minted == "" || minted == "turn-reload" {
+		t.Fatalf("queued σ carried %q; want the server-minted identity", minted)
+	}
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
-		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-reload","turnId":"turn-reload"}`))
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-reload","turnId":"`+minted+`"}`))
 	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(), auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
 	s.handleChatCancel(cancelRec, cancelReq)
 	if cancelRec.Code != http.StatusOK {
@@ -262,7 +305,7 @@ func TestAQueuedTurnOutlivesItsConnectionE2E(t *testing.T) {
 
 	// The withdrawal is real, not just an answer: the entry is released when the turn
 	// goroutine returns, the model is never reached, and the session stays empty.
-	key := chatTurnKey("u_1", "agt_e2e", "chat-reload", "turn-reload")
+	key := chatTurnKey("u_1", "agt_e2e", "chat-reload", minted)
 	released := time.Now().Add(5 * time.Second)
 	for lookupForTest(s, key) != nil {
 		if time.Now().After(released) {
@@ -300,9 +343,8 @@ func TestHistoryAnnouncesTheQueueBehindTheHolderE2E(t *testing.T) {
 		defer close(done)
 		s.handleChatStream(rec, req)
 	}()
-	key := chatTurnKey("u_1", "agt_e2e", "chat-queue-fact", "turn-q")
 	deadline := time.Now().Add(5 * time.Second)
-	for lookupForTest(s, key) == nil || sess.TurnWaiters() == 0 {
+	for len(pendingTurnIDsForTest(s, "u_1", "agt_e2e", "chat-queue-fact")) == 0 || sess.TurnWaiters() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("the submission never became a waiter")
 		}
@@ -332,7 +374,7 @@ func TestHistoryAnnouncesTheQueueBehindTheHolderE2E(t *testing.T) {
 	// documents at length.
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
-		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-queue-fact","turnId":"turn-q"}`))
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-queue-fact","withdrawEarliest":true}`))
 	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(),
 		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
 	s.handleChatCancel(cancelRec, cancelReq)
@@ -342,6 +384,65 @@ func TestHistoryAnnouncesTheQueueBehindTheHolderE2E(t *testing.T) {
 		t.Fatal("the withdrawn submission never returned")
 	}
 	sess.ReleaseTurn()
+}
+
+// A submission that brings NO caller string still gets an identity: the mint is not
+// conditioned on anything the caller supplies. The reversal this pins is "mint only when
+// the client sent an id" — the shape that would leave a caller-less submission unnamed, and
+// the reason W3 exists in docs/fastagent/design/14-turn-identity.md §7. The σ and the bare
+// withdrawal have to name the same submission: two write paths, one identity.
+func TestASubmissionWithNoCallerStringStillHasAnIdentityE2E(t *testing.T) {
+	s, ag, prov := newQueuedChatHarness(t)
+	sess := ag.Sessions().Get("web", "", "chat-noid", "")
+	if !sess.AcquireTurn(context.Background()) {
+		t.Fatal("could not take the turn slot for the test")
+	}
+
+	rec := newSSERecorder()
+	req := chatStreamRequest(t, chatRequest{AgentID: "agt_e2e", SessionID: "chat-noid", Message: "no id from me"})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleChatStream(rec, req)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !rec.seen("queued") {
+		if time.Now().After(deadline) {
+			t.Fatalf("stream never announced the queued turn; body=%q", rec.snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	minted := queuedTurnID(t, rec)
+	if !strings.HasPrefix(minted, "t_") {
+		t.Fatalf("queued σ carried %q; want a minted identity even though the caller sent none", minted)
+	}
+
+	// The bare withdrawal names the submission the σ named — not a second identity for it.
+	cancelRec := httptest.NewRecorder()
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-noid","withdrawEarliest":true}`))
+	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(),
+		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	s.handleChatCancel(cancelRec, cancelReq)
+	var body map[string]any
+	if err := json.Unmarshal(cancelRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode cancel body: %v", err)
+	}
+	if body["withdrawn"] != true || body["turnId"] != minted {
+		t.Fatalf("cancel body = %v; want withdrawn:%q", body, minted)
+	}
+	sess.ReleaseTurn()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the withdrawn submission never returned")
+	}
+	select {
+	case <-prov.started:
+		t.Fatal("withdrawn turn still reached the model")
+	default:
+	}
 }
 
 // Two clients can be queued behind one holder, and the contract for a bare "withdraw the queued one"
@@ -356,7 +457,7 @@ func TestWithdrawEarliestTakesTheOldestQueuedSubmissionE2E(t *testing.T) {
 		t.Fatal("could not take the turn slot for the test")
 	}
 
-	start := func(turnID, message string) chan struct{} {
+	start := func(turnID, message string) (chan struct{}, *sseRecorder) {
 		rec := newSSERecorder()
 		req := chatStreamRequest(t, chatRequest{
 			AgentID: "agt_e2e", SessionID: "chat-earliest", Message: message, TurnID: turnID,
@@ -366,28 +467,40 @@ func TestWithdrawEarliestTakesTheOldestQueuedSubmissionE2E(t *testing.T) {
 			defer close(done)
 			s.handleChatStream(rec, req)
 		}()
-		return done
+		return done, rec
 	}
-	keyA := chatTurnKey("u_1", "agt_e2e", "chat-earliest", "turn-a")
-	keyB := chatTurnKey("u_1", "agt_e2e", "chat-earliest", "turn-b")
-	doneA := start("turn-a", "first queued")
+	doneA, recA := start("turn-a", "first queued")
 	// Acceptance order is what "earliest" means, and it is assigned at REGISTRATION — which happens in
 	// the POST's goroutine, not at the moment the test calls start(). So A must be on the map before B
 	// exists, or the two race and this test would be pinning the scheduler instead of the contract.
 	deadline := time.Now().Add(5 * time.Second)
-	for lookupForTest(s, keyA) == nil {
+	for len(pendingTurnIDsForTest(s, "u_1", "agt_e2e", "chat-earliest")) < 1 {
 		if time.Now().After(deadline) {
 			t.Fatal("the first submission never registered as pending")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	doneB := start("turn-b", "second queued")
-	for lookupForTest(s, keyB) == nil {
+	for queuedTurnID(t, recA) == "" {
+		if time.Now().After(deadline) {
+			t.Fatalf("the first queued σ carried no identity; body=%q", recA.snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mintedA := queuedTurnID(t, recA)
+	doneB, recB := start("turn-b", "second queued")
+	for len(pendingTurnIDsForTest(s, "u_1", "agt_e2e", "chat-earliest")) < 2 {
 		if time.Now().After(deadline) {
 			t.Fatal("the second submission never registered as pending")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	for queuedTurnID(t, recB) == "" {
+		if time.Now().After(deadline) {
+			t.Fatalf("the second queued σ carried no identity; body=%q", recB.snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mintedB := queuedTurnID(t, recB)
 
 	// The bare withdrawal: no turnId, the explicit discriminator instead (an empty turnId already means
 	// "stop the running turn" to the dashboard's Stop path — measured, and load-bearing).
@@ -407,22 +520,23 @@ func TestWithdrawEarliestTakesTheOldestQueuedSubmissionE2E(t *testing.T) {
 	if body["withdrawn"] != true {
 		t.Fatalf("cancel body = %v; want withdrawn:true", body)
 	}
-	if body["turnId"] != "turn-a" {
-		t.Fatalf("withdrew %v; want the EARLIEST (turn-a)", body["turnId"])
+	if body["turnId"] != mintedA {
+		t.Fatalf("withdrew %v; want the EARLIEST (%s)", body["turnId"], mintedA)
 	}
 	select {
 	case <-doneA:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the withdrawn submission never returned")
 	}
-	if lookupForTest(s, keyB) == nil {
+	if len(pendingTurnIDsForTest(s, "u_1", "agt_e2e", "chat-earliest")) != 1 {
 		t.Fatal("the second submission was withdrawn too — only the earliest may be")
 	}
 
-	// The per-id path still works beside it: withdraw B by its own turn id, then let the session go.
+	// The per-id path still works beside it: withdraw B by its own (minted) id, then let the
+	// session go. The caller learned that id from B's σ, which is the only place it appears.
 	cancelRec2 := httptest.NewRecorder()
 	cancelReq2 := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
-		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-earliest","turnId":"turn-b"}`))
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-earliest","turnId":"`+mintedB+`"}`))
 	cancelReq2 = cancelReq2.WithContext(auth.WithIdentity(cancelReq2.Context(),
 		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
 	s.handleChatCancel(cancelRec2, cancelReq2)

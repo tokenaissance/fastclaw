@@ -27,8 +27,10 @@ type pendingWebTurn struct {
 	seq int64
 }
 
-// chatTurnKey identifies one client's chat POST. turnID is chosen by the
-// client so a second tab cannot cancel this tab's queued message by accident.
+// chatTurnKey identifies one chat POST. turnID is the identity the server minted when it
+// accepted the submission (internal/agent/turn_id.go), so a second tab cannot cancel this
+// tab's queued message by accident — and, unlike the string the caller used to supply,
+// two submissions cannot arrive with the same one.
 func chatTurnKey(uid, agentID, sessionID, turnID string) string {
 	return uid + "|" + agentID + "|" + sessionID + "|" + turnID
 }

@@ -1040,11 +1040,13 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 type chatRequest struct {
 	AgentID   string `json:"agentId,omitempty"`
 	SessionID string `json:"sessionId"`
-	// TurnID is a client-generated id for this POST. It keys the pending-turn
-	// registry so the client can withdraw a *queued* turn ("Edit"/"Cancel" on
-	// the queued-message block) without being able to touch another tab's
-	// turn. Optional: when empty, withdrawal is impossible but everything
-	// else behaves the same.
+	// TurnID used to be this submission's identity; since 2026-09-28 the identity is
+	// minted here (internal/agent/turn_id.go), so the field is accepted and IGNORED —
+	// old callers keep working, and their string buys nothing. It becomes the dedupe
+	// key's legacy spelling (`idempotencyKey`) in the same commit that adds the store
+	// enforcing it (§3.1 of docs/fastagent/design/14-turn-identity.md): a field read
+	// into no decision is a promise with no witness, which is what this roster deletes.
+	// Delete it once no caller sends it.
 	TurnID string `json:"turnId,omitempty"`
 	// ProjectID, when non-empty AND the session row doesn't yet exist,
 	// is the "this chat belongs to project X" hint the URL carries
@@ -1322,12 +1324,15 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		turnDeadline = time.Now().Add(agentTurnTimeout)
 	}
 	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
-	// The client's id for this POST rides the context so the code that answers about
-	// this submission can name it: the pending-turn registry (withdrawal of a queued
-	// turn) and the `queued` event (a tab that did not POST learns whose submission is
-	// waiting). It is NOT stored on the messages — see internal/agent/turn_id.go for why
-	// that half was removed.
-	agentCtx = agent.ContextWithTurnID(agentCtx, req.TurnID)
+	// The turn's identity is minted HERE, at acceptance, and it rides the context so the
+	// code that answers about this submission can name it: the pending-turn registry
+	// (withdrawal of a queued turn) and the `queued` event (a tab that did not POST learns
+	// whose submission is waiting). The callers' string — `idempotencyKey`, or `turnId` from
+	// an older client — is a DEDUPE key and never the identity
+	// (docs/fastagent/design/14-turn-identity.md §2, I1/I2). It is NOT stored on the
+	// messages — see internal/agent/turn_id.go for why that half was removed.
+	turnID := agent.MintTurnID()
+	agentCtx = agent.ContextWithTurnID(agentCtx, turnID)
 	// admissionStarted closes when the agent holds the session's turn slot;
 	// until then this turn is still queued and may be withdrawn.
 	agentCtx, admissionStarted := agent.WithAdmissionSignal(agentCtx)
@@ -1357,7 +1362,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		// addressing (affinity decides *which pod*, never *whether the entry is still
 		// there*). Nothing else about the mechanism changes: same key, same cancel
 		// func, same "started" signal.
-		turnKey := chatTurnKey(uid, agentID, req.SessionID, req.TurnID)
+		turnKey := chatTurnKey(uid, agentID, req.SessionID, turnID)
 		s.registerPendingTurn(turnKey, cancel)
 		defer s.unregisterPendingTurn(turnKey)
 		go func() {
