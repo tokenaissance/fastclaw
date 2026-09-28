@@ -223,6 +223,9 @@ type Store interface {
 	AppendSessionEvent(ctx context.Context, userID, agentID, sessionKey, eventType string, data []byte) (int64, error)
 	ListSessionEventsSince(ctx context.Context, userID, agentID, sessionKey string, sinceSeq int64) ([]SessionEventRecord, error)
 	LatestSessionEventSeq(ctx context.Context, userID, agentID, sessionKey string) (int64, error)
+	// LatestSessionEnding is how the session's last turn ended, from the `ending` field the
+	// terminal events carry (internal/agent/endings.go); "" when no turn has stamped one.
+	LatestSessionEnding(ctx context.Context, userID, agentID, sessionKey string) (string, error)
 
 	// --- Agent files ---
 	//

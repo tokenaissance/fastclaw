@@ -1921,6 +1921,12 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 			if seq, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, ag.Name(), sessionID); err == nil {
 				resp["latestEventSeq"] = seq
 			}
+			// How the session's last turn ended, when it ended with a stamp
+			// (internal/agent/endings.go). Absent = no turn has ended with one, which a reader
+			// must treat as "the archive is all there is", never as a guess.
+			if ending, err := s.dataStore.LatestSessionEnding(r.Context(), uid, ag.Name(), sessionID); err == nil && ending != "" {
+				resp["lastEnding"] = ending
+			}
 			// turnActive is the same fact /api/chat/subscribe announces
 			// (docs/session-turn-integrity.md A4.1): a page load must be able to
 			// tell "a turn is running elsewhere" from "this view is stale"

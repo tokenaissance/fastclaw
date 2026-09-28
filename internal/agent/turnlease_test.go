@@ -192,9 +192,16 @@ func TestSupersededTurnStopsAndSignals(t *testing.T) {
 	g.Stop()
 	close(events)
 	var notices []string
+	var endings, reasons []string
 	for evt := range events {
 		if evt.Type != "notice" {
 			continue
+		}
+		if e, _ := evt.Data["ending"].(string); e != "" {
+			endings = append(endings, e)
+		}
+		if r, _ := evt.Data["reason"].(string); r != "" {
+			reasons = append(reasons, r)
 		}
 		if m, _ := evt.Data["message"].(string); m != "" {
 			notices = append(notices, m)
@@ -205,6 +212,15 @@ func TestSupersededTurnStopsAndSignals(t *testing.T) {
 	}
 	if notices[0] != turnSupersededNotice {
 		t.Fatalf("notice = %q, want the superseded wording", notices[0])
+	}
+	// The structured half a task read consumes (docs/mcp-task-submission.md §14.3): the ending,
+	// with the diagnosis kept beside it. Falsification: drop `ending` from the emitter and the
+	// read has only prose to guess from — this assertion says the field is what it reads.
+	// The structured half a task read consumes (docs/mcp-task-submission.md §14.3): the ending,
+	// with the diagnosis kept beside it. Falsification: drop `ending` from the emitter and the
+	// read has only prose to guess from — this assertion says the field is what it reads.
+	if len(endings) != 1 || endings[0] != EndingStopped || reasons[0] != "superseded" {
+		t.Fatalf("notice carried endings=%v reasons=%v; want one stopped/superseded", endings, reasons)
 	}
 	// The stale fence survives the loss: a later append is refused by the store.
 	if sess.Fence() == nil {
@@ -392,9 +408,16 @@ func TestCancelledTurnStopsAndSignalsOnce(t *testing.T) {
 
 	close(events)
 	var notices []string
+	var endings, reasons []string
 	for evt := range events {
 		if evt.Type != lostNoticeEvent {
 			continue
+		}
+		if e, _ := evt.Data["ending"].(string); e != "" {
+			endings = append(endings, e)
+		}
+		if r, _ := evt.Data["reason"].(string); r != "" {
+			reasons = append(reasons, r)
 		}
 		if m, _ := evt.Data["message"].(string); m != "" {
 			notices = append(notices, m)
@@ -405,6 +428,9 @@ func TestCancelledTurnStopsAndSignalsOnce(t *testing.T) {
 	}
 	if notices[0] != turnCancelledNotice {
 		t.Fatalf("notice = %q, want the cancelled wording", notices[0])
+	}
+	if len(endings) != 1 || endings[0] != EndingStopped || reasons[0] != "cancelled" {
+		t.Fatalf("notice carried endings=%v reasons=%v; want one stopped/cancelled", endings, reasons)
 	}
 	if rounds := prov.rounds.Load(); rounds != 1 {
 		t.Fatalf("provider rounds = %d, want 1: round 2 started after the cancel", rounds)
@@ -460,9 +486,13 @@ func TestCancelledTurnStreamsNothingAndSignalsOnce(t *testing.T) {
 
 	close(events)
 	var notices []string
+	var endings []string
 	for evt := range events {
 		if evt.Type != lostNoticeEvent {
 			continue
+		}
+		if e, _ := evt.Data["ending"].(string); e != "" {
+			endings = append(endings, e)
 		}
 		if m, _ := evt.Data["message"].(string); m != "" {
 			notices = append(notices, m)
@@ -473,6 +503,9 @@ func TestCancelledTurnStreamsNothingAndSignalsOnce(t *testing.T) {
 	}
 	if notices[0] != turnCancelledNotice {
 		t.Fatalf("notice = %q, want the cancelled wording", notices[0])
+	}
+	if len(endings) != 1 || endings[0] != EndingStopped {
+		t.Fatalf("endings = %v; want one %q", endings, EndingStopped)
 	}
 	if rounds := prov.rounds.Load(); rounds != 1 {
 		t.Fatalf("provider rounds = %d, want 1: a round started after the cancel", rounds)
