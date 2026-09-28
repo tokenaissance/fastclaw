@@ -24,6 +24,10 @@ func (nopSystemFileStore) SaveWorkspaceFile(context.Context, string, string, str
 	return nil
 }
 
+func (nopSystemFileStore) SaveWorkspaceFileIfUnchanged(context.Context, string, string, string, []byte, string) error {
+	return nil
+}
+
 // prefFixture builds a Registry bound to agent "agent-A" against a real
 // in-memory sqlite store, with set_preference registered exactly as
 // manager.go:239 wires it. The per-turn chatter is set per-test via

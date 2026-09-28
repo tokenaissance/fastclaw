@@ -135,6 +135,36 @@ func TestSaveAgentFileIfVersionTellsAbsentFromEmpty(t *testing.T) {
 	})
 }
 
+// A content expectation against a row that does NOT exist is a CREATE, not a conflict.
+//
+// The tools' read path falls back to the agent's disk copy when the store has no row, so their
+// expectation can be non-empty while the row is absent — and "expected" is only a statement about
+// the row when there is one. This case exists because a hand-written fake in the tools package had
+// the stricter reading, which made a pretend conflict look like a store bug; pinning the real
+// semantics is what tells the two apart.
+func TestSaveAgentFileIfVersionTreatsAMissingRowAsACreate(t *testing.T) {
+	versionDialects(t, func(t *testing.T, db *DBStore) {
+		ctx := context.Background()
+		agent, user := versionScope(t, db)
+		const name = "MEMORY.md"
+
+		// No row, a non-empty expectation (the base came from the disk copy): a create.
+		if err := db.SaveAgentFileIfVersion(ctx, agent, user, name, []byte("from disk + edit"),
+			AgentFileVersion{Content: []byte("from disk")}); err != nil {
+			t.Fatalf("a create carrying a disk-derived expectation was refused: %v", err)
+		}
+		// Now the row exists, so the same expectation is a conflict rather than a second create.
+		if err := db.SaveAgentFileIfVersion(ctx, agent, user, name, []byte("second"),
+			AgentFileVersion{Content: []byte("from disk")}); !errors.Is(err, ErrAgentFileConflict) {
+			t.Fatalf("an existing row was overwritten by a stale expectation: err=%v", err)
+		}
+		got, err := db.GetAgentFileExact(ctx, agent, user, name)
+		if err != nil || string(got) != "from disk + edit" {
+			t.Fatalf("row = %q, %v; want the created content intact", got, err)
+		}
+	})
+}
+
 // The formal claim the SQL is doing the work for: with N writers holding the same
 // expectation, exactly one write lands. On sqlite this is serialized by the
 // database; the Postgres leg (with FASTAGENT_TEST_PG_DSN) is the one where the

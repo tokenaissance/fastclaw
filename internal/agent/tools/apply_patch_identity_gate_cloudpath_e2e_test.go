@@ -84,9 +84,10 @@ func (r *recordingWorkspaceStore) SignedURL(ctx context.Context, agentID, projec
 // the test can prove sandbox-mode apply_patch refuses BEFORE the fork's
 // systemFileStore identity serving is consulted.
 type recordingSystemFileStore struct {
-	getCalls int
-	putCalls int
-	soul     []byte
+	getCalls    int
+	putCalls    int
+	guardedPuts int
+	soul        []byte
 }
 
 func (r *recordingSystemFileStore) GetWorkspaceFile(ctx context.Context, agentID, userID, filename string) ([]byte, error) {
@@ -101,6 +102,14 @@ func (r *recordingSystemFileStore) GetWorkspaceFileExact(ctx context.Context, ag
 	return nil, errors.New("not found")
 }
 func (r *recordingSystemFileStore) SaveWorkspaceFile(ctx context.Context, agentID, userID, filename string, data []byte) error {
+	r.putCalls++
+	return nil
+}
+
+// SaveWorkspaceFileIfUnchanged counts separately, so a test can tell "the tool wrote unconditionally"
+// from "the tool passed the copy it read".
+func (r *recordingSystemFileStore) SaveWorkspaceFileIfUnchanged(ctx context.Context, agentID, userID, filename string, data []byte, expected string) error {
+	r.guardedPuts++
 	r.putCalls++
 	return nil
 }
@@ -152,7 +161,7 @@ func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
 	host := &Registry{workspaceStore: ws, agentID: "agt_1", callerIsAdmin: false}
 	_, err := host.readForPatch(ctx, "SOUL.md")
 	refusalMatches(t, err, "readForPatch(SOUL.md)")
-	if err := host.writeForPatch(ctx, "SOUL.md", "hacked"); err == nil || !strings.Contains(err.Error(), IdentityFileRefusal) {
+	if err := host.writeForPatch(ctx, "SOUL.md", "hacked", ""); err == nil || !strings.Contains(err.Error(), IdentityFileRefusal) {
 		t.Fatalf("writeForPatch(SOUL.md): expected refusal, got %v", err)
 	}
 	if ws.getCalls != 0 || ws.putCalls != 0 {
@@ -163,7 +172,7 @@ func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
 	if got, err := host.readForPatch(ctx, "report.md"); err != nil || got != "report-bytes" {
 		t.Errorf("readForPatch(report.md) = %q, %v; want report-bytes, nil", got, err)
 	}
-	if err := host.writeForPatch(ctx, "report.md", "v2"); err != nil {
+	if err := host.writeForPatch(ctx, "report.md", "v2", "report-bytes"); err != nil {
 		t.Fatalf("writeForPatch(report.md): %v", err)
 	}
 	if ws.getCalls != 1 || ws.putCalls != 1 {
@@ -178,7 +187,7 @@ func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
 	sb := &Registry{workspaceStore: ws, systemFileStore: sfs, agentID: "agt_1", callerIsAdmin: false}
 	_, err = sb.readForPatchSandbox(ctx, ex, "SOUL.md")
 	refusalMatches(t, err, "readForPatchSandbox(SOUL.md)")
-	if err := sb.writeForPatchSandbox(ctx, ex, "SOUL.md", "hacked"); err == nil || !strings.Contains(err.Error(), IdentityFileRefusal) {
+	if err := sb.writeForPatchSandbox(ctx, ex, "SOUL.md", "hacked", ""); err == nil || !strings.Contains(err.Error(), IdentityFileRefusal) {
 		t.Fatalf("writeForPatchSandbox(SOUL.md): expected refusal, got %v", err)
 	}
 	if sfs.getCalls != 0 || sfs.putCalls != 0 {
@@ -193,7 +202,7 @@ func TestApplyPatch_IdentityGate_CloudPathE2E(t *testing.T) {
 	if got, err := sb.readForPatchSandbox(ctx, ex, "report.md"); err != nil || got != "report-bytes" {
 		t.Errorf("readForPatchSandbox(report.md) = %q, %v; want report-bytes, nil", got, err)
 	}
-	if err := sb.writeForPatchSandbox(ctx, ex, "report.md", "v3"); err != nil {
+	if err := sb.writeForPatchSandbox(ctx, ex, "report.md", "v3", "report-bytes"); err != nil {
 		t.Fatalf("writeForPatchSandbox(report.md): %v", err)
 	}
 

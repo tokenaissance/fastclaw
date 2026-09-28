@@ -15,6 +15,7 @@ import (
 
 	"github.com/fastclaw-ai/fastclaw/internal/sandbox"
 	"github.com/fastclaw-ai/fastclaw/internal/skills"
+	"github.com/fastclaw-ai/fastclaw/internal/store"
 )
 
 type readFileArgs struct {
@@ -769,7 +770,15 @@ func makeEditFile(r *Registry) ToolFunc {
 			if err != nil {
 				return "", err
 			}
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, uid, name, []byte(updated)); err != nil {
+			// Conditional on the copy this call just read: the identity files have several writers
+			// (this tool, the distiller, the panel), and a read-modify-write that ignores that
+			// reports "Edited" while somebody else's version is what survives. The workspace path
+			// above has had this guard since putGuarded; this branch is the one that was missing it
+			// (§13.2 / row 83 of docs/fs-formal-proof/11-change-register.md).
+			if err := r.systemFileStore.SaveWorkspaceFileIfUnchanged(ctx, r.agentID, uid, name, []byte(updated), string(data)); err != nil {
+				if errors.Is(err, store.ErrAgentFileConflict) {
+					return "", fmt.Errorf("another writer changed %s while this turn was working; nothing was overwritten — read it again and re-apply your change", args.Path)
+				}
 				return "", fmt.Errorf("system file save: %w", err)
 			}
 			// Same disk-mirror invariant as makeWriteFile so this pod's
