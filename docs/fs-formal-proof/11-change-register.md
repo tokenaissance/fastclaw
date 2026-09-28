@@ -755,6 +755,13 @@ that can hold the token.
 > with revision 97 (`…-0082824`), all `./build-image.sh dev`. The 95 rollout is also the A1 probe's
 > third positive reading (below).
 
+> **One naming decision, recorded so it is not re-litigated (user's ruling, 2026-09-28)**: the
+> over-cap class carries TWO sentinels — `errPayloadOverCap` (the sink's, in `output_clip.go`) and
+> `errSnapshotOverCap` (the boundary's, in `SnapshotWorkspace`) — instead of one. Each name belongs to
+> the layer that decides the fact, and only the boundary name has a reader (`snapshotFailureProblem`).
+> Collapsing them (having `SnapshotWorkspace` wrap `errPayloadOverCap` directly) was on the table and
+> is rejected: it would make a caller that is asking about a snapshot read the word "payload".
+
 > **The A1 live check, and a finding it turned up.** Row 77's claim ("a goal continuation is
 > budgeted by `cronTimeoutSec`, not the 300 s default") now has a live witness: cloud
 > `scripts/mcp-goal-budget-live-check.sh` drives a real client into `start_task(agent, '/goal …')`

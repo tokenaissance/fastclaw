@@ -661,6 +661,12 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 > （`…-ada56f9`），第 83 行随 revision 96（`…-ac662ed`），第 84 行随 revision 97（`…-0082824`），都是 `./build-image.sh dev`。
 > 95 这次滚动也顺带给出了 A1 探针的第三次正向读数（见下）。
 
+> **一处命名裁决，记在这里免得被重新翻案（用户裁决，2026-09-28）**：超上限这一类带**两个**哨兵——
+> `errPayloadOverCap`（sink 的，在 `output_clip.go`）与 `errSnapshotOverCap`（边界的，在 `SnapshotWorkspace`）
+> ——而不是一个。每个名字属于做出那个判断的那一层，而只有边界那个有读者（`snapshotFailureProblem`）。
+> 合并成一个（让 `SnapshotWorkspace` 直接包 `errPayloadOverCap`）曾被摆上桌，**否决**：那会让一个在问
+> "快照"的调用方读到"payload"这个词。
+
 > **A1 的真机验证，以及它顺带挖出的一个事实。** 第 77 行那句主张（"goal 的续跑按 `cronTimeoutSec`
 > 计预算，而不是 300s 默认"）现在有了真机见证：cloud 的 `scripts/mcp-goal-budget-live-check.sh` 用一个真客户端
 > 走进 `start_task(agent, '/goal …')`（slash 处理器会立刻发出第一条 `goal_context` 轮），再读那一轮**自己的租约**。
