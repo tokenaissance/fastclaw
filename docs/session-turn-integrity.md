@@ -432,8 +432,23 @@ connection while the turn is still queued, then cancels with the id the `queued`
 requires `{canceled:true, wasRunning:false}` plus an empty session and a model that was never
 reached. **Falsification run for real**: putting the unregister back in the handler reddens it with
 the exact body the dev check measured — `{"canceled":false,"isRunning":false,"wasRunning":false}`.
-Still open, and not a code question: the two-replica live check, and a fastagent dev redeploy (dev
-still runs the pre-rollback image, so the live symptom is unchanged there until it ships).
+**The two-replica live check landed (2026-09-28).** dev runs two gateway pods, and the same probe that
+walks the MCP task surface (`tokenaissance-cloud` `scripts/mcp-task-live-check.sh`, leg 3) now proves
+the whole claim on real routing:
+
+  queued instruction created by `run_task` (the adapter takes only the acceptance, so its connection is
+  gone before the instruction could start)  →  `read_task` BEFORE the withdrawal answers
+  `{"status":"running","waiting":1}`  →  `withdraw_task` answers
+  `{"withdrawn":true,"turnId":"t_f5e1967c-bf3d-40ce-b04d-9399193e2907"}`  →  the holder finishes and its
+  reply `done-slow` is in the transcript, while the withdrawn instruction has **no reply at all**.
+
+That last clause is the one worth stating: "it had not run yet when it was withdrawn" is what `waiting`
+says, and it is not the claim. The claim is that it **never ran**, which is only checkable after the
+holder answers — and it needs two replicas to mean anything, because the queued entry lives in one
+pod's process while the withdrawal arrives through the edge. (The probe's own first two attempts at
+this check were mine, and were wrong twice: the transcript's field is `text`, not `content`, and "wait
+for an assistant reply" is ambiguous where the first assistant row is a tool-call turn with empty text.
+Both are recorded in the script.)
 
 Not implemented yet: pausing auto-send after an interrupt the way Codex does
 (`suppress_queue_autosend`). We have no "interrupt and keep queued" state —
