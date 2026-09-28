@@ -880,3 +880,67 @@ What stays, and what this leaves open:
   **anything expressible as a measurable property (size, path, time, count) must not be re-expressed
   as an intent class. Intent classes may appear in explanations; they may never appear in a
   criterion (refuse / drop / degrade / pick a side).**
+
+### 13.5 A criterion, learned twice in one pass: never restate a measurable property as an intent class
+
+> **Anything expressible as a measurable property — size, path, time, count — must not be
+> re-expressed as an intent class. An intent class may appear in an explanation; it may never appear
+> in a criterion (refuse / drop / degrade / pick a side).**
+
+Two proposals of mine died on it in this pass, and both died the same way:
+
+| proposal | why it failed the criterion |
+| --- | --- |
+| filter the snapshot by extension (`*.log`) | "is this a log" is an intent class; the real constraint is measurable (the 32 MiB transport cap) and was already expressed by it |
+| tell the model "run logs belong in /tmp" | same class, and worse: `/tmp` is never mirrored and does not survive a sandbox replacement, so the rule's **wrong branch is silent** — a keeper misjudged as a log disappears with nothing said, while the branch it steers away from (/workspace) at least produces a refusal the reader is told about |
+
+The criterion is not "avoid helpful text". It is: **the predicate has to be answerable without knowing
+the goal.** The reconcile can answer "are the bytes equal", "is the size over the cap", "does this
+scope hold the lease" for any file, for anyone; no sentence can answer "did the user mean to keep
+this". Where a class *is* the right shape is an explanation — the cap message names "logs or datasets"
+as a likely cause while its actual criterion is the measurable size — and the same test applies: if the
+class were removed from that sentence, nothing about the behaviour would change.
+
+The rule that follows for this file: when a row's duty is "say what happened", the message may carry
+facts and consequences, never instructions conditioned on a class. Advice that needs a judgment is
+advice the reader must make; writing it down only moves the judgment to whoever wrote the sentence.
+
+### 13.6 The next item, prioritized: attribution (route 3)
+
+Raising this here rather than leaving it in §13.4's prose, because the evidence is no longer a
+hypothesis: the scene produced **one production case per branch**, in the same window.
+
+| branch | case (§13.4) | today | with the record |
+| --- | --- | --- | --- |
+| a store-side write was never mirrored | S3's paper family (`store=29992 > snap=27587`, and the agent's own `KeyError: 'current_pnl'` against the stale copy) | refused forever; the sandbox never receives the newer copy | take the STORE's copy (re-deliver) |
+| only the sandbox has written since the last agreement | `_p11.log` (`store=1459 < snap=2155`), `MEMORY.md` (store frozen at 205,571 while the snapshot takes ~20 sizes) | refused forever; the store never catches up | take the SANDBOX's copy |
+
+**The invariant it adds, and where it lives.** *Every store-side write is either mirrored into the
+sandbox, or recorded as unmirrored — per (scope, path).* The record belongs in the **store**, not in
+pod memory: the reconcile's memory-free posture ("the verdict is a function of the two copies alone")
+exists so that any replica reaches the same answer, and a durable record preserves that while adding
+the one fact the two copies cannot carry. It is the same posture as the delivery stamp
+(`touch -d @…`), which already persists a marker into the sandbox filesystem for exactly this kind of
+reason — route 3 extends the trick to the case the stamp cannot cover.
+
+**Why it needs no clock and no classification.** The decision rule is a boolean, not a comparison of
+times: *an unmirrored store write exists for this path* ⇒ the store's copy is the successor; *none* ⇒
+the only writer since the last agreement was the sandbox ⇒ its copy is. Nothing in it asks what the
+file is, which is what makes it the fix rather than a better guess (and why "newer wins" by mtime is
+rejected: the store's mtime comes from the pod's clock, the sandbox file's from the sandbox's — the
+±1 s slack in `sameVersion` exists precisely because that comparison is not exact).
+
+**Write order** (the part that makes it hold through a crash): record the intent *before* the store
+write → write the store → mirror into the sandbox → **clear the record only on a successful mirror**.
+
+**Witnesses (three, one per branch and one for the quiet case)**: host write + failed mirror ⇒ the
+store's copy wins (today: BLOCKED); sandbox-only change ⇒ the sandbox's copy wins (today: BLOCKED);
+a successful mirror ⇒ no record and the cheap `size+mtime` path unchanged. Falsifications: drop the
+record ⇒ the first two return to BLOCKED; clear the record before the mirror ⇒ a failed mirror becomes
+a lost store write (the 2026-09-17 incident's shape, this time as a *decidable* wrong answer).
+
+**Cost, stated plainly**: a new durable fact, and every store-side writer (the file tools, the panel,
+uploads, a peer pod's sync) has to maintain the invariant — that is where the work is, not in the
+reconcile. Until it lands, the class stays: the BLOCKED line reports the fact (§13.3's rows 79–86 are
+unchanged by this), and the only exits remain the deliberate ones — one version written back, or the
+path removed.
