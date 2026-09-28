@@ -103,6 +103,13 @@ type Server struct {
 	// pendingSeq numbers submissions in acceptance order, which is the only order this queue has
 	// (see pendingWebTurn.seq).
 	pendingSeq int64
+	// idempotency holds the de-duplication keys this pod has accepted, so a retry of one
+	// instruction by one client does not become two. Process-local BY CHOICE
+	// (docs/fastagent/design/14-turn-identity.md §3.2): it is checked in the acceptance
+	// critical section, and it is trustworthy exactly as far as session affinity is — the rows
+	// where that fails are named in docs/chat-event-delivery-placement.md §4.
+	idempotencyMu sync.Mutex
+	idempotency   map[string]idempotencyEntry
 	// runtimeMgr powers the coding-agent project runtime (live dev server
 	// + preview). Optional: nil when the deployment hasn't wired a
 	// sandbox-backed runtime, in which case the /runtime endpoints return

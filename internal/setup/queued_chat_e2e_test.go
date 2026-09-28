@@ -58,6 +58,15 @@ func (r *sseRecorder) snapshot() string {
 	return r.body.String()
 }
 
+// statusCode is the response's status under the same lock the writer holds: a test that reads
+// it after the handler returned is fine, one that reads it while the handler streams is not —
+// and the race detector cannot tell the difference without this.
+func (r *sseRecorder) statusCode() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.status
+}
+
 // queuedTurnID is how a caller learns which submission is waiting: the `queued` σ carries
 // the identity the server minted at acceptance (internal/agent/turn_id.go), and a tab that
 // did not POST has no other way to name it. Tests read it the same way a client does —
@@ -81,17 +90,27 @@ type e2eProvider struct {
 	mu      sync.Mutex
 	started chan struct{}
 	reply   string
+	starts  int64
 }
 
 func (p *e2eProvider) noteStart() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.starts++
 	if p.started != nil {
 		select {
 		case p.started <- struct{}{}:
 		default:
 		}
 	}
+}
+
+// startCount is what a de-duplication test needs: "how many turns actually reached the model",
+// which is a different question from "how many POSTs arrived".
+func (p *e2eProvider) startCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return int(p.starts)
 }
 
 func (p *e2eProvider) Chat(_ context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Response, error) {
