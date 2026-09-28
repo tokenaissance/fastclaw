@@ -1524,6 +1524,22 @@ func (a *Agent) TurnInFlight() bool {
 // sessionId may be either a canonical session_key (what
 // ListWebSessions returns) or a legacy web chat_id from older URLs;
 // ResolveSessionKey untangles them.
+// QueuedSubmissions reports how many submissions are waiting behind the holder of that session. It is
+// the queue half of §14.8's F2 (`status` ← lease + queue) and it is meaningful on the pod that OWNS the
+// session: the read that asks for it is session-affine (docs/chat-event-delivery-placement.md §3), and
+// the boundaries where that stops being true (a rolling deploy, a caller with no session id) are §4's.
+func (a *Agent) QueuedSubmissions(sessionId string) int {
+	if sessionId == "" {
+		sessionId = "web-ui"
+	}
+	resolved := a.sessions.ResolveSessionKey(sessionId)
+	sess := a.sessions.GetByKey(resolved)
+	if sess == nil {
+		return 0
+	}
+	return sess.TurnWaiters()
+}
+
 func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	if sessionId == "" {
 		sessionId = "web-ui"

@@ -1848,6 +1848,16 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// The queue half of §14.8's F2: `status` is lease + queue, and the lease half already rides
+	// `turnActive` (read from the store, cross-replica). This is the other half — how many submissions
+	// are WAITING behind the holder — and it is served by the pod that owns this session, which is the
+	// pod the read lands on because the ingress hashes `$arg_session_id`
+	// (docs/chat-event-delivery-placement.md §3). It is emitted even when zero: an absent field would
+	// make "nobody is queued" indistinguishable from "this pod cannot say", and the two boundaries that
+	// make the second case real are enumerated in §4 of that document (a rolling deploy, or a caller
+	// that carries no session id).
+	resp["queued"] = ag.QueuedSubmissions(sessionID)
 	jsonResponse(w, http.StatusOK, resp)
 }
 
