@@ -9,7 +9,12 @@ package sandbox
 // agent that hit it was told to go move files to /tmp — a place that is not mirrored, which is how
 // "follow the advice" becomes "lose the deliverable".
 //
-// Falsification: put the constant back (or drop the switch) and case 2 reddens — the ctx-shaped
+// Row 85 moved the second case: the post-exec sync no longer runs on the turn's ctx, so "the turn's
+// context ended" is not a cause this branch can have any more (`…/post_exec_sync_test.go` holds that
+// end). What the ctx branch reports now is the sync's OWN budget running out — the same rule, one
+// layer in: say the cause you actually have.
+//
+// Falsification: put the constant back (or drop the switch) and case 2 reddens — the budget-shaped
 // failure starts naming the cap again.
 
 import (
@@ -47,11 +52,11 @@ func TestTheSyncFailureMessageNamesOnlyTheCauseItKnows(t *testing.T) {
 			notWant: []string{"turn's context ended"},
 		},
 		{
-			name:    "the turn's context ended",
+			name:    "the sync ran out of its own budget",
 			ctx:     dead,
 			err:     fmt.Errorf("snapshot workspace exec: %w", context.Canceled),
-			want:    []string{"could NOT be synced", "turn's context ended", "read_file"},
-			notWant: []string{"snapshot cap", "/tmp", "32 MiB", "over the snapshot cap"},
+			want:    []string{"could NOT be synced", "did not finish inside its own", "next sync", "read_file"},
+			notWant: []string{"snapshot cap", "/tmp", "32 MiB", "over the snapshot cap", "turn's context ended"},
 		},
 		{
 			name:    "something else",
