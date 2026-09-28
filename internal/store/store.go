@@ -22,6 +22,42 @@ var ErrNotFound = errors.New("store: not found")
 // twice" precondition, surfaced as an error with no state transition.
 var ErrMCPServerExists = errors.New("store: mcp server already exists")
 
+// AgentFileVersion is the precondition a conditional agent-file write carries:
+// the fact the caller read, which the resource compares in the same statement
+// the write happens in.
+//
+// A version is the row's **content**, not a counter — `agent_files` is keyed by
+// (agent_id, user_id, filename), and content is the only thing a version could
+// name without a schema change. It is exact here, and that is the one place this
+// differs from the workspace store: S3's `If-Match` is evaluated by a bucket that
+// may not implement it (Ceph answers 412 to every one — internal/workspace/s3.go),
+// so that precondition degrades to compare-then-write, while a database evaluates
+// `WHERE content = ?` inside the INSERT and a stale expectation cannot slip past
+// the check. The honest limit of a content version is ABA: a row rewritten back
+// to the bytes the caller saw is indistinguishable from one that never moved.
+// That case makes the write a no-op rather than a lost update, so it is declared
+// rather than defended against — §13.2 of docs/fs-formal-proof/11-change-register.md.
+type AgentFileVersion struct {
+	// Absent is the precondition "this row must not exist yet" — a create-only
+	// write. It is distinct from "the row exists and is empty": with version =
+	// content, an empty string alone cannot tell those two apart, and a create
+	// that silently matched an existing empty row would not be create-only at all.
+	Absent bool
+
+	// Content is the exact bytes the caller read, compared as the precondition
+	// when Absent is false.
+	Content []byte
+}
+
+// AgentFileVersionAbsent is the create-only precondition for SaveAgentFileIfVersion.
+var AgentFileVersionAbsent = AgentFileVersion{Absent: true}
+
+// ErrAgentFileConflict reports that a conditional agent-file write found a
+// different version than the caller expected: somebody else wrote first. Like
+// workspace.ErrVersionConflict, the caller must refuse and say so — retrying
+// blindly is how the winner gets overwritten.
+var ErrAgentFileConflict = errors.New("store: agent file changed since it was read")
+
 // Store is the unified interface for all persistent data.
 //
 // Tables fall into three buckets:
@@ -240,6 +276,15 @@ type Store interface {
 	GetAgentFile(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	GetAgentFileExact(ctx context.Context, agentID, userID, filename string) ([]byte, error)
 	SaveAgentFile(ctx context.Context, agentID, userID, filename string, data []byte) error
+	// SaveAgentFileIfVersion is the conditional form of SaveAgentFile: it writes
+	// only when the row still carries `expected`, and returns ErrAgentFileConflict
+	// otherwise (see AgentFileVersion for what a version is here and why the
+	// resource, not the caller, evaluates it).
+	//
+	// SaveAgentFile is the unconditional write — correct for seeding a row whose
+	// value nobody read, wrong for every read-modify-write writer. A writer that
+	// read the row and then writes the whole string back must use this one.
+	SaveAgentFileIfVersion(ctx context.Context, agentID, userID, filename string, data []byte, expected AgentFileVersion) error
 	DeleteAgentFile(ctx context.Context, agentID, userID, filename string) error
 	ListAgentFiles(ctx context.Context, agentID, userID string) ([]string, error)
 	SaveAgentKnowledgeChunks(ctx context.Context, agentID, userID, path, hash string, chunks []string) error

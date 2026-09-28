@@ -63,6 +63,17 @@ func (f *fakeMemoryStore) SaveWorkspaceFile(ctx context.Context, agentID, userID
 	return nil
 }
 
+// SaveWorkspaceFileIfUnchanged enforces the precondition the way the store does,
+// so a witness built on this fake is a witness about the rule and not about a
+// stub that always says yes.
+func (f *fakeMemoryStore) SaveWorkspaceFileIfUnchanged(ctx context.Context, agentID, userID, filename string, data []byte, expected string) error {
+	if string(f.files[agentID+"|"+userID+"|"+filename]) != expected {
+		return ErrMemoryConflict
+	}
+	f.put(agentID, userID, filename, string(data))
+	return nil
+}
+
 // ListKnowledgeDocs makes the fake satisfy knowledgeDocLister so the
 // prompt's knowledge section renders from uploaded knowledge/* rows.
 // Sorted for deterministic [K#] ordering, matching the DBStore query.
