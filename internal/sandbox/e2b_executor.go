@@ -1724,6 +1724,14 @@ func (e *E2BExecutor) ProvisionDir(ctx context.Context, localDir, destDir string
 	return nil
 }
 
+// errSnapshotOverCap is this boundary's own name for "the snapshot was refused
+// for size". The cap decision is `newPayloadOutput`'s (`errPayloadOverCap`), but
+// the string that carries it to the caller is prose — and prose is not a
+// classifier: without a sentinel the lifecycle layer cannot tell this refusal
+// from a cut turn's `context.Canceled`, which is why its message named the cap
+// for every failure (row 84 of docs/fs-formal-proof/11-change-register.md).
+var errSnapshotOverCap = errors.New("sandbox: workspace snapshot over the cap")
+
 // SnapshotWorkspace tars /workspace and ships the bytes back as base64 over
 // stdout. This is the inverse of Hydrate's tar+base64 push — used by the
 // LifecyclePool to flush sandbox-side files back to the durable
@@ -1757,8 +1765,10 @@ func (e *E2BExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte,
 	_, err := e.execOn(ctx, e.identSnapshot(), cmd, 60*time.Second, sink)
 	if err != nil {
 		if errors.Is(err, errPayloadOverCap) {
-			return nil, fmt.Errorf("workspace snapshot is over the %s cap — refusing to flush /workspace after every exec; move large or growing files out of /workspace (use /tmp for run logs) and retry. Largest entries: %s",
-				humanBytes(snapshotBase64Cap), e.largestWorkspaceEntries(ctx))
+			// The tag at the end is this error's class, not decoration: it is what lets the caller
+			// tell "over the cap" from "the turn died while this ran" without matching text.
+			return nil, fmt.Errorf("workspace snapshot is over the %s cap — refusing to flush /workspace after every exec; move large or growing files out of /workspace (use /tmp for run logs) and retry. Largest entries: %s [%w]",
+				humanBytes(snapshotBase64Cap), e.largestWorkspaceEntries(ctx), errSnapshotOverCap)
 		}
 		return nil, fmt.Errorf("snapshot workspace exec: %w (output: %s)", err, snippet([]byte(sink.text()), 200))
 	}

@@ -180,6 +180,11 @@ func TestPayloadStreamStopsReadingAtTheCap(t *testing.T) {
 	if !strings.Contains(err.Error(), humanBytes(snapshotBase64Cap)) {
 		t.Fatalf("the error must name the cap: %s", snippet([]byte(err.Error()), 200))
 	}
+	// …and it must carry its CLASS, not just say it in prose: this is the sentinel the lifecycle
+	// layer classifies on, and prose is not a classifier (row 84).
+	if !errors.Is(err, errSnapshotOverCap) {
+		t.Fatalf("the over-cap error lost its class: %s", snippet([]byte(err.Error()), 200))
+	}
 
 	first := transport.bodies[0]
 	if first.read >= first.total() {
