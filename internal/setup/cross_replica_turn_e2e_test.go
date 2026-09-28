@@ -125,6 +125,14 @@ func TestSecondReplicaQueuesBehindTheRunningTurnE2E(t *testing.T) {
 		t.Fatalf("%d model rounds while replica A held the session, want 1"+
 			" (replica B started a turn of its own); stream=%q", n, recB.body.String())
 	}
+	// And B's own count says a turn is waiting: this is the number the history read publishes as
+	// `queued` and the task surface reports as `waiting`. It must be taken from the gate the turn
+	// actually waits at — the LEASE — because a turn parked there never reaches the session slot,
+	// and counting the slot (what this used to do) answered 0 here. Falsification: count
+	// `sess.TurnWaiters()` again and this assertion reads 0.
+	if got := agB.QueuedSubmissions(session); got != 1 {
+		t.Fatalf("agB.QueuedSubmissions = %d while a turn waited at the lease gate; want 1", got)
+	}
 
 	release()
 	for _, d := range []struct {

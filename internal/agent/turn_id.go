@@ -48,3 +48,16 @@ func TurnIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(turnIDKey{}).(string)
 	return id
 }
+
+// withMintedTurnID gives a turn an identity if it does not have one yet. The web handler mints
+// one at acceptance; this is for the turns that never pass through it — cron ticks, goal
+// continuations, subagent work, channel messages — so that "every turn has an identity" is a
+// property of the system rather than of one entry point (docs/fastagent/design/14-turn-identity.md
+// §5, W3; the reader that makes it worth writing is the `queued` σ, which names the waiting
+// submission and would otherwise have nothing to name).
+func withMintedTurnID(ctx context.Context) context.Context {
+	if TurnIDFromContext(ctx) != "" {
+		return ctx
+	}
+	return ContextWithTurnID(ctx, MintTurnID())
+}

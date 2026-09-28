@@ -49,8 +49,13 @@ type Agent struct {
 	turnLeaseTTLOverride time.Duration
 	// turnLeaseRetryOverride pins the queued re-try interval for tests.
 	turnLeaseRetryOverride time.Duration
-	memory                 *Memory
-	ctxBuilder             *ContextBuilder
+	// sessionWaiters counts the turns waiting for each session on this pod — the number the
+	// history read publishes as `queued`. See session_waiters.go for why it is counted here and
+	// not at the session slot.
+	waiterMu       sync.Mutex
+	sessionWaiters map[string]int
+	memory         *Memory
+	ctxBuilder     *ContextBuilder
 	// skillsFingerprint is the name→fingerprint map the last skill refresh
 	// produced, kept so the environment signal can compare this turn's skill set
 	// with the previous turn's without loading skills twice.
@@ -1529,15 +1534,9 @@ func (a *Agent) TurnInFlight() bool {
 // session: the read that asks for it is session-affine (docs/chat-event-delivery-placement.md §3), and
 // the boundaries where that stops being true (a rolling deploy, a caller with no session id) are §4's.
 func (a *Agent) QueuedSubmissions(sessionId string) int {
-	if sessionId == "" {
-		sessionId = "web-ui"
-	}
-	resolved := a.sessions.ResolveSessionKey(sessionId)
-	sess := a.sessions.GetByKey(resolved)
-	if sess == nil {
-		return 0
-	}
-	return sess.TurnWaiters()
+	// From the moment a turn contends for the session, not from the moment it reaches the session
+	// slot: a turn parked at the lease gate never gets there (session_waiters.go).
+	return a.queuedSubmissionsFor(sessionId)
 }
 
 func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
@@ -2373,6 +2372,12 @@ func llmRetry(ctx context.Context, label string, fn func(context.Context) (*prov
 
 // HandleMessage processes an inbound message through the ReAct loop.
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
+	// Every turn gets an identity, not only the ones a client asked for
+	// (docs/fastagent/design/14-turn-identity.md §5, W3): a cron tick, a goal continuation and a
+	// subagent's work are turns too, and the readers that name a submission — the `queued` σ —
+	// must be able to name them. The web path already stamped one at acceptance; this fills in the
+	// turns that arrive on the bus, and it is a no-op for those that carry one already.
+	ctx = withMintedTurnID(ctx) // falsification: drop this line and TestABusDrivenTurnHasAnIdentityE2E fails
 	// Check for slash commands first. Empty reply means "handled but
 	// intentionally silent" — /goal foo and /goal resume both fall
 	// through to a streaming continuation that IS the response, so
@@ -2423,12 +2428,16 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// inside the turn that owned the session.
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	waitStart := time.Now()
+	// Counted from here to the moment the session is owned: the lease gate is where a real wait
+	// happens, and it is the count the history read publishes (session_waiters.go).
+	stopWaiting := a.noteSessionWaiter(sess.Key())
 	// Cross-replica gate first (docs/session-turn-integrity.md A1): the lease is
 	// the one that can be lost to a peer, and the one a queued caller must wait
 	// on. It reports every wait as a `queued` event carrying the holder and its
 	// ETA, so the dashboard can say who is ahead.
 	lease, leased := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
 	if !leased {
+		stopWaiting()
 		slog.Info("turn admission: lease not acquired",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
 			"queued_ms", time.Since(waitStart).Milliseconds())
@@ -2453,11 +2462,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		emitEvent(ctx, ChatEvent{Type: "queued", Data: data})
 	}
 	if !sess.AcquireTurn(ctx) {
+		stopWaiting()
 		slog.Info("turn admission: caller gave up while queued",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
 			"queued_ms", time.Since(waitStart).Milliseconds())
 		return ""
 	}
+	stopWaiting()
 	if waited := time.Since(waitStart); waited > time.Second {
 		slog.Info("turn admission: waited for the in-flight turn",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
@@ -3385,6 +3396,9 @@ func (a *Agent) finishToolCall(ctx context.Context, msg bus.InboundMessage, tc p
 // a StreamReader for the final response. Tool call iterations use non-streaming Chat;
 // the final text response uses ChatStream for true SSE streaming.
 func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage) *provider.StreamReader {
+	// Same rule as HandleMessage's twin: a turn has an identity whether or not a client asked for
+	// it (docs/fastagent/design/14-turn-identity.md §5, W3).
+	ctx = withMintedTurnID(ctx)
 	// Reuse setup logic from HandleMessage. Empty reply is "handled
 	// but silent" — see the HandleMessage twin. Still emit a Done
 	// chunk so callers waiting on the stream don't hang.
@@ -3407,10 +3421,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// rationale and docs/session-turn-integrity.md for the incident.
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
 	waitStart := time.Now()
+	// Same counting as the non-streaming twin: from contention to ownership.
+	stopWaiting := a.noteSessionWaiter(sess.Key())
 	// Same two gates as HandleMessage, same order (see there for why the lease
 	// goes first and is released last).
 	lease, leased := a.beginTurnLease(ctx, sess, func(evt ChatEvent) { emitEvent(ctx, evt) })
 	if !leased {
+		stopWaiting()
 		slog.Info("turn admission: lease not acquired",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
 			"queued_ms", time.Since(waitStart).Milliseconds())
@@ -3423,11 +3440,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		}})
 	}
 	if !sess.AcquireTurn(ctx) {
+		stopWaiting()
 		slog.Info("turn admission: caller gave up while queued",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,
 			"queued_ms", time.Since(waitStart).Milliseconds())
 		return a.stringStream("")
 	}
+	stopWaiting()
 	if waited := time.Since(waitStart); waited > time.Second {
 		slog.Info("turn admission: waited for the in-flight turn",
 			"agent", a.name, "channel", msg.Channel, "chat_id", msg.ChatID,

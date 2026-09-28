@@ -405,6 +405,63 @@ func TestHistoryAnnouncesTheQueueBehindTheHolderE2E(t *testing.T) {
 	sess.ReleaseTurn()
 }
 
+// A turn that no client asked for — a cron tick, a goal continuation, a subagent's work — has an
+// identity too (docs/fastagent/design/14-turn-identity.md §5, W3). The reader that makes this
+// worth writing is the `queued` σ: a tab that learns "something is waiting" must be able to name
+// it, and before this the σ carried an empty id for every bus-driven turn.
+//
+// Falsification: drop `withMintedTurnID` from the loop's entry and the σ carries no `turnId` —
+// this test then fails on the prefix.
+func TestABusDrivenTurnHasAnIdentityE2E(t *testing.T) {
+	s, ag, _ := newQueuedChatHarness(t)
+	sess := ag.Sessions().Get("web", "", "chat-cron-id", "")
+	if !sess.AcquireTurn(context.Background()) {
+		t.Fatal("could not take the turn slot for the test")
+	}
+
+	// Capture the turn's events the way the SSE handler does: the loop fans out to the hub, which
+	// is where a second tab sees them.
+	hub := s.chatEventHub()
+	sub, unsubscribe := hub.Subscribe("u_1", "agt_e2e", "chat-cron-id")
+	defer unsubscribe()
+
+	ctx := agent.ContextWithStream(context.Background(), nil, nil, hub, "u_1", "agt_e2e", "chat-cron-id")
+	done := make(chan string, 1)
+	go func() {
+		done <- ag.HandleMessage(ctx, bus.InboundMessage{
+			Channel: "web", ChatID: "chat-cron-id", UserID: "cron", OwnerUserID: "u_1",
+			AgentID: "agt_e2e", Text: "[Cron Job: probe] scheduled tick", Source: bus.SourceCron,
+		})
+	}()
+	// Leave nothing parked: releasing the slot lets the tick run to completion, and waiting for it
+	// keeps it out of the harness's TempDir teardown (the failure this file documents elsewhere).
+	defer func() {
+		sess.ReleaseTurn()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the bus-driven turn never returned after the slot was released")
+		}
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case env := <-sub:
+			if env.Event.Type != "queued" {
+				continue
+			}
+			id, _ := env.Event.Data["turnId"].(string)
+			if !strings.HasPrefix(id, "t_") {
+				t.Fatalf("the queued σ carried turnId=%q; want the minted identity of a turn nobody's client asked for", id)
+			}
+			return
+		case <-time.After(time.Until(deadline)):
+			t.Fatalf("a cron turn never announced that it was queued")
+		}
+	}
+}
+
 // A submission that brings NO caller string still gets an identity: the mint is not
 // conditioned on anything the caller supplies. The reversal this pins is "mint only when
 // the client sent an id" — the shape that would leave a caller-less submission unnamed, and
