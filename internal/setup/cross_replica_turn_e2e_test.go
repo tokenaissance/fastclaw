@@ -99,6 +99,24 @@ func TestSecondReplicaQueuesBehindTheRunningTurnE2E(t *testing.T) {
 
 	waitForBody(t, recB, `"type":"queued"`, 15*time.Second)
 	queued := recB.body.String()
+	// A SECOND waiter on the same pod must hear "position 2". This is the arithmetic that used to
+	// be wrong in the same way the count was: `sess.TurnWaiters()+1` says 1 for every waiter,
+	// because neither of them reaches the slot that counter watches.
+	recC := newSSERecorder()
+	doneC := make(chan struct{})
+	go func() {
+		defer close(doneC)
+		podB.handleChatStream(recC, chatStreamRequest(t, chatRequest{
+			AgentID: "agt_e2e", SessionID: session, Message: "third", TurnID: "turn-xreplica-c",
+		}))
+	}()
+	waitForBody(t, recC, `"type":"queued"`, 15*time.Second)
+	if !strings.Contains(recC.body.String(), `"position":2`) {
+		t.Fatalf("the second waiter was not told it is second: %q", recC.body.String())
+	}
+	if strings.Contains(queued, `"position":2`) {
+		t.Fatalf("the first waiter claimed a later position: %q", queued)
+	}
 	// "position 1" alone cannot say whose turn you are waiting for, nor how long
 	// the wait is bounded by (docs/session-turn-integrity.md A4.1).
 	if !strings.Contains(queued, `"holder":"`) {
@@ -130,8 +148,8 @@ func TestSecondReplicaQueuesBehindTheRunningTurnE2E(t *testing.T) {
 	// actually waits at — the LEASE — because a turn parked there never reaches the session slot,
 	// and counting the slot (what this used to do) answered 0 here. Falsification: count
 	// `sess.TurnWaiters()` again and this assertion reads 0.
-	if got := agB.QueuedSubmissions(session); got != 1 {
-		t.Fatalf("agB.QueuedSubmissions = %d while a turn waited at the lease gate; want 1", got)
+	if got := agB.QueuedSubmissions(session); got != 2 {
+		t.Fatalf("agB.QueuedSubmissions = %d while TWO turns waited at the lease gate; want 2", got)
 	}
 
 	release()
@@ -139,7 +157,7 @@ func TestSecondReplicaQueuesBehindTheRunningTurnE2E(t *testing.T) {
 		name string
 		done chan struct{}
 		rec  *sseRecorder
-	}{{"A", doneA, recA}, {"B", doneB, recB}} {
+	}{{"A", doneA, recA}, {"B", doneB, recB}, {"C", doneC, recC}} {
 		select {
 		case <-d.done:
 		case <-time.After(20 * time.Second):

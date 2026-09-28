@@ -175,7 +175,15 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 		}
 		// Tell the dashboard who is ahead of it and until when: "position 1"
 		// alone cannot say whose turn you are waiting for (A4.1).
-		data := map[string]any{"position": sess.TurnWaiters() + 1}
+		// The position is this waiter's place in THIS pod's queue for the session — counted where
+		// the waiting happens (session_waiters.go), which already includes this turn, so it is the
+		// count itself and not count+1. `sess.TurnWaiters()` would say 1 for every waiter: a turn
+		// parked here never reaches the session slot that counter watches.
+		// The position is this waiter's place in THIS pod's queue for the session — counted where
+		// the waiting happens (session_waiters.go), which already includes this turn, so it is the
+		// count itself and not count+1. `sess.TurnWaiters()` would say 1 for every waiter: a turn
+		// parked here never reaches the session slot that counter watches.
+		data := map[string]any{"position": a.queuedSubmissionsFor(sess.Key())}
 		if busy.Holder != "" {
 			data["holder"] = busy.Holder
 		}
