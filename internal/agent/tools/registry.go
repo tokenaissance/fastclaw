@@ -559,6 +559,27 @@ func (r *Registry) ownsAgentHome(userID string) bool {
 	return owner == "" || owner == userID
 }
 
+// mirrorToAgentHome writes the on-disk copy of a system file for this pod's in-process readers
+// (context builder, skills loader) — but only when the write belongs to the account that owns the
+// home directory.
+//
+// systemRoot/MEMORY.md is ONE file with no (agent,user) dimension, while the store row it shadows is
+// per-chatter. The READ side has been owner-gated since the isolation fix
+// (`readSystemFileWithFallback`: `!isPerUserSystemFile(name) || r.ownsAgentHome(userID)`), so a visitor
+// could never read it — but the mirror had no such gate, so a visitor's MEMORY.md write landed in the
+// owner's file on disk, and the owner's next disk-fallback read (an owner with no store row yet) came
+// back with the visitor's memory. Owner-only on BOTH sides is the middle option the register chose
+// between retiring the home and migrating it: docs/fs-formal-proof/11-change-register.md §13.2
+// conclusion 2, row 86.
+func (r *Registry) mirrorToAgentHome(userID, name string, body []byte) {
+	if r.systemRoot == "" || !r.ownsAgentHome(userID) {
+		return
+	}
+	disk := filepath.Join(r.systemRoot, name)
+	_ = os.MkdirAll(filepath.Dir(disk), 0o755)
+	_ = os.WriteFile(disk, body, 0o644)
+}
+
 // SetSandboxRequired flips the exec tool's host-shell fallback off. Call
 // with true whenever the runtime decides this agent must run inside a
 // sandbox executor (e.g., user enabled cfg.Sandbox after boot, so

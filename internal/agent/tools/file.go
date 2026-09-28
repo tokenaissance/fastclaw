@@ -653,18 +653,14 @@ func makeWriteFile(r *Registry) ToolFunc {
 		// systemFileStore when available.
 		if r.systemFileStore != nil && r.agentID != "" && isSingleSegmentSystemFile(args.Path) {
 			name := filepath.Clean(args.Path)
-			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, r.systemFileUserID(name), name, []byte(args.Content)); err != nil {
+			uid := r.systemFileUserID(name)
+			if err := r.systemFileStore.SaveWorkspaceFile(ctx, r.agentID, uid, name, []byte(args.Content)); err != nil {
 				return "", fmt.Errorf("system file save: %w", err)
 			}
-			// Keep a filesystem mirror so the agent runtime (context
-			// builder, skills loader, etc.) which still reads from disk
-			// sees the same content on this pod. Other pods will pick
-			// up the next call via their own store reads.
-			if r.systemRoot != "" {
-				disk := filepath.Join(r.systemRoot, name)
-				_ = os.MkdirAll(filepath.Dir(disk), 0o755)
-				_ = os.WriteFile(disk, []byte(args.Content), 0o644)
-			}
+			// Keep a filesystem mirror so the agent runtime (context builder, skills loader, etc.)
+			// which still reads from disk sees the same content on this pod — owner-only, because
+			// systemRoot/MEMORY.md is one unscoped file (see mirrorToAgentHome).
+			r.mirrorToAgentHome(uid, name, []byte(args.Content))
 			return fmt.Sprintf("Written %d bytes to %s", len(args.Content), name), nil
 		}
 
@@ -781,14 +777,10 @@ func makeEditFile(r *Registry) ToolFunc {
 				}
 				return "", fmt.Errorf("system file save: %w", err)
 			}
-			// Same disk-mirror invariant as makeWriteFile so this pod's
-			// in-process readers (context builder, skills loader) see the
-			// new content immediately.
-			if r.systemRoot != "" {
-				disk := filepath.Join(r.systemRoot, name)
-				_ = os.MkdirAll(filepath.Dir(disk), 0o755)
-				_ = os.WriteFile(disk, []byte(updated), 0o644)
-			}
+			// Same disk-mirror invariant as makeWriteFile, same owner-only gate: this pod's
+			// in-process readers (context builder, skills loader) see the new content immediately,
+			// and a visitor's edit never touches the agent home's single unscoped file.
+			r.mirrorToAgentHome(uid, name, []byte(updated))
 			return fmt.Sprintf("Edited %s (%d replacement(s))", name, count), nil
 		}
 
