@@ -281,6 +281,101 @@ func TestAQueuedTurnOutlivesItsConnectionE2E(t *testing.T) {
 	}
 }
 
+// Two clients can be queued behind one holder, and the contract for a bare "withdraw the queued one"
+// is "the EARLIEST" (§14.2's withdraw_task). The pending map has no order of its own, so this pins the
+// seq registration assigns: an implementation that picked any not-started entry could not tell these
+// two apart and would redden under repetition. Falsification: iterate the map and take whatever comes
+// first, or drop the seq — then this test names the wrong submission.
+func TestWithdrawEarliestTakesTheOldestQueuedSubmissionE2E(t *testing.T) {
+	s, ag, prov := newQueuedChatHarness(t)
+	sess := ag.Sessions().Get("web", "", "chat-earliest", "")
+	if !sess.AcquireTurn(context.Background()) {
+		t.Fatal("could not take the turn slot for the test")
+	}
+
+	start := func(turnID, message string) chan struct{} {
+		rec := newSSERecorder()
+		req := chatStreamRequest(t, chatRequest{
+			AgentID: "agt_e2e", SessionID: "chat-earliest", Message: message, TurnID: turnID,
+		})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			s.handleChatStream(rec, req)
+		}()
+		return done
+	}
+	keyA := chatTurnKey("u_1", "agt_e2e", "chat-earliest", "turn-a")
+	keyB := chatTurnKey("u_1", "agt_e2e", "chat-earliest", "turn-b")
+	doneA := start("turn-a", "first queued")
+	// Acceptance order is what "earliest" means, and it is assigned at REGISTRATION — which happens in
+	// the POST's goroutine, not at the moment the test calls start(). So A must be on the map before B
+	// exists, or the two race and this test would be pinning the scheduler instead of the contract.
+	deadline := time.Now().Add(5 * time.Second)
+	for lookupForTest(s, keyA) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the first submission never registered as pending")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	doneB := start("turn-b", "second queued")
+	for lookupForTest(s, keyB) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the second submission never registered as pending")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The bare withdrawal: no turnId, the explicit discriminator instead (an empty turnId already means
+	// "stop the running turn" to the dashboard's Stop path — measured, and load-bearing).
+	cancelRec := httptest.NewRecorder()
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-earliest","withdrawEarliest":true}`))
+	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(),
+		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	s.handleChatCancel(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", cancelRec.Code, cancelRec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(cancelRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode cancel body: %v", err)
+	}
+	if body["withdrawn"] != true {
+		t.Fatalf("cancel body = %v; want withdrawn:true", body)
+	}
+	if body["turnId"] != "turn-a" {
+		t.Fatalf("withdrew %v; want the EARLIEST (turn-a)", body["turnId"])
+	}
+	select {
+	case <-doneA:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the withdrawn submission never returned")
+	}
+	if lookupForTest(s, keyB) == nil {
+		t.Fatal("the second submission was withdrawn too — only the earliest may be")
+	}
+
+	// The per-id path still works beside it: withdraw B by its own turn id, then let the session go.
+	cancelRec2 := httptest.NewRecorder()
+	cancelReq2 := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-earliest","turnId":"turn-b"}`))
+	cancelReq2 = cancelReq2.WithContext(auth.WithIdentity(cancelReq2.Context(),
+		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	s.handleChatCancel(cancelRec2, cancelReq2)
+	select {
+	case <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second withdrawn submission never returned")
+	}
+	sess.ReleaseTurn()
+	select {
+	case <-prov.started:
+		t.Fatal("a withdrawn turn still reached the model")
+	default:
+	}
+}
+
 // Once the turn has started, withdrawal is refused (409) and the turn runs to
 // completion — the client falls back to plain Stop semantics.
 func TestStartedChatTurnCannotBeWithdrawnE2E(t *testing.T) {
