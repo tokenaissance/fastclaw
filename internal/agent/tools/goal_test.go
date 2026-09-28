@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 )
@@ -57,6 +58,12 @@ func (m *memGoalStore) UpdateGoal(_ context.Context, g *goal.Goal) error {
 	return nil
 }
 func (m *memGoalStore) DeleteGoal(context.Context, string) error { return nil }
+
+// ListStaleActiveGoals is the watchdog's read; this fixture is about the goal TOOLS, and the sweep
+// has its own fixture in internal/agent (goal_watchdog_test.go).
+func (m *memGoalStore) ListStaleActiveGoals(context.Context, time.Time) ([]*goal.Goal, error) {
+	return nil, nil
+}
 
 // fixture builds a Registry pre-bound to a session and a memGoalStore,
 // with update_goal registered. (agentID, ownerUserID, sessionKey) match

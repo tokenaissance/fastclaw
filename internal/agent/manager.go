@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/fastclaw-ai/fastclaw/internal/agent/goal"
 	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
@@ -82,6 +85,9 @@ type managerOpts struct {
 	globalSkillsCfg config.SkillsCfg
 	mcpConfigNotify func(userID, agentID string)
 	sessionLease    SessionLease
+	// messageBus is where a fired goal continuation is published. Kept because the goal watchdog
+	// (Manager.SweepStalledGoals) needs the same bus the agents publish onto.
+	messageBus *bus.MessageBus
 	// skillsLearnerCfg is the resolved `skillsLearner` namespace for the user
 	// space this Manager builds agents for. Threaded through the same way as
 	// privacyCfg: without it the row is writable and read by nobody, because
@@ -225,6 +231,8 @@ func NewManager(resolved []config.ResolvedAgent, prov provider.Provider, mb *bus
 	for _, o := range opts {
 		o(&m.opts)
 	}
+	// The watchdog publishes through the same bus the agents do (see SweepStalledGoals).
+	m.opts.messageBus = mb
 
 	if _, err := config.HomeDir(); err != nil {
 		return nil, err
@@ -431,6 +439,43 @@ func (m *Manager) RemoveAgent(id string) {
 // AgentByID returns an agent by its ID.
 func (m *Manager) AgentByID(id string) *Agent {
 	return m.agents[id]
+}
+
+// SweepStalledGoals re-fires the continuation of a goal whose chain has gone quiet.
+//
+// A goal advances through PostTurn hooks only — something has to fire the next continuation and
+// there is no timer anywhere (`goal.TryFireContinuation` has three callers, all of them turn
+// boundaries). So anything that keeps a hook from firing leaves the row `active` with nobody
+// scheduled to move it: a failed turn (until row 78 landed), a killed pod, a lost event, a failed
+// state write. Production measured 86 minutes of silence on 2026-09-28 before the user typed
+// "continue" themselves — that is the symptom this sweep removes.
+//
+// Conservative by construction:
+//   - only goals untouched for `staleAfter` are considered (`updated_at` moves on every model call,
+//     so a live turn keeps its own row fresh);
+//   - a goal is skipped while its agent has ANY turn in flight — that turn owns the chain and will
+//     fire the hook itself;
+//   - `TryFireContinuation` re-reads the row and re-checks every gate (active, routing), so a race
+//     with a live turn costs at most one extra message, which the session's own admission defers.
+func (m *Manager) SweepStalledGoals(ctx context.Context, staleAfter time.Duration) {
+	if m.opts.dataStore == nil || m.opts.messageBus == nil {
+		return
+	}
+	stale, err := m.opts.dataStore.ListStaleActiveGoals(ctx, time.Now().UTC().Add(-staleAfter))
+	if err != nil {
+		slog.Warn("goal watchdog: listing stalled goals failed", "error", err)
+		return
+	}
+	for _, g := range stale {
+		ag := m.agents[g.AgentID]
+		if ag == nil || ag.TurnInFlight() {
+			continue
+		}
+		slog.Info("goal watchdog: re-firing a stalled continuation",
+			"agent", g.AgentID, "session", g.SessionKey, "goal", g.ID,
+			"stale_for", time.Since(g.UpdatedAt).Truncate(time.Second))
+		goal.TryFireContinuation(ctx, m.opts.dataStore, m.opts.messageBus, g.AgentID, g.SessionKey)
+	}
 }
 
 // DefaultAgent returns the default agent (set when only one agent exists).
