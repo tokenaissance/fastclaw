@@ -150,6 +150,72 @@ func storeBody(t *testing.T, ws *countingWorkspace, path string) string {
 // The incident, as a regression test: the store moved, the sandbox did not.
 // The reconcile must keep the store's copy — this is the rule that cannot be
 // traded away for convenience.
+// A store-owned path is delivered INTO the sandbox and never collected back: the identity files
+// (SOUL/IDENTITY/MEMORY/USER/…, `tools.IsIdentityFile`) have exactly one writer — the store — and
+// the sandbox holds a readable copy of it.
+//
+// Production, 2026-09-26/28: `MEMORY.md` was refused **268 times** in one session. The sandbox held
+// what it had been delivered, the store held what its own writer had produced, and the reconcile
+// compared the two and refused — the right answer when both sides are writers; here only one is.
+//
+// Falsification: drop the `storeOwned` guard in `syncSnapshot` and the refused path reappears in
+// `delta.blocked` (this test names it); the store's copy is untouched either way, which is exactly
+// why the assertion has to be about the refusal and not about the bytes.
+func TestSyncContract_StoreOwnedPathsAreNeverCollected(t *testing.T) {
+	const born = "MEMORY AS DELIVERED BY THE STORE"
+	const scratch = "MEMORY EDITED INSIDE THE SANDBOX"
+	ws := newCountingWorkspace()
+	ctx := context.Background()
+	seed := func(path, body string) {
+		t.Helper()
+		if err := ws.Put(ctx, "erin", "", "", path, strings.NewReader(body), int64(len(body)), ""); err != nil {
+			t.Fatalf("seed store %s: %v", path, err)
+		}
+	}
+	seed("MEMORY.md", born)
+	seed("notes.md", "store notes")
+
+	pool := newSnappingPool(map[string][]byte{
+		"MEMORY.md": []byte(born),
+		"notes.md":  []byte("store notes"),
+	})
+	lp := NewLifecyclePool(pool, time.Hour, time.Hour)
+	lp.SetWorkspace(ws)
+	lp.SetStoreOwnedPaths(func(path string) bool { return path == "MEMORY.md" })
+	if _, err := lp.getInner(ctx, sandboxScope{agentID: "erin"}); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	// The sandbox edits both files. Only the ordinary one may come back.
+	pool.current.files["MEMORY.md"] = []byte(scratch)
+	pool.current.files["notes.md"] = []byte("sandbox notes")
+
+	ex, err := pool.Get(ctx, "erin", "", "")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	d := lp.syncSnapshot(ctx, sandboxScope{agentID: "erin"}, ex, "test")
+
+	// The owned path is silent; the ordinary one is still refereed — that difference IS the fix.
+	for _, blocked := range d.blocked {
+		if blocked == "MEMORY.md" {
+			t.Fatalf("a store-owned path was refereed as a conflict; blocked=%v", d.blocked)
+		}
+	}
+	var sawControl bool
+	for _, blocked := range d.blocked {
+		if blocked == "notes.md" {
+			sawControl = true
+		}
+	}
+	if !sawControl {
+		t.Fatalf("an ordinary sandbox edit stopped being reported; blocked=%v", d.blocked)
+	}
+	if got := storeBody(t, ws, "MEMORY.md"); got != born {
+		t.Fatalf("a store-owned path was collected back\n  store: %q\n  want:  %q", got, born)
+	}
+}
+
 func TestSyncContract_StoreEditIsNotOverwritten(t *testing.T) {
 	const born = "OLD SNAPSHOT VERSION"
 	const host = "THE HOST WROTE THIS LONGER VERSION"

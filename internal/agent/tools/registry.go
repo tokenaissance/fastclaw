@@ -39,6 +39,18 @@ var identityFiles = map[string]bool{
 	"HEARTBEAT.md": true,
 }
 
+// IsIdentityFile reports whether a path is one of the agent-owned identity files — the set the
+// store owns (per-chatter rows for USER.md / MEMORY.md, the shared template for the rest).
+//
+// Exported for one reader: the sandbox sync. These files are DELIVERED into the sandbox so the
+// model and the file tools can read them, but every WRITE to them goes through the store
+// (`systemFileStore`), so the sync must never collect them back — production measured 268 refusals
+// on `MEMORY.md` in one session (2026-09-26/28), all of them the sync comparing its delivery copy
+// against a store copy the store itself had written.
+func IsIdentityFile(path string) bool {
+	return identityFiles[filepath.Base(filepath.Clean(path))]
+}
+
 var ownerScopedSystemFiles = map[string]bool{
 	"SOUL.md":      true,
 	"IDENTITY.md":  true,

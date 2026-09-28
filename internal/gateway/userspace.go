@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
+	"github.com/fastclaw-ai/fastclaw/internal/agent/tools"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/mcp/oauth/adapter"
@@ -221,6 +222,11 @@ func buildSystemSandboxPool(
 		idle = 10 * time.Minute
 	}
 	lp := sandbox.NewLifecyclePool(inner, idle, 30*time.Second)
+	// The identity files (SOUL/IDENTITY/MEMORY/USER/…) are owned by the store: the sandbox gets a
+	// delivered, readable copy, and every write goes through `systemFileStore`. Naming them here is
+	// what stops the reconcile from collecting that copy back and refusing it as a conflict
+	// (2026-09-28: 268 `BLOCKED` on `MEMORY.md` in one production session).
+	lp.SetStoreOwnedPaths(tools.IsIdentityFile)
 	if ws != nil {
 		lp.SetWorkspace(ws)
 	}
