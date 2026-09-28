@@ -651,3 +651,34 @@ second completed but was cut at its budget three times while it ran.
 > caller's deadline, so raising `agentTurnTimeout` to 24 h would let a DEAD holder's session stay
 > locked for a day. A live holder renews (TTL/3), so `min(deadline+grace, cap)` costs a long turn
 > nothing. **Reopen when someone raises `agentTurnTimeout` again.**
+
+### 13.2 Who writes `MEMORY.md` / `USER.md` — a writer audit (2026-09-28, formal frame)
+
+**Finding: one key used to have five writers and zero shared preconditions.** Row 77 deleted the
+noisiest *expression* of the fact (the sandbox write-back); the rest are still read-modify-write
+with last-write-wins — the precondition gap F1 names (G24 in 10 §4, the A3 section of
+`session-turn-integrity`). Filled in as duty / fact / witness / falsification; a cell with no
+witness says so.
+
+| Writer | Key (scope) | Precondition | Reader of the fact | Witness / falsification | Status |
+| --- | --- | --- | --- | --- | --- |
+| **W1 the file tools** (`read_file`/`write_file`/`edit_file`/`apply_patch`, through `systemFileStore`) | `agent_files` **(agent,user)** | **none** (read-modify-write) | the model's prompt, `read_file` | **none** | open: two concurrent edits can lose one |
+| **W2 the memory distiller** (PostTurn: `SaveMemoryWithScan`) | `agent_files` **(agent,user)** | **none** (reads `currentMemory`, appends, writes the whole string back) | same | `memory_e2e_test.go` (it does NOT overwrite a real user's row) | open: interleaving with W1 loses an update — the shape is "the distill puts back what the agent just wrote" |
+| **W3 the sandbox sync** | `workspace` (agent,project,session) | `BLOCKED` (refuse + report) | nobody (never feeds the model) | `lifecycle_sync_contract_test.go` (incl. this pass's case and its falsification) | **deleted (`77ae694`)**: identity files are no longer collected |
+| **W4 the panel** `PUT /agents/{id}/system-files/{name}` | `agent_files` **(agent,user)** (owner-fallback read path) | **none** | the model | **none** | open: the panel and the distiller know nothing of each other |
+| **W5 CLI / the timezone tool** | `agent_files` / workspace | **none** | the model | **none** | open (rare, low risk) |
+| (legacy) the `systemRoot/MEMORY.md` disk mirror | **agent** (**no user**) | **none** | the read fallback (when the store has no row) | **none** | open: one home mixing owner and visitor; retire it or mark it owner-only |
+
+**Two conclusions the table forces:**
+
+1. **Ownership has to be settled before merging is discussed.** W3 could be deleted because the
+   identity files have exactly one writer (the store). W1/W2/W4/W5 do not have that uniqueness, so
+   what they need is not another guard but a **version precondition on `SaveAgentFile`** (A3's
+   belt): `PutIfVersion`, refusing and reporting like W3's `BLOCKED` — one rule, not four.
+2. **The read fallback still holds an un-scoped home** (`systemRoot/MEMORY.md`): it belongs to no
+   (agent,user), and only the "owner may read it" patch keeps visitors out. The real fix is to
+   retire it (or migrate it explicitly), or "one fact, two expressions" comes back in a fifth form.
+
+**The next witness (not landed, so no row number)**: a lost-update case for W1/W2 — two writers
+interleaving on one `(agent,user,MEMORY.md)`, where the second must be refused or retried;
+falsification: drop the version precondition and the first writer's content is silently overwritten.

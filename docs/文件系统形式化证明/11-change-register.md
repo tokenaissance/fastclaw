@@ -566,3 +566,29 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 > **另一件随撤回保留的东西**：看门狗那批发时我记录过一个**重开条件**——*租约的陈旧上界不该跟着回合预算走*。
 > `defaultTurnLeaseTTLFor` 从调用方 deadline 推导 τ：预算一旦抬到 24h，死掉的持有者就能把会话锁一天。活着的持有者会续租
 > （TTL/3），所以给 τ 加 `min(deadline+grace, cap)` 对长回合零代价。**下次有人再抬 `agentTurnTimeout` 时重开。**
+
+### 13.2 `MEMORY.md` / `USER.md` 的写者审计（2026-09-28，形式化口径）
+
+**结论：同一个 key 上曾有 5 个写者、其中 0 个带共同前置条件。** 第 77 行删掉了最吵的那一个表达（沙箱回写），
+其余仍是**读-改-写 + last-write-wins**——F1 意义上的前置条件缺口（10 §4 的 **G24**，`session-turn-integrity` 的 A3）。
+这张表按"**义务 / 事实 / 见证 / 反证**"填，缺见证的格如实写"无"。
+
+| 写者 | 键（作用域） | 前置条件 | 事实的读者 | 见证 / 反证 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| **W1 文件工具**（`read_file`/`write_file`/`edit_file`/`apply_patch` 经 `systemFileStore`） | `agent_files` **(agent,user)** | **无**（读-改-写） | 模型 prompt、`read_file` | **无** | 开放：两次并发编辑可丢一次 |
+| **W2 记忆蒸馏**（PostTurn：`SaveMemoryWithScan`） | `agent_files` **(agent,user)** | **无**（读 `currentMemory` → 追加 → 整段写回） | 同上 | `memory_e2e_test.go`（覆盖**不覆盖**真实用户的行） | 开放：与 W1 交错即丢更新——形状正是"蒸馏把 agent 刚写的事实盖回去" |
+| **W3 沙箱同步回写** | `workspace` (agent,project,session) | `BLOCKED`（拒绝 + 上报） | 无（不喂模型） | `lifecycle_sync_contract_test.go`（含本次新增用例与其反证） | **已删（`77ae694`）**：identity 文件不再被收集 |
+| **W4 面板** `PUT /agents/{id}/system-files/{name}` | `agent_files` **(agent,user)**（带 owner 回退的读取路径） | **无** | 模型 | **无** | 开放：面板写与蒸馏写互不知情 |
+| **W5 CLI / timezone 工具** | `agent_files` / workspace | **无** | 模型 | **无** | 开放（低频，风险低） |
+| （遗留）`systemRoot/MEMORY.md` 磁盘镜像 | **agent**（**无 user**） | **无** | 读取兜底（store 无行时） | **无** | 开放：owner 与访客混用的旧家；建议退休或标 owner-only |
+
+**两条从这张表读出来的结论**：
+
+1. **"谁拥有"必须先于"怎么合并"**：W3 之所以能删，是因为 identity 文件的写者唯一（商店）。剩下的 W1/W2/W4/W5 之间
+   没有这个唯一性，所以它们要的不是更多守卫，而是 **`SaveAgentFile` 的版本前置**（A3 的 belt）：`PutIfVersion`，
+   冲突时**拒绝 + 上报**（同 W3 的 `BLOCKED` 语义，一套规矩）。
+2. **读取兜底里仍有一个无作用域的家**（`systemRoot/MEMORY.md`）：它不属于 (agent,user)，只能靠"owner 才准读"这一条
+   补丁把访客挡在外面——真正的修法是让它退休（或明确迁移），否则"同一事实两个表达"会以第五种形式复现。
+
+**下一步的见证（未落，故不占行号）**：给 W1/W2 补一条丢失更新的用例——两个写者对同一 `(agent,user,MEMORY.md)`
+交错写入，**第二个必须被拒绝或重试**；反证＝去掉版本前置 ⇒ 第一份内容被静默覆盖。
