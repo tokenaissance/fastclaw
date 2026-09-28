@@ -281,6 +281,69 @@ func TestAQueuedTurnOutlivesItsConnectionE2E(t *testing.T) {
 	}
 }
 
+// F2's queue half has to be readable: a page load (or an MCP read) asks the session-affine endpoint
+// how many submissions are waiting, and gets a number rather than a guess. Falsification: drop the
+// field, and the reader is back to "nobody queued OR cannot say".
+func TestHistoryAnnouncesTheQueueBehindTheHolderE2E(t *testing.T) {
+	s, ag, _ := newQueuedChatHarness(t)
+	sess := ag.Sessions().Get("web", "", "chat-queue-fact", "")
+	if !sess.AcquireTurn(context.Background()) {
+		t.Fatal("could not take the turn slot for the test")
+	}
+
+	rec := newSSERecorder()
+	req := chatStreamRequest(t, chatRequest{
+		AgentID: "agt_e2e", SessionID: "chat-queue-fact", Message: "queued behind the holder", TurnID: "turn-q",
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleChatStream(rec, req)
+	}()
+	key := chatTurnKey("u_1", "agt_e2e", "chat-queue-fact", "turn-q")
+	deadline := time.Now().Add(5 * time.Second)
+	for lookupForTest(s, key) == nil || sess.TurnWaiters() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the submission never became a waiter")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	histRec := httptest.NewRecorder()
+	histReq := httptest.NewRequest(http.MethodGet,
+		"/api/chat/history?agentId=agt_e2e&sessionId=chat-queue-fact", nil)
+	histReq = histReq.WithContext(auth.WithIdentity(histReq.Context(),
+		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	s.handleChatHistory(histRec, histReq)
+	if histRec.Code != http.StatusOK {
+		t.Fatalf("history status = %d", histRec.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(histRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if got, ok := body["queued"].(float64); !ok || got < 1 {
+		t.Fatalf("history body = %v; want queued >= 1", body)
+	}
+
+	// Leave nothing running: withdraw the queued submission and wait for its handler to return. Releasing
+	// the turn with a waiter still parked lets it be admitted after this test ends, and then it writes
+	// into the TempDir the framework is already cleaning up — the shape client_disconnect_turn_test.go
+	// documents at length.
+	cancelRec := httptest.NewRecorder()
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
+		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"chat-queue-fact","turnId":"turn-q"}`))
+	cancelReq = cancelReq.WithContext(auth.WithIdentity(cancelReq.Context(),
+		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	s.handleChatCancel(cancelRec, cancelReq)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the withdrawn submission never returned")
+	}
+	sess.ReleaseTurn()
+}
+
 // Two clients can be queued behind one holder, and the contract for a bare "withdraw the queued one"
 // is "the EARLIEST" (§14.2's withdraw_task). The pending map has no order of its own, so this pins the
 // seq registration assigns: an implementation that picked any not-started entry could not tell these
