@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -813,6 +816,17 @@ func mapKeys(m map[string]string) []string {
 type snapshottingExecutor struct {
 	fakeExecutor
 	files map[string][]byte
+	// mtimes and clock model the sandbox's own filesystem clock, and they are
+	// OPT-IN: nil means "this fake cannot report a stat pass" — the behaviour
+	// every test written before the ordering rule (row 87) assumes, and the
+	// conservative one (the reconcile refuses when it cannot read the files).
+	//
+	// With them set, the fake answers the two commands the reconcile itself runs
+	// (see execInstrumented): the listing + guest-clock probe in one exec, and the
+	// `touch -d @…` stamp. mtimes is the sandbox's own view; clock is the guest's
+	// clock, which the live runtime measures ≈1.2 s ahead of the pod's.
+	mtimes map[string]time.Time
+	clock  time.Time
 	// onExec runs at the START of Exec — the place a test puts "the turn dies while the command is
 	// running". Used by the post-exec-sync witness (row 85): the sync must survive it.
 	onExec func()
@@ -843,7 +857,71 @@ func (s *snapshottingExecutor) Exec(ctx context.Context, command string, timeout
 	if s.onExec != nil {
 		s.onExec()
 	}
+	if s.mtimes != nil {
+		if out, ok := s.execInstrumented(command); ok {
+			// Record it like any other exec: the write-through's stamp is only
+			// observable in the command stream, and the delivery's stamp is the
+			// same fact one direction over.
+			atomic.AddInt32(&s.fakeExecutor.execs, 1)
+			s.fakeExecutor.mu.Lock()
+			s.fakeExecutor.commands = append(s.fakeExecutor.commands, command)
+			s.fakeExecutor.mu.Unlock()
+			return out, nil
+		}
+	}
 	return s.fakeExecutor.Exec(ctx, command, timeout)
+}
+
+// guestNow is the modelled guest clock; without an explicit one, the host's time,
+// which is what a fake that never set it is implicitly claiming.
+func (s *snapshottingExecutor) guestNow() time.Time {
+	if s.clock.IsZero() {
+		return time.Now()
+	}
+	return s.clock
+}
+
+// execInstrumented answers the commands the reconcile runs to measure the world:
+// the one exec that reads the guest clock and lists the files (statsFor), and the
+// stamp (`touch -d @…`) that hydrate, the mirror and the delivery all use.
+//
+// It exists so a test can state the sandbox's clock and each file's mtime as
+// facts, instead of asserting against an unreadable stat pass. A path with no
+// recorded mtime reads as "written by the sandbox at the modelled instant".
+func (s *snapshottingExecutor) execInstrumented(command string) (string, bool) {
+	switch {
+	case strings.Contains(command, `find /workspace -type f -printf`):
+		var sb strings.Builder
+		sb.WriteString("NOW " + strconv.FormatFloat(float64(s.guestNow().Unix())+float64(s.guestNow().Nanosecond())/1e9, 'f', 6, 64) + "\n")
+		paths := make([]string, 0, len(s.files))
+		for p := range s.files {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		for _, p := range paths {
+			at, ok := s.mtimes[p]
+			if !ok {
+				at = s.guestNow()
+			}
+			sb.WriteString(fmt.Sprintf("%s\t%d\t%d\n", p, len(s.files[p]), at.Unix()))
+		}
+		return sb.String(), true
+	case strings.HasPrefix(command, "touch -d @"):
+		rest := strings.TrimPrefix(command, "touch -d @")
+		secs, quoted, found := strings.Cut(rest, " ")
+		if !found {
+			return "", true
+		}
+		unix, err := strconv.ParseInt(secs, 10, 64)
+		if err != nil {
+			return "", true
+		}
+		if rel, ok := strings.CutPrefix(strings.Trim(quoted, "'"), "/workspace/"); ok {
+			s.mtimes[rel] = time.Unix(unix, 0)
+		}
+		return "ok", true
+	}
+	return "", false
 }
 
 func (s *snapshottingExecutor) SnapshotWorkspace(ctx context.Context) (map[string][]byte, error) {
