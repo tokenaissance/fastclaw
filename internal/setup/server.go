@@ -42,7 +42,9 @@ type AgentHandle interface {
 	// returns false when no turn is running (caller falls back to a
 	// normal send).
 	SteerWeb(sessionId, projectIDHint, text string) bool
-	WebChatHistory(sessionId string) []map[string]any
+	// includeSynthetic renders runtime-injected rows (goal continuations) as the fact they are —
+	// see the implementation's comment; the web asks for them, the MCP read does not.
+	WebChatHistory(sessionId string, includeSynthetic bool) []map[string]any
 	WebChatSessions() []session.WebSession
 	DeleteWebChatSession(sessionId string) error
 	RenameWebChatSession(sessionId, title string) error

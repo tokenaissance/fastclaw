@@ -1539,7 +1539,43 @@ func (a *Agent) QueuedSubmissions(sessionId string) int {
 	return a.queuedSubmissionsFor(sessionId)
 }
 
-func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
+// includeSynthetic surfaces the runtime-injected rows (today: goal continuations) as the FACT they
+// are — "the runtime continued the goal", plus the objective — instead of the audit prompt they
+// actually carried. The web passes true; the MCP surface passes false, because its read contract
+// (§14.3) states that the projection skips injected messages, and a transcript that differs
+// between two readers without saying so is how a rule drifts.
+// goalObjective reads the objective of the goal attached to a session, or "" when there is none
+// (or it cannot be read). Best-effort by design: the label below still states the fact it knows
+// ("the runtime continued the goal") without inventing the text it could not read.
+func (a *Agent) goalObjective(sessionKey string) string {
+	if a.goalStore == nil || sessionKey == "" {
+		return ""
+	}
+	g, err := a.goalStore.GetGoalBySession(context.Background(), a.name, sessionKey)
+	if err != nil || g == nil {
+		return ""
+	}
+	return g.Objective
+}
+
+// goalContinuationLabel is the prose a continuation is rendered as.
+//
+// Why a label at all rather than the prompt: the injected text is an audit prompt — it tells the
+// model to enumerate requirements, not to trust its memory, and how to call `update_goal` — and it
+// carries a budget snapshot. Rendering that under a `role: user` bubble would both leak internal
+// instructions into a user-facing transcript and claim the user wrote them (O1: a bubble must not
+// say something false about who spoke). The objective is the part the user DID write.
+func goalContinuationLabel(objective string) string {
+	if objective == "" {
+		return "（继续执行目标）"
+	}
+	return "（继续执行目标）" + objective
+}
+
+func (a *Agent) WebChatHistory(
+	sessionId string,
+	includeSynthetic bool,
+) []map[string]any {
 	if sessionId == "" {
 		sessionId = "web-ui"
 	}
@@ -1548,12 +1584,20 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
 	for _, m := range msgs {
-		// Hide runtime-injected messages (currently only goal_context
-		// continuations). They live in the session for the LLM's
-		// benefit; surfacing them to the user would expose audit
-		// scaffolding the user never typed. Matches Codex's slash-only
-		// /goal UX — the audit prompt is internal-only.
+		// Runtime-injected rows (currently only goal_context continuations) live in the session for
+		// the LLM's benefit: their CONTENT is audit scaffolding the user never typed, so it is never
+		// rendered. What may be rendered is the fact of the continuation, which is what the branch
+		// below does — and only when the caller asked for it.
 		if m.Origin != provider.OriginUser {
+			if includeSynthetic && m.Origin == provider.OriginGoalContext {
+				history = append(history, map[string]any{
+					"role":      "user",
+					"content":   goalContinuationLabel(a.goalObjective(sess.SessionKey())),
+					"synthetic": true,
+					"origin":    m.Origin,
+					"timestamp": m.Timestamp,
+				})
+			}
 			continue
 		}
 		switch m.Role {

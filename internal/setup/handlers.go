@@ -1902,7 +1902,16 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "agent not found"})
 		return
 	}
-	resp := map[string]any{"history": ag.WebChatHistory(sessionID)}
+	// `includeSynthetic=1` is the WEB's request: render the goal continuations as bubbles that say
+	// the runtime continued the goal (the objective, never the audit prompt). The MCP read calls
+	// this endpoint without it, so its projection keeps skipping injected rows (§14.3) — and the
+	// user's own `/goal …` line, which is a real user message, appears for both.
+	resp := map[string]any{
+		"history": ag.WebChatHistory(
+			sessionID,
+			r.URL.Query().Get("includeSynthetic") == "1",
+		),
+	}
 	// latestEventSeq is the resume cursor for /api/chat/subscribe — the
 	// client opens that endpoint with `since=<latestEventSeq>` so a
 	// fresh page load picks up only deltas it hasn't already rendered.
