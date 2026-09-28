@@ -2455,7 +2455,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// *whose* submission is waiting — the same field the lease-wait emitter
 		// sends, for the same reason (a tab that did not POST can only withdraw
 		// the turn it can name).
-		data := map[string]any{"position": sess.TurnWaiters() + 1}
+		// Position by the count taken where the waiting happens (session_waiters.go): this turn is
+		// already counted, and `sess.TurnWaiters()` watches a slot a turn parked here never reaches.
+		data := map[string]any{"position": a.queuedSubmissionsFor(sess.Key())}
 		if id := TurnIDFromContext(ctx); id != "" {
 			data["turnId"] = id
 		}
@@ -3436,7 +3438,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	defer lease.Stop()
 	if sess.TurnActive() {
 		emitEvent(ctx, ChatEvent{Type: "queued", Data: map[string]any{
-			"position": sess.TurnWaiters() + 1,
+			// Same as the non-streaming twin: the count includes this turn.
+			"position": a.queuedSubmissionsFor(sess.Key()),
 		}})
 	}
 	if !sess.AcquireTurn(ctx) {
