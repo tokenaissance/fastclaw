@@ -712,6 +712,36 @@ func (r delta) changed() bool {
 	return len(r.moved) > 0 || len(r.blocked) > 0 || len(r.storeOnly) > 0 || r.problem != ""
 }
 
+// snapshotFailureProblem is the sentence the agent gets when the reconcile could not RUN. It states
+// what is known — the sandbox still holds the changes, the store may be older — and then names the
+// one cause it can actually identify, instead of asserting a cause for every failure.
+//
+// Why it is a function (row 84 of docs/fs-formal-proof/11-change-register.md): the sentence used to be
+// a constant — "Typical cause: /workspace grew past the snapshot cap (32 MiB) … Move those to /tmp" —
+// written 2026-09-18 out of that week's incident (the 09-14 over-cap OOM, `5f38348`). This branch
+// catches EVERY failure of `SnapshotWorkspace`, whose ctx is the tool call's own (`527b8fb`), so a cut
+// turn or a caller that left lands here too — and in the production window measured 2026-09-28 those
+// were 2 of 2 failures while the cap was 0 of 2. Naming the wrong cause is worse than naming none:
+// `/tmp` is not mirrored, so a model that follows "move those to /tmp" with a deliverable loses it.
+//
+// Ordering, and why: an over-cap refusal is a fact about the SANDBOX and is actionable (the executor's
+// own text carries the largest paths), so it wins when both are true; next is "this call's ctx ended",
+// which is a fact about this call and is stated without guessing which of the three ways it ended
+// (the same rule as rows 79 and 81); anything else is reported as itself. Nothing here invents a cause,
+// and nothing here tells the model how to tidy /workspace — that belongs to whatever wrote the file.
+func snapshotFailureProblem(ctx context.Context, err error) string {
+	const consequence = "The sandbox still holds them; the store — and anything you read with read_file — may be older."
+	switch {
+	case errors.Is(err, errSnapshotOverCap):
+		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store: /workspace is over the snapshot cap (%v). %s",
+			err, consequence)
+	case ctx.Err() != nil:
+		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store: this turn's context ended before the sync could run. %s", consequence)
+	default:
+		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store (%v). %s", err, consequence)
+	}
+}
+
 // syncStoreScope is the store scope a sync's write-backs belong to.
 //
 // A project is one tree: its tools write the project root and hydrate fills the
@@ -741,15 +771,7 @@ func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Ex
 	files, err := snapper.SnapshotWorkspace(ctx)
 	if err != nil {
 		slog.Warn("sandbox sync: snapshot failed", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "error", err)
-		// The sandbox's changes did not reach the store. That is a state change
-		// the agent has to be able to reason about: reading the file back
-		// through a file tool returns the STORE's copy, which is now older than
-		// what the sandbox holds. Saying so turns "my work vanished" into "the
-		// sync is blocked and here is why".
-		d.problem = fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store (%v). "+
-			"The sandbox still holds them; the store — and anything you read with read_file — may be older. "+
-			"Typical cause: /workspace grew past the snapshot cap (32 MiB), usually from logs or datasets. "+
-			"Move those to /tmp and the next sync goes through.", err)
+		d.problem = snapshotFailureProblem(ctx, err)
 		return d
 	}
 	// Memory-free decision procedure.
