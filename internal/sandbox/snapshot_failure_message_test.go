@@ -36,10 +36,14 @@ func TestTheSyncFailureMessageNamesOnlyTheCauseItKnows(t *testing.T) {
 		notWant []string
 	}{
 		{
-			name:    "over the cap",
-			ctx:     live,
-			err:     fmt.Errorf("%s [%w]", capText, errSnapshotOverCap),
-			want:    []string{"could NOT be synced", "snapshot cap", "Largest entries", "read_file"},
+			name: "over the cap",
+			ctx:  live,
+			err:  fmt.Errorf("%s [%w]", capText, errSnapshotOverCap),
+			// The instruction is part of this class's message on purpose: it is true here, and the
+			// runtime is the only layer that gets to say "this name is over the cap" at all. It is
+			// carried in the message's own words as well as the executor's, so a backend that
+			// reworded its error would not silently take the advice away.
+			want:    []string{"could NOT be synced", "snapshot cap", "Move the large or growing files out of /workspace", "/tmp", "not mirrored", "Largest entries", "read_file"},
 			notWant: []string{"turn's context ended"},
 		},
 		{
