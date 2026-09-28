@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -171,5 +172,39 @@ func TestDiskTreeHash_IgnoresDotfiles(t *testing.T) {
 	}
 	if h1 != h2 {
 		t.Errorf("disk hash changed when only dotfiles were added: %s vs %s", h1, h2)
+	}
+}
+
+// The rule the runtime cannot enforce for the author, pinned where the author reads it: a skill that
+// runs something long keeps its run logs out of the mirrored tree (register §13.4 — the log family is
+// 142 of one production window's 446 refusals, and not one of them self-heals).
+func TestTheSkillCreatorCarriesTheMirroredTreeRule(t *testing.T) {
+	body := mustRead(t, filepath.Join("bundled_skills", "skill-creator", "SKILL.md"))
+	for _, want := range []string{"/workspace", "/tmp", "mirrored", "stops being syncable"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("skill-creator/SKILL.md does not carry %q, so a future skill author is never told", want)
+		}
+	}
+}
+
+// The system-prompt half of the contract that exec_long_wait_test.go names: the file-delivery rule
+// has exactly one owner — the sandbox module of the prompt — and the reference to this test had been
+// dangling since the corpus work (the test was gone, the comment stayed). Restored here.
+//
+// What this test does NOT pin, and why: the rule's twin ("anything that only grows belongs in /tmp")
+// is NOT in the prompt. The sandbox module has a hard budget (`TestSandboxPromptStaysUnderItsBudget`,
+// 3700 chars) and production's log family costs more than the budget has room for, so the discipline
+// lives where the user put it — the skill layer (see TestTheSkillCreatorCarriesTheMirroredTreeRule) —
+// and the on-event message tells any other reader what to do when a path is actually refused
+// (register §13.4).
+func TestFileDeliveryRuleHasOneOwner(t *testing.T) {
+	body := mustRead(t, filepath.Join("prompt_modules.go"))
+	for _, want := range []string{
+		"Save the image to **/workspace/** (NOT /tmp/)",
+		"Do NOT base64-inline the bytes into your",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the sandbox prompt module does not carry %q", want)
+		}
 	}
 }
