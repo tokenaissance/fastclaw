@@ -43,7 +43,10 @@ func TestCancelOnAnotherReplicaStopsTheRunningTurnE2E(t *testing.T) {
 		t.Fatal("replica A's turn never reached the tool")
 	}
 
-	// The user hits Stop in a view served by replica B.
+	// The user hits Stop in a view served by replica B. The turn is RUNNING, so the id plays no
+	// part in this path: the peer has no pending entry for it and the answer comes from stamping
+	// the session's live lease (that is what `wasRunning:true` reports). The string below is
+	// deliberately one no server ever minted — a stop must not need the submitter's identity.
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/chat/cancel",
 		strings.NewReader(`{"agentId":"agt_e2e","sessionId":"`+session+`","turnId":"turn-xcancel-a"}`))

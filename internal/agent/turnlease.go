@@ -188,7 +188,9 @@ func (a *Agent) beginTurnLease(ctx context.Context, sess *session.Session, emit 
 		}
 		// Whose submission is waiting. This is the one fact whose reader has to act on a specific
 		// submission: a tab that learns "something of mine is queued" from a re-emission (a reload,
-		// or any tab that did not POST) can only withdraw it if it knows the id the submitter minted.
+		// or any tab that did not POST) can only withdraw it if it knows the submission's identity —
+		// the id the SERVER minted at acceptance (internal/agent/turn_id.go), never a value the
+		// caller chose.
 		// The event ENVELOPE deliberately carries no identity of its own — turns are serialized per
 		// session, so "the holder ended" answers every other question, and a wire field with no
 		// second reader is the kind of thing this roster keeps deleting.

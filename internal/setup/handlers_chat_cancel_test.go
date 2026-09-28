@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -63,4 +64,21 @@ func lookupForTest(s *Server, key string) *pendingWebTurn {
 	s.pendingTurnsMu.Lock()
 	defer s.pendingTurnsMu.Unlock()
 	return s.pendingTurns[key]
+}
+
+// pendingTurnIDsForTest returns the identities currently registered for one session, oldest
+// registration order not implied. A caller can no longer name a submission in advance — the
+// identity is minted at acceptance — so a test that wants "my queued turn" waits for the
+// count and then reads the id from the σ (`queuedTurnID`), exactly like a real client.
+func pendingTurnIDsForTest(s *Server, uid, agentID, sessionID string) []string {
+	prefix := uid + "|" + agentID + "|" + sessionID + "|"
+	s.pendingTurnsMu.Lock()
+	defer s.pendingTurnsMu.Unlock()
+	var ids []string
+	for key := range s.pendingTurns {
+		if strings.HasPrefix(key, prefix) {
+			ids = append(ids, strings.TrimPrefix(key, prefix))
+		}
+	}
+	return ids
 }
