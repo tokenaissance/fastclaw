@@ -448,26 +448,45 @@ func (p *LifecyclePool) keepForNextSweep(sc sandboxScope) {
 }
 
 // extendBudget moves the sandbox's expiry past the end of an operation whose
-// budget is long enough to matter. Best-effort: the operation still runs if the
-// call fails — it just runs with the extra risk of being paused mid-flight, and
-// the truncation that follows is classified like any other cut stream. Since §7
-// that classification is acted on (the instance is destroyed and the caller is
-// told to resend), so a failed extend is a real cost — just never a silent one.
-func (p *LifecyclePool) extendBudget(ctx context.Context, sc sandboxScope, opBudget time.Duration) {
+// budget is long enough to matter. Best-effort for the transient case: the
+// operation still runs — it just runs with the extra risk of being paused
+// mid-flight, and the truncation that follows is classified like any other cut
+// stream. Since §7 that classification is acted on (the instance is destroyed
+// and the caller is told to resend), so a failed extend is a real cost — just
+// never a silent one.
+//
+// It returns an error for exactly ONE class: the failure indicts the INSTANCE
+// (the same `Unusable` predicate the post-exec path asks, so the two paths
+// cannot disagree about what "gone" means). Measured on production 2026-09-28:
+// all four occurrences were `e2b extend timeout <id> HTTP 404` — the sandbox the
+// scope named no longer existed, which the old text reported as "could not
+// extend the sandbox timeout", a sentence about the operation that sends a
+// reader looking for a capacity problem. The caller acts on the returned error
+// by not starting the operation (see execOnce); a transient failure is logged
+// and swallowed, because there is nothing the caller could do differently.
+func (p *LifecyclePool) extendBudget(ctx context.Context, sc sandboxScope, opBudget time.Duration) error {
 	if opBudget < extendThreshold {
-		return
+		return nil
 	}
 	ext, ok := p.inner.(ScopeExtender)
 	if !ok {
-		return
+		return nil
 	}
 	extendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := ext.ExtendScope(extendCtx, sc.agentID, sc.projectID, sc.sessionID, opBudget+extendSlack); err != nil {
+		if p.unusable(err) {
+			// The instance, not the operation: say so, and let the caller refuse to start the work.
+			slog.Warn("the sandbox this scope held is gone; the long operation will not be started on it",
+				"agent", sc.agentID, "session", sc.sessionID,
+				"opBudget", opBudget, "error", err)
+			return err
+		}
 		slog.Warn("could not extend the sandbox timeout before a long operation",
 			"agent", sc.agentID, "session", sc.sessionID,
 			"opBudget", opBudget, "error", err)
 	}
+	return nil
 }
 
 // flushIfSupported snapshots the sandbox workspace and uploads anything
@@ -1108,7 +1127,21 @@ func (l *lazyExecutor) execOnce(ctx context.Context, command string, timeout tim
 	// this the sweeper would destroy the sandbox underneath it.
 	started := time.Now()
 	l.pool.beginUse(l.scope)
-	l.pool.extendBudget(ctx, l.scope, timeout)
+	if goneErr := l.pool.extendBudget(ctx, l.scope, timeout); goneErr != nil {
+		// ③′ — do not start a long operation on an instance the scope has already lost. Returning
+		// here hands the verdict to `Exec`, which owns the replacement: it destroys the instance and
+		// appends the "sandbox replaced … re-run it if it is safe to repeat" note, so the model's
+		// retry lands on a fresh sandbox instead of on the corpse.
+		//
+		// Two things make this the SAFE half of a replacement, where the post-exec path is the
+		// dangerous one: nothing has run yet (no side effect to replay, so "re-run" cannot double
+		// anything), and the deferred endUse above fires before Exec's Release, so the swap still
+		// happens outside the in-use window the idle sweep and the rebuild path respect.
+		//
+		// The narrowness matters as much as the action: a transient extend failure returns nil here
+		// and the operation proceeds on the healthy instance it already has.
+		return "", fmt.Errorf("the sandbox this scope held is gone, so this command was not started: %w", goneErr)
+	}
 	// Deferred rather than called inline: the post-exec sync below reads the
 	// sandbox, and a scope that is no longer marked in use could be swept
 	// (paused) in the middle of it.
