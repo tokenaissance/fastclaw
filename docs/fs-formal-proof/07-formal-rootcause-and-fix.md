@@ -601,21 +601,30 @@ Write-through is the **precondition** of this criterion: right after the mirror 
 tar entries carry `obj.ModTime`). "Same version" is therefore **self-describing** in both copies, with
 nothing recorded anywhere else.
 
-The decision table therefore collapses to three rows (`syncSnapshot`, decided independently per path):
+> **Amended 2026-09-28 (change register row 87).** The third row below — "different ⇒ refuse" — was the
+> absorbing state §13.4 measured (446 refusals, the oldest for 10+ hours): a refusal writes nothing, so
+> the same pair came back every sync. The two copies are now **ordered** rather than merely compared,
+> using two instruments that keep this section's memory-free posture — the file's mtime against the
+> store object's write time with the guest-clock offset **measured in the same exec** as the listing
+> (`statsFor`), and strict-prefix containment of the bytes, which needs no clock at all. A verdict
+> requires every instrument that can speak to agree, and a verdict must survive both readings of the
+> mtime (a sandbox write, or the stamp this section describes). The table becomes:
 
 | store | the two copies' metadata | Verdict | Action |
 |-------|--------------------------|---------|--------|
-| no such path | — | a sandbox artefact | **push** (currently the only direction of writing) |
+| no such path | — | a sandbox artefact | **push** |
 | exists | equal (size + mtime) | the sandbox did not move | skip |
-| exists | different | cannot tell which is newest | **refuse + signal** (silently skipped when the bytes are in fact equal) |
+| exists | different, and every instrument that can speak agrees | one copy is the **successor**: the clock orders the two writes, or the bytes nest (a strict prefix is ancestry) | **push** when the sandbox's copy is the successor; **deliver the store's copy into the sandbox** (a new direction, stamped like the mirror's) when the store's is |
+| exists | different, and no instrument can speak, or they disagree | cannot tell which is newest | **refuse + signal** (silently skipped when the bytes are in fact equal) |
 
 Two costs that must be recorded honestly (both traded away by this simplification, not accidents):
 
-1. **a sandbox edit of an existing path is no longer written back**: a path the store had and the
-   sandbox then changed is refused and reported to the agent (`[workspace] NOT synced …`). This matches
-   the 2026-09-18 trade-off — "sync only writes paths the store does not have yet; existing paths are
-   never overwritten" — at the cost of actively giving up the "a sandbox edit can be written back
-   safely" capability of §3.3.1/§3.10; when it matters, the agent sees the signal and decides.
+1. ~~**a sandbox edit of an existing path is no longer written back**~~ — **retired by row 87**: when
+   nothing else has written the store, §3.2's W₁ says the sandbox's copy is the successor and it is
+   collected (and §3.2's W₂ — the store moved, the sandbox did not — is now *delivered into the
+   sandbox* instead of leaving it stale, which is what `KeyError: 'current_pnl'` was). What row 87
+   keeps refusing is the pair no instrument can order: two writes closer than ≈3 s, or two instruments
+   whose blind spots disagree.
 2. **deletions cannot be detected** (G4): the criterion's domain is the sandbox snapshot, and a deleted
    path is not in it. Restoring detection needs a **store-side persistent manifest**, not in-process
    state ([09](./09-sandbox-lifecycle-audit.md) §3).

@@ -229,6 +229,14 @@ p.flushIfSupported(sc)   // internally syncSnapshot(..., "evict")
 
 ### 3.4 `syncSnapshot`'s criterion
 
+> **Amended 2026-09-28 (change register row 87) — read this before the sketch.** The code below is the
+> 2026-09-17 shape ("the sizes differ ⇒ overwrite"): it is three repairs old. The criterion as it
+> stands is [07 §3.11.3](./07-formal-rootcause-and-fix.md) with row 87's amendment — the store has no
+> such path ⇒ push; size+mtime equal ⇒ skip; otherwise the two copies are **ordered**, not merely
+> compared (the file's mtime against the store's, with the guest-clock offset measured in the same exec
+> as the listing, plus strict-prefix containment of the bytes), and the verdict is push / **deliver the
+> store's copy into the sandbox** / refuse-and-signal.
+
 ```go
 for path, data := range files {                    // files = the sandbox snapshot
     if info, err := p.workspace.Stat(...); err == nil && info.Size == int64(len(data)) {

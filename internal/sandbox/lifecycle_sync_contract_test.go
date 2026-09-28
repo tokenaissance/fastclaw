@@ -36,6 +36,10 @@ type countingWorkspace struct {
 	puts int
 	mods map[string]time.Time
 	tick time.Duration
+	// conflictOnce makes the NEXT PutIfVersion answer as a backend that found the
+	// version changed under it. That is the shape the reconcile's belt must
+	// survive: a verdict about a version that somebody replaced in between.
+	conflictOnce bool
 }
 
 func newCountingWorkspace() *countingWorkspace {
@@ -81,6 +85,14 @@ func (c *countingWorkspace) keys(agentID, projectID, sessionID string) map[strin
 		out[p] = true
 	}
 	return out
+}
+
+// putAt writes one object with an explicit store write time. The counter-based
+// Put cannot place the store's write on the same timeline as the sandbox's clock,
+// and the ordering rule (row 87) is precisely about two writes on one timeline.
+func (c *countingWorkspace) putAt(ctx context.Context, agentID, projectID, sessionID, p, body string, at time.Time) error {
+	c.mods[wsScopeKey(agentID, scopeForKey(projectID, sessionID))+"/"+p] = at
+	return c.fakeWorkspace.Put(ctx, agentID, projectID, sessionID, p, strings.NewReader(body), int64(len(body)), "")
 }
 
 // syncFixture builds the production shape: a store object and a sandbox
@@ -297,22 +309,29 @@ func TestSyncVerdictDoesNotDependOnThePoolThatMakesIt(t *testing.T) {
 		}
 	})
 
-	// ③ the sandbox edited a path the store still has. This is exactly where the
-	// old baseline ruled "the store has not moved ⇒ the sandbox must have edited
-	// it ⇒ take it" — and where a pod WITHOUT that memory refuses. In the current
-	// design both must refuse.
+	// ③ the sandbox edited a path the store still has, and the store has not
+	// moved. Until the ordering rule (row 87) this was refused: with no record of
+	// what the sandbox had been handed, the two writers were indistinguishable.
+	// The bytes settle it now — the store's copy is a strict prefix of the
+	// sandbox's, so the sandbox's is the descendant — and what this subtest still
+	// pins is unchanged: BOTH pools must reach that verdict for the same reason
+	// they both refused before. A verdict that came from pod-local memory would
+	// still split the two worlds here (the adopted one would refuse).
+	//
+	// (This fixture models no guest clock, so the containment instrument speaks;
+	// the clock's own cases are in lifecycle_sync_order_test.go.)
 	t.Run("sandbox edit with an unchanged store", func(t *testing.T) {
 		a := newSyncWorld(t, born, true)
 		b := newSyncWorld(t, born, false)
 		a.sandboxWrite("report.html", born+edit)
 		b.sandboxWrite("report.html", born+edit)
 		d := compareVerdicts(t, a, b)
-		if len(d.moved) != 0 {
-			t.Fatalf("an unattributed sandbox edit was taken: moved=%v", d.moved)
+		if len(d.moved) != 1 || d.moved[0] != "report.html" {
+			t.Fatalf("the sandbox's newer copy was not taken by both pools: moved=%v", d.moved)
 		}
 		for name, w := range map[string]*syncWorld{"hydrated": a, "adopted": b} {
-			if got := storeBodyFrom(t, w, "report.html"); got != born {
-				t.Fatalf("[%s] the store was rewritten by an unattributed edit: %q", name, got)
+			if got := storeBodyFrom(t, w, "report.html"); got != born+edit {
+				t.Fatalf("[%s] the store did not receive the sandbox's copy: %q", name, got)
 			}
 		}
 	})
@@ -625,7 +644,12 @@ var _ workspace.Store = (*countingWorkspace)(nil)
 
 // PutIfVersion makes this test double satisfy workspace.Store after the port
 // gained the conditional write (B2). The doubles model "no versioning": they
-// delegate, which is exactly what a backend declaring no Version does.
+// delegate, which is exactly what a backend declaring no Version does — unless a
+// test arms conflictOnce, which is how the reconcile's refusal path is witnessed.
 func (f *countingWorkspace) PutIfVersion(ctx context.Context, agentID, projectID, sessionID, path string, r io.Reader, size int64, contentType string, expected workspace.Version) error {
+	if f.conflictOnce {
+		f.conflictOnce = false
+		return workspace.ErrVersionConflict
+	}
 	return f.Put(ctx, agentID, projectID, sessionID, path, r, size, contentType)
 }

@@ -944,3 +944,105 @@ uploads, a peer pod's sync) has to maintain the invariant — that is where the 
 reconcile. Until it lands, the class stays: the BLOCKED line reports the fact (§13.3's rows 79–86 are
 unchanged by this), and the only exits remain the deliberate ones — one version written back, or the
 path removed.
+
+### 13.7 The BLOCKED class, closed without a table (row 87)
+
+**The question.** §13.6 asked for a durable per-path record of "a store write that was never
+mirrored", and §13.2 had already refused to answer this class with a *new table* (the ruling was
+explicit: 不要额外加表 — the fact has to live where it already lives). Row 87 gets §3.2's
+classification back — W₁ the sandbox moved, W₂ the store moved, W₃ both — **without the record**: the
+two copies already carry enough to order themselves, and one number that was being thrown away
+(the guest clock) makes the order computable.
+
+**The instruments.** Two, and neither remembers anything between calls:
+
+| Instrument | What it reads | What it settles | Where it is wrong |
+| --- | --- | --- | --- |
+| the clocks | the sandbox file's mtime against the store object's write time, with the guest-vs-pod offset measured in the same exec as the listing (`statsFor`) | **any** pair of writes, monotone or not | a *future-dated* mtime on a sandbox copy that is really the shorter one |
+| the bytes | a strict prefix is ancestry (`bytes.HasPrefix`) | monotone pairs, in both directions, with no clock and no state at all | a store copy that is a strict prefix of the sandbox's while the store's write is the LATER one (a truncation) |
+
+**A verdict requires every instrument that can speak to agree.** Where only one can speak, that one
+decides; where they disagree, the pair is refused and reported. That is the same rule §13.5 asks of
+any criterion — a decision has to be answerable without knowing the goal — applied to two instruments
+whose blind spots are in different places.
+
+**One number, two readings.** The sandbox file's mtime is *one* value with *two* possible producers:
+a sandbox write (a reading of the **guest** clock, which only becomes comparable after the measured
+offset is subtracted) or the stamp the hydrate/mirror wrote (a reading of the **store's** clock, which
+needs no translation at all). The file does not say which, so the verdict must hold under both. This
+is what makes the rule safe on a lagging guest clock: a stamp read as a write lands in the future, and
+the two readings then disagree — which is a refusal, not a quiet overwrite of the store's newer copy
+(falsified; see the table below).
+
+**The slack is arithmetic, not taste.** `versionSlack` = 1 s (the store reports whole seconds) + 2 s
+(twice the measured uncertainty of the offset: a warm exec on the live runtime rounds trip ≈2 s, so the
+midpoint estimate is good to ≈±1 s — `TestE2BLiveGuestClockOffset`, six samples, 2026-09-28). Its cost
+is bounded and visible: two writes less than the slack apart stay undecided.
+
+**What this fundamentally solves.**
+
+1. **The refusal stops being an absorbing state.** A refusal writes nothing, so the same pair came back
+   every sync and was refused again (446 lines; the oldest path refused for 10+ hours). Every path now
+   either has a verdict whose action changes the world, or is a *proven* unknown — and the proven
+   unknown is now the instruments-disagree case, which is small, loud, and named.
+2. **§3.2's W₁/W₂/W₃ are recovered from the copies themselves.** W₁ (only the sandbox moved) ⇒ collect;
+   W₂ (only the store moved) ⇒ deliver; W₃ (both moved, and the instruments cannot agree) ⇒ refuse.
+   The baseline's *job* is done by the two clocks and the bytes; nothing is recorded.
+3. **The missing direction is filled in.** Until row 87 the reconcile could only run sandbox → store,
+   so a sandbox holding a container the store had moved past stayed stale for its whole life. That is
+   the expensive half of §13.4 (`store=29992 > snap=27587`, and the `KeyError: 'current_pnl'` the agent
+   hit while reading an old deliverable). The store → sandbox direction is now a first-class outcome
+   with its own σ, and it stamps the delivered copy the way the mirror does, so the next sync settles
+   the path with size+mtime and no read.
+
+**Why this shape and not the others.**
+
+| Option | Why not |
+| --- | --- |
+| the durable per-path record of §13.6 | a new table, which the ruling excludes; and every store-side writer (tools, panel, uploads, a peer pod's sync) would have to maintain it |
+| "newer wins" straight off the two mtimes | unmeasured. The live measurement puts the guest clock ≈1.2 s ahead of the pod's, so an untranslated comparison would order by the skew rather than by the writes — exactly what §3.11.3 rejected (that rejection stands; what row 87 adds is the *measurement*) |
+| synchronising the clocks (NTP in the guest, `date -s`) | the runtime is not ours to discipline, and E2B pauses/resumes instances (`autoPause`), which is precisely where a guest clock misbehaves. Translating at the comparison point needs no privilege and no state |
+| xattr / a companion marker file ("which store version this sandbox copy saw") | a new carrier with an environment dependency, it dies on delete/rename, and it still cannot answer W₂ without a second reading |
+| `ctime` as "has this been written since the stamp?" | it answers a different question (the last *metadata* operation), so `write && chmod +x` reads as "not written" |
+| "the store always wins" | it silently drops the sandbox's work in the family where the sandbox is the ONLY writer — 142 of the 446 refusals are exactly that |
+| keeping both sides (Dynamo's siblings) | needs somewhere to put the loser: a new carrier again |
+
+**The residue, declared rather than fixed.**
+
+1. **The instruments disagree** — a truncation by whoever else writes the store while the sandbox
+   appends, or a future-dated sandbox mtime. Refused, reported, nothing written.
+2. **A pair closer than `versionSlack`** — two writes within ≈3 s are not orderable by these clocks.
+   Refused, exactly as every pair was before.
+3. **The store's clock is taken to be NTP-aligned with the pod's.** Exact on LocalFS by construction
+   (one clock); on S3 it is the service's clock, and the slack is what absorbs the difference. If a
+   bucket's clock were badly off, the containment instrument still covers the monotone cases.
+4. **An mtime is a value the sandbox's own user can set** (`tar -x`, `cp -p`, `mv` carry times with
+   them), so the clock instrument can be handed a time that is not when the write happened. Two
+   consequences follow, and both are in the code: a refusal is never silent, and the push is
+   **conditional on the version that was judged** (`PutIfVersion`) — if the store moved between the
+   comparison and the write, the verdict was about a version that no longer exists and the round is
+   refused instead of overwriting it.
+
+**Row 87.**
+
+| # | Change | Formal (duty) | Code anchor | UT | Live e2e | Deployed |
+| --- | --- | --- | --- | --- | --- | --- |
+| 87 | **The reconcile orders the two copies instead of refusing them**: `orderCopies` asks which copy is the successor — the file's mtime translated by the guest-clock offset measured in the same exec as the listing, plus strict-prefix containment as the clock-free instrument, and a verdict requires every instrument that can speak to agree. `orderStoreIsNewer` **delivers the store's copy into the sandbox** (new direction) and stamps it; `orderSandboxIsNewer` collects with `PutIfVersion` against the version that was judged; `orderUnknown` keeps the refusal and the `NOT synced` σ. A new σ states the delivery and its consequence ("the version the sandbox held there is gone") with no instruction attached (§13.5). The old constant `equalToStore` became `readStoreCopy`, since the same read now feeds the comparison and the delivery | **F1** (the criterion is a function of the two copies — no baseline, no table) + **F2/O1** (the delivery is a fact the agent must be told) | `internal/sandbox/lifecycle.go` (`statsFor` + `sandboxStats`/`clockSkew`, `orderCopies`/`orderByClock`/`orderByContainment`/`compareInstants`, `readStoreCopy`, `refreshSandboxCopy`, `delta.refreshed`, `refreshedLine`) | green, red first: `internal/sandbox/lifecycle_sync_order_test.go` (7) — a non-monotone sandbox rewrite is collected; a non-monotone store version is delivered **and stamped**; the standoff ends after one delivery (convergence); nesting decides both directions with the clock unavailable; a verdict must survive both readings of the mtime; a pair inside the slack is refused; a push refuses when the store moved under the verdict. `TestSyncVerdictDoesNotDependOnThePoolThatMakesIt`'s third case now pins the new verdict (both pools collect the sandbox's copy) with the same invariance duty. **Falsifications run**: drop the clock instrument ⇒ 4 red; drop the containment instrument ⇒ 3 red; keep only the write reading of the mtime ⇒ the store's newer copy is overwritten (red); push unconditionally instead of `PutIfVersion` ⇒ the losing push lands (red) | `TestE2BLiveSyncOrder` (both directions on real E2B: a sandbox rewrite is collected through the clock instrument alone; a store append is delivered through the containment instrument) and `TestE2BLiveRepro`, whose verdict changed from "the sandbox still holds what it was handed" to "the store's newer copy reached the sandbox"; `TestE2BLiveGuestClockOffset` measures the offset the rule rests on | ❌ |
+
+**Commands.**
+
+```
+# row 87's unit set
+go test ./internal/sandbox/ -run 'TestSyncOrder|TestSyncContract|TestSyncVerdict' -count=1
+# the whole package (the contract file's older rows are unchanged)
+go test ./internal/sandbox/ -count=1
+# the live legs (E2B; ~1 minute)
+FASTAGENT_E2B_LIVE=1 E2B_API_KEY=e2b_... \
+  go test ./internal/sandbox/ -run 'TestE2BLiveSyncOrder|TestE2BLiveRepro|TestE2BLiveGuestClockOffset' -v -count=1
+```
+
+**What row 87 does not claim.** It does not fix the identity-file half of §13.4 (`MEMORY.md`'s two
+writers: rows 77 and 86 are that story, and the 269 refusals they remove were produced by a build that
+predates them). It does not change the store-owned-path guard (`storeOwned` paths are still skipped
+before any of this). And it is **not deployed**: dev and prod are still running the build that refuses
+every divergent pair, which is why the register's Deployed column reads ❌ for this row.

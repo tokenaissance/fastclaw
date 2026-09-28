@@ -618,21 +618,43 @@ type ReplacedWorkspace interface {
 	TakeWorkspaceReplaced() bool
 }
 
-// statsFor reads the sandbox's own size/mtime for every path in the snapshot.
+// statsFor is one pass over the sandbox's filesystem: every path's own size and
+// mtime, plus the sandbox kernel's clock read at the same moment.
+//
 // This is the memory-free substitute for a baseline table: the sandbox
 // filesystem already records when each file last changed, and that record
 // travels WITH the sandbox across replicas and restarts — which a pod-local map
 // cannot. The agent can see the same numbers with `ls -l`.
 //
-// Best-effort: on failure the map is empty, and sameVersion falls through to
-// comparing the bytes — slower, never wrong.
-func statsFor(ctx context.Context, ex Executor, files map[string][]byte) map[string]fileStat {
-	out := make(map[string]fileStat, len(files))
-	res, err := ex.Exec(ctx, `find /workspace -type f -printf '%P\t%s\t%T@\n' 2>/dev/null`, 30*time.Second)
+// The clock rides the SAME exec as the listing, and that is the point: a sandbox
+// mtime is a reading of the sandbox's clock, the store's mtime is a reading of
+// the store's clock, and comparing the two needs the offset BETWEEN them — an
+// offset is only a measurement when both readings are taken at (almost) one
+// instant. This exec's round trip bounds the error (midpoint ± RTT/2). The
+// `NOW ` marker is not decoration: without it, a shell that lacks `date` would
+// leave a listing line where the clock belongs and the parse would shift by one.
+//
+// Best-effort: on failure both halves are empty, and the reconcile refuses
+// rather than guessing — slower, never wrong.
+func statsFor(ctx context.Context, ex Executor, files map[string][]byte) sandboxStats {
+	out := sandboxStats{files: make(map[string]fileStat, len(files))}
+	podBefore := time.Now()
+	res, err := ex.Exec(ctx, `echo "NOW $(date +%s.%N)"; find /workspace -type f -printf '%P\t%s\t%T@\n' 2>/dev/null`, 30*time.Second)
+	podAfter := time.Now()
 	if err != nil {
 		return out
 	}
 	for _, line := range strings.Split(res, "\n") {
+		if rest, ok := strings.CutPrefix(line, "NOW "); ok {
+			if secs, perr := strconv.ParseFloat(strings.TrimSpace(rest), 64); perr == nil {
+				sandboxNow := time.Unix(0, int64(secs*float64(time.Second)))
+				out.skew = clockSkew{
+					offset: sandboxNow.Sub(podBefore.Add(podAfter.Sub(podBefore) / 2)),
+					known:  true,
+				}
+			}
+			continue
+		}
 		parts := strings.Split(line, "\t")
 		if len(parts) != 3 {
 			continue
@@ -642,9 +664,24 @@ func statsFor(ctx context.Context, ex Executor, files map[string][]byte) map[str
 		if sizeErr != nil || modErr != nil {
 			continue
 		}
-		out[parts[0]] = fileStat{size: size, modUnix: int64(secs)}
+		out.files[parts[0]] = fileStat{size: size, modUnix: int64(secs)}
 	}
 	return out
+}
+
+// sandboxStats is one statsFor pass: the sandbox's files, plus the offset
+// between the sandbox's clock and this pod's as read in the same exec.
+type sandboxStats struct {
+	files map[string]fileStat
+	skew  clockSkew
+}
+
+// clockSkew is the sandbox kernel's clock minus this pod's, read in one exec.
+// known=false means the reading never arrived, so no mtime can be translated;
+// that costs a verdict, never a wrong one.
+type clockSkew struct {
+	offset time.Duration
+	known  bool
 }
 
 // fileStat is one sandbox file's own metadata.
@@ -674,20 +711,184 @@ func sameVersion(info *workspace.ObjectInfo, st fileStat, data []byte) bool {
 	return diff <= 1
 }
 
-// equalToStore compares the store's bytes with the sandbox's. Called only when
-// the metadata check could not settle it, so the read is paid once per
-// genuinely-ambiguous path, not per sync.
-func equalToStore(ctx context.Context, ws workspace.Store, sc sandboxScope, path string, data []byte) bool {
-	rc, err := ws.Get(ctx, sc.agentID, sc.projectID, sc.sessionID, path)
+// readStoreCopy fetches the store's whole copy of one path. Called only when the
+// cheap metadata check could not settle a path, so the read is paid once per
+// genuinely-divergent path, not per sync. The bytes come back rather than an
+// equality verdict because the caller needs them for both jobs: to compare, and —
+// when the store's copy turns out to be the successor — to deliver.
+func readStoreCopy(ctx context.Context, ws workspace.Store, sc sandboxScope, storePath string) ([]byte, bool) {
+	rc, err := ws.Get(ctx, sc.agentID, sc.projectID, sc.sessionID, storePath)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	defer rc.Close()
 	stored, err := io.ReadAll(rc)
 	if err != nil {
-		return false
+		return nil, false
 	}
-	return bytes.Equal(stored, data)
+	return stored, true
+}
+
+// versionOrder is the answer to the one question the reconcile has to settle
+// before it can write anything: which of the two copies is the successor?
+type versionOrder int
+
+const (
+	// orderUnknown: the copies differ and nothing in hand orders them. The
+	// reconcile refuses and says so — the rule the 2026-09-17 incident needed,
+	// kept for exactly the case it was written for.
+	orderUnknown versionOrder = iota
+	// orderStoreIsNewer: the store's copy descends from the sandbox's, so the
+	// sandbox is holding a container the store has moved past.
+	orderStoreIsNewer
+	// orderSandboxIsNewer: the sandbox's copy descends from the store's.
+	orderSandboxIsNewer
+)
+
+// versionSlack is how far apart two readings may be and still leave the order
+// undecided, and it is arithmetic rather than taste:
+//
+//	1 s  the store reports whole seconds (S3's LastModified), so a store mtime
+//	     already carries that much slop;
+//	2 s  twice the measured uncertainty of the guest-clock offset — a warm exec
+//	     on the live runtime rounds trip ≈2 s (measured 2026-09-28, six samples,
+//	     `TestE2BLiveGuestClockOffset`), so the midpoint estimate is good to ≈±1 s
+//	     and anything the two clocks disagree about by less than that is not
+//	     evidence.
+//
+// Its cost is bounded and visible: two writes less than `versionSlack` apart stay
+// undecided and are refused, exactly as every pair was before this rule.
+const versionSlack = 3 * time.Second
+
+// orderCopies decides which copy is the successor. Two instruments, neither of
+// which needs anything remembered between calls:
+//
+//  1. The file's own mtime against the store object's write time — the general
+//     instrument, it orders any pair of writes, not just monotone ones.
+//  2. The bytes — a strict prefix is ancestry, exact and clock-free, in both
+//     directions, and it is all that speaks when the guest clock is unreadable.
+//
+// A verdict requires every instrument that CAN speak to agree, and that is not
+// bookkeeping: each instrument has one narrow way of being misled (a truncation
+// that leaves the store's copy as a prefix of the sandbox's while the store's
+// write is the later one; a future-dated mtime on a sandbox copy that really is
+// the shorter one). Whenever the two disagree, one of them is reading a fact that
+// is not there, and nothing on hand says which — so the pair is refused and
+// reported, exactly as every pair was before this rule.
+func orderCopies(storeBytes, sandboxBytes []byte, storeMod time.Time, st fileStat, skew clockSkew) versionOrder {
+	byClock := orderByClock(storeMod, st, skew)
+	byBytes := orderByContainment(storeBytes, sandboxBytes)
+	switch {
+	case byClock == orderUnknown:
+		return byBytes
+	case byBytes == orderUnknown:
+		return byClock
+	case byClock == byBytes:
+		return byClock
+	}
+	return orderUnknown
+}
+
+// orderByClock orders the two copies by when each was written.
+//
+// The mtime of the sandbox file is one number, but it has two possible readings,
+// because two different writers put numbers there:
+//
+//	as a sandbox write  the value is the GUEST clock's reading of that instant,
+//	                    which lands on this pod's clock after subtracting the
+//	                    offset measured in the same exec as the listing;
+//	as a stamp          the value is a reading of the STORE's clock, written by
+//	                    hydrate (`tar` header) or by the mirror (`touch -d`), and
+//	                    needs no translation at all.
+//
+// The file does not say which one it is, so a verdict has to hold under BOTH
+// readings — and that is exactly the case that cannot be ordered. Reading it only
+// as a write is what would let a stamp from an older store version, seen through
+// a guest clock that runs behind, be mistaken for a newer sandbox write; reading
+// it only as a stamp is the mirror image. When the two readings disagree, this
+// returns orderUnknown and the caller refuses.
+//
+// This is also the answer to docs 07 §3.11.3's objection to "newer wins": that
+// objection was to comparing two clocks WITHOUT knowing their offset. Here the
+// offset is measured, and the comparison refuses wherever the measurement is not
+// enough to decide.
+func orderByClock(storeMod time.Time, st fileStat, skew clockSkew) versionOrder {
+	if !skew.known || st.modUnix == 0 || storeMod.IsZero() {
+		return orderUnknown
+	}
+	m := time.Unix(st.modUnix, 0)
+	asWrite := compareInstants(m.Add(-skew.offset), storeMod)
+	asStamp := compareInstants(m, storeMod)
+	if asWrite == orderUnknown || asWrite != asStamp {
+		return orderUnknown
+	}
+	return asWrite
+}
+
+// compareInstants is the ordering itself: later wins, and the slack is the band
+// where "later" is not established.
+func compareInstants(sandboxAt, storeMod time.Time) versionOrder {
+	switch {
+	case sandboxAt.After(storeMod.Add(versionSlack)):
+		return orderSandboxIsNewer
+	case sandboxAt.Before(storeMod.Add(-versionSlack)):
+		return orderStoreIsNewer
+	}
+	return orderUnknown
+}
+
+// orderByContainment orders two copies by what the bytes contain: when one is a
+// strict prefix of the other, the longer one is the descendant. That is exact for
+// anything that grows forward — a log, a jsonl trace, a file a script extends —
+// and it needs no clock at all, which is why it is the fallback for a sandbox
+// whose clock could not be read.
+//
+// Both copies must be non-empty: an empty file is a prefix of everything, which
+// is evidence of nothing. The known limit is the mirror image — a store copy that
+// is a strict prefix of the sandbox's while the store's write is the LATER one
+// (a truncation by whoever else writes the store) would be read as the sandbox
+// being ahead. That is why this runs second and only when the clock is silent;
+// the clock gets that case right.
+func orderByContainment(storeBytes, sandboxBytes []byte) versionOrder {
+	if len(storeBytes) == 0 || len(sandboxBytes) == 0 {
+		return orderUnknown
+	}
+	switch {
+	case len(sandboxBytes) > len(storeBytes) && bytes.HasPrefix(sandboxBytes, storeBytes):
+		return orderSandboxIsNewer
+	case len(storeBytes) > len(sandboxBytes) && bytes.HasPrefix(storeBytes, sandboxBytes):
+		return orderStoreIsNewer
+	}
+	return orderUnknown
+}
+
+// refreshSandboxCopy writes the STORE's copy over the sandbox's, and stamps it
+// the way hydrate and the write-through do.
+//
+// The direction is new for the reconcile: until now it only ever collected the
+// sandbox INTO the store, so a sandbox holding a copy the store had moved past
+// stayed stale for as long as the instance lived — the expensive half of the
+// 2026-09-26/27 scene, where the agent kept reading an older deliverable and the
+// run died on `KeyError: 'current_pnl'` against a file the store already had the
+// fix for.
+//
+// The stamp is not cosmetic: it is what lets the NEXT sync settle this path with
+// size+mtime and no read at all, exactly as the mirror's stamp does. A failed
+// stamp is a warning, not a failure — the bytes are already right, and the only
+// cost is that the next reconcile reads the body once more.
+func (p *LifecyclePool) refreshSandboxCopy(ctx context.Context, ex Executor, storePath string, data []byte, storeMod time.Time) error {
+	sandboxPath := defaultSandboxRoot + "/" + sanitizeSandboxPath(storePath)
+	if _, err := ex.WriteFile(ctx, sandboxPath, string(data)); err != nil {
+		return fmt.Errorf("sandbox write: %w", err)
+	}
+	if storeMod.IsZero() {
+		return nil
+	}
+	if _, err := ex.Exec(ctx, fmt.Sprintf("touch -d @%d %s", storeMod.Unix(), shellQuote(sandboxPath)), 15*time.Second); err != nil {
+		slog.Warn("sandbox sync: delivered the store's copy but could not stamp it",
+			"path", storePath, "error", err)
+	}
+	return nil
 }
 
 // delta is what one reconcile observed, in the three shapes that matter to the
@@ -706,6 +907,12 @@ type delta struct {
 	moved     []string
 	blocked   []string
 	storeOnly []string
+	// refreshed are paths where the STORE's copy was the successor, so it was
+	// written into the sandbox over the copy the sandbox held. It is a third
+	// direction, not a shade of the other two: "moved" runs sandbox → store,
+	// "blocked" wrote nothing at all, and this one runs store → sandbox at the
+	// cost of whatever the sandbox held.
+	refreshed []string
 	// problem is set when the reconcile itself could not run — the snapshot
 	// failed (workspace over the cap) or the store listing did. The agent has to
 	// know: the sandbox's changes are NOT in the store, and it will otherwise
@@ -726,7 +933,7 @@ func syncRecordCtx(ctx context.Context, budget time.Duration) (context.Context, 
 
 // changed reports whether the delta has anything to say.
 func (r delta) changed() bool {
-	return len(r.moved) > 0 || len(r.blocked) > 0 || len(r.storeOnly) > 0 || r.problem != ""
+	return len(r.moved) > 0 || len(r.blocked) > 0 || len(r.storeOnly) > 0 || len(r.refreshed) > 0 || r.problem != ""
 }
 
 // snapshotFailureProblem is the sentence the agent gets when the reconcile could not RUN. It states
@@ -815,16 +1022,21 @@ func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Ex
 	//   the store object's size + write time   (from Stat; one round trip each)
 	//   the sandbox file's size + mtime        (from one stat pass, statsFor)
 	//
+	//   the offset between the sandbox's clock and this pod's (same exec)
+	//
 	// — plus the invariant the write-through maintains: after a host write both
 	// copies hold the same bytes AND the mirror stamps the sandbox file with the
 	// store's write time. So "same size and same mtime" means "same version",
 	// and the cheap skip needs no memory.
 	//
-	// When they look different, comparing the bytes decides: equal ⇒ skip;
-	// different ⇒ refuse to choose, and record the δ. A host write whose mirror
-	// failed lands here with the sandbox holding older bytes and is refused
-	// rather than overwritten (the incident's shape); a sandbox edit lands here
-	// too and is signalled as "not synced" for the agent to settle.
+	// When the two look different the reconcile used to refuse unconditionally,
+	// and a refusal writes nothing: the next sync found the same pair, refused
+	// again, and the path stayed unsynced for as long as the sandbox lived (446
+	// refusals in the measured window; the oldest ran 10+ hours). The question it
+	// has to answer is which copy is the SUCCESSOR, and orderCopies answers it
+	// from the bytes first (a strict prefix is ancestry, in both directions) and
+	// from the file's own mtime translated by the measured clock offset second.
+	// Only "no evidence at all" still refuses.
 	stats := statsFor(ctx, ex, files)
 
 	// A (docs 10 §4 G17): a project is ONE file tree, so a sandbox-born file
@@ -856,13 +1068,60 @@ func (p *LifecyclePool) syncSnapshot(ctx context.Context, sc sandboxScope, ex Ex
 				"agent", sc.agentID, "session", sc.sessionID, "cause", cause,
 				"path", path, "error", statErr)
 			continue
-		case sameVersion(info, stats[path], data):
+		case sameVersion(info, stats.files[path], data):
 			continue
 		default:
-			if equalToStore(ctx, p.workspace, ws, path, data) {
+			stored, read := readStoreCopy(ctx, p.workspace, ws, path)
+			if !read {
+				// "the store's copy could not be read" is not a verdict about which
+				// copy is newer — it is the absence of one.
+				slog.Warn("sandbox sync: the store's copy could not be read, leaving the object untouched",
+					"agent", sc.agentID, "session", sc.sessionID, "cause", cause, "path", path)
+				d.blocked = append(d.blocked, path)
 				continue
 			}
-			slog.Warn("sandbox sync: BLOCKED — the two copies of this path hold different bytes",
+			if bytes.Equal(stored, data) {
+				continue
+			}
+			switch orderCopies(stored, data, info.ModTime, stats.files[path], stats.skew) {
+			case orderStoreIsNewer:
+				// The direction the reconcile never had: the store's copy is the
+				// successor, so it is delivered INTO the sandbox. Without this the
+				// sandbox keeps working against a container the store has moved past
+				// (production: "the new container layer's /workspace is an old
+				// snapshot", then `KeyError: 'current_pnl'`).
+				if err := p.refreshSandboxCopy(ctx, ex, path, stored, info.ModTime); err != nil {
+					slog.Warn("sandbox sync: could not deliver the store's newer copy into the sandbox",
+						"agent", sc.agentID, "session", sc.sessionID, "cause", cause, "path", path, "error", err)
+					d.blocked = append(d.blocked, path)
+					continue
+				}
+				slog.Info("sandbox sync: the store's copy is newer; delivered into the sandbox",
+					"agent", sc.agentID, "session", sc.sessionID, "cause", cause,
+					"path", path, "storeBytes", info.Size, "replacedSandboxBytes", len(data))
+				d.refreshed = append(d.refreshed, path)
+				continue
+			case orderSandboxIsNewer:
+				// Conditional on the version that was judged: if the store moved
+				// between the comparison and this write, the verdict was about a
+				// version that no longer exists. Refuse this round and let the next
+				// sync decide on the new pair — never overwrite unseen work.
+				if err := p.workspace.PutIfVersion(ctx, ws.agentID, ws.projectID, ws.sessionID, path,
+					bytesReader(data), int64(len(data)), "", info.Version); err != nil {
+					if errors.Is(err, workspace.ErrVersionConflict) {
+						slog.Warn("sandbox sync: the store's copy moved between the comparison and the write; not overwriting it",
+							"agent", sc.agentID, "session", sc.sessionID, "cause", cause, "path", path)
+						d.blocked = append(d.blocked, path)
+						continue
+					}
+					slog.Warn("sandbox sync: put failed", "agent", sc.agentID, "session", sc.sessionID, "cause", cause, "path", path, "error", err)
+					continue
+				}
+				d.moved = append(d.moved, path)
+				written++
+				continue
+			}
+			slog.Warn("sandbox sync: BLOCKED — the two copies of this path hold different bytes and nothing in hand orders them",
 				"agent", sc.agentID, "session", sc.sessionID, "cause", cause,
 				"path", path, "storeBytes", info.Size, "snapshotBytes", len(data))
 			d.blocked = append(d.blocked, path)
@@ -1268,10 +1527,38 @@ func signalsFor(d delta) string {
 		sb.WriteString(strings.Join(d.blocked, ", "))
 		sb.WriteString(" — both versions are intact.")
 	}
+	if len(d.refreshed) > 0 {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(refreshedLine(d.refreshed))
+	}
 	if len(d.storeOnly) > 0 {
 		sb.WriteString(StoreOnlyLine(d.storeOnly))
 	}
 	return sb.String()
+}
+
+// refreshedLine states the one fact the other lines cannot: the store's copy won,
+// and the sandbox now holds it.
+//
+// The consequence is spelled out because it cannot be recovered from the sandbox
+// afterwards — the version the sandbox held is gone, and it was not in the store
+// (that is what "the store's copy is the successor" means). No instruction
+// follows: whether that lost version mattered is a judgment about the goal, and a
+// message has no way to make one (docs 11 §13.5).
+func refreshedLine(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	const shownMax = 5
+	shown, more := paths, ""
+	if len(shown) > shownMax {
+		more = fmt.Sprintf(" (+%d more)", len(shown)-shownMax)
+		shown = shown[:shownMax]
+	}
+	return "\n[workspace] the store's copy of " + strings.Join(shown, ", ") + more +
+		" was newer than this sandbox's, so it was written into the sandbox — the version the sandbox held there is gone."
 }
 
 // StoreOnlyLine states the divergence one walk cannot see by construction: paths

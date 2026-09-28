@@ -139,15 +139,26 @@ func TestE2BLiveRepro(t *testing.T) {
 			"  see docs/文件系统形式化证明/07-formal-rootcause-and-fix.md §3.3", got, v2)
 	}
 
-	// The other half of the same fact, and the reason the store survived: the
-	// sandbox still holds what it was handed, so the reconcile had nothing to
-	// migrate. If this ever reads the host's version, a host write DID reach the
-	// sandbox — meaning the mirror ran, and this test's premise is stale.
+	// The other half of the same fact, and the repair row 87 added: the store's
+	// copy is the SUCCESSOR, so the reconcile does not stop at preserving it — it
+	// delivers it INTO the sandbox, where the agent will read it. Until 2026-09-28
+	// this line read "the sandbox still holds what it was handed", and that stale
+	// sandbox copy is what produced `KeyError: 'current_pnl'` in production: the
+	// agent kept working against a container the store had moved past (docs 11
+	// §13.4, the S3 paper family).
+	//
+	// The delivery is not the write-through mirror: no tool call was made here (the
+	// store was written directly), so the only writer that could have reached the
+	// sandbox is the reconcile.
 	if out, err := ex.Exec(ctx, "cat /workspace/report.txt", 60*time.Second); err != nil {
 		t.Fatalf("exec after reconcile: %v (%s)", err, out)
-	} else if !strings.Contains(out, "OLD SNAPSHOT") {
-		t.Errorf("the sandbox now holds the host's version without a write-through — "+
-			"the mirror ran, so this scenario no longer models a pre-write-through build (sandbox said %q)", out)
+	} else if !strings.Contains(out, "NEW HOST WRITE") {
+		t.Errorf("the sandbox was NOT given the store's newer copy, so it is still working against a stale "+
+			"container (sandbox said %q, store holds %q)", out, v2)
+	}
+	if trace := logs.String(); !strings.Contains(trace, "the store's copy is newer; delivered into the sandbox") {
+		t.Errorf("the store's newer copy reached the sandbox without the reconcile saying so — "+
+			"sync trace:\n%s", excerpt(trace, "sandbox sync:"))
 	}
 
 	// And the sandbox artefact branch must still work on the same instance:

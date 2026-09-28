@@ -204,6 +204,12 @@ p.flushIfSupported(sc)   // 内部调用 syncSnapshot(..., "evict")
 
 ### 3.4 `syncSnapshot` 的判据
 
+> **2026-09-28 修订（改动册第 87 行）——先读这段再看下面的代码。** 下面这段是 2026-09-17 的形状
+> （"大小不同 ⇒ 覆盖"）：它落后了三处修复。当前判据是 [07 §3.11.3](./07-formal-rootcause-and-fix.md)
+> 加上第 87 行的修订——store 没有该路径 ⇒ 推送；size+mtime 相同 ⇒ 跳过；否则两份副本是被**排序**而不是
+> 只被比较（文件自己的 mtime 对 store 的写入时间，其中 guest 钟偏移在与列目录同一次 exec 里测出；
+> 再加上字节的严格前缀包含关系），得出的判决是：推送 / **把 store 那份投递进沙箱** / 拒绝并上报。
+
 ```go
 for path, data := range files {                    // files = 沙箱快照
     if info, err := p.workspace.Stat(...); err == nil && info.Size == int64(len(data)) {
