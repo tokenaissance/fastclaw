@@ -19,6 +19,10 @@ type durableSignals struct {
 	mu    sync.Mutex
 	rows  map[string]string
 	takes int
+	// honourCtx makes the fake behave like the real carrier, which is a store read: a ctx that is
+	// already done fails the read and returns BEFORE its delete, so the note stays parked. The
+	// default (false) ignores the ctx, which is how a test asks "was it even called?".
+	honourCtx bool
 }
 
 func newDurableSignals() *durableSignals { return &durableSignals{rows: map[string]string{}} }
@@ -34,10 +38,15 @@ func (d *durableSignals) AppendSignal(_ context.Context, agentID, projectID, ses
 	return nil
 }
 
-func (d *durableSignals) TakeSignals(_ context.Context, agentID, projectID, sessionID string) (string, error) {
+func (d *durableSignals) TakeSignals(ctx context.Context, agentID, projectID, sessionID string) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.takes++
+	if d.honourCtx {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
 	k := d.key(agentID, projectID, sessionID)
 	out := d.rows[k]
 	delete(d.rows, k)
@@ -92,6 +101,56 @@ func TestEvictSignalOutlivesThePoolThatProducedIt(t *testing.T) {
 	}
 	if strings.Contains(out2, "while_away.md") {
 		t.Fatalf("the parked signal was delivered twice:\n%q", out2)
+	}
+}
+
+// The other half of G3's "no loss": the note is consumed only by a SUCCESSFUL read+delete, so a turn
+// whose ctx is already over must not ask at all.
+//
+// Asking costs two things and buys nothing: a round trip that is already canceled, and a WARN that
+// reads like a store fault while nothing is wrong with the store. Production 2026-09-28 had exactly
+// one such line in the window — `sandbox sync could not read parked signals … error="context
+// canceled"` — the same shape as the abandoned-read WARN the setup package stopped raising
+// (fastagent change-register row 79). Leaving the note parked costs nothing: the next turn's sync
+// has the reader this one lost.
+func TestAParkedSignalIsNotTakenOnceTheTurnIsOver(t *testing.T) {
+	carrier := newDurableSignals()
+	carrier.honourCtx = true // the real carrier is a store read: a dead ctx fails it before the delete
+	lp, _, _ := syncFixture(t, "stored", "stored")
+	lp.SetSignalStore(carrier)
+
+	// A previous sync parked a fact for this scope — the eviction path's whole purpose.
+	if err := carrier.AppendSignal(context.Background(), "erin", "", "", movedLine([]string{"while_away.md"})); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	if carrier.parked() != 1 {
+		t.Fatalf("the note was not parked: %d rows", carrier.parked())
+	}
+
+	buf := captureSandboxWarnings(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := lp.takeSignals(ctx, sandboxScope{agentID: "erin"}); got != "" {
+		t.Fatalf("a turn that is already over took the note anyway:\n%q", got)
+	}
+	if carrier.takes != 0 {
+		t.Fatalf("the carrier was read with a dead ctx (%d reads): the note survives, but the read is not free and its failure is reported as the store's", carrier.takes)
+	}
+	if carrier.parked() != 1 {
+		t.Fatal("a turn that is already over consumed the parked note; the fact is gone")
+	}
+	if strings.Contains(buf.String(), "could not read parked signals") {
+		t.Fatalf("a dead turn produced a store-fault warning:\n%s", buf.String())
+	}
+
+	// Positive control: the next turn (a live ctx) still gets it. The guard skips a *reader*, not
+	// the delivery.
+	got := lp.takeSignals(context.Background(), sandboxScope{agentID: "erin"})
+	if !strings.Contains(got, "while_away.md") {
+		t.Fatalf("the note did not survive to the next turn:\n%q", got)
+	}
+	if carrier.parked() != 0 {
+		t.Fatal("a successful take must clear the row, or the fact repeats forever")
 	}
 }
 

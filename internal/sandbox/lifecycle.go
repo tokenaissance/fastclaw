@@ -519,6 +519,18 @@ func (p *LifecyclePool) takeSignals(ctx context.Context, sc sandboxScope) string
 	if p.signals == nil {
 		return ""
 	}
+	// A turn whose ctx is already over has no reader left, and the note is only consumed by a
+	// SUCCESSFUL read+delete (see `sandboxSignalStore.TakeSignals`: the delete runs after the read
+	// returns, and a failed delete still returns the text). So asking here buys nothing and costs
+	// two things: a round trip that is already canceled, and a WARN — "could not read parked
+	// signals; the agent will not be told this time" — that reads like a store fault while the
+	// store is fine. Production 2026-09-28 had exactly one such line in the window
+	// (`error="context canceled"`); the same shape the setup package stopped reporting for its own
+	// abandoned reads (fastagent change-register row 79). The next turn's sync — the one that has a
+	// reader — takes the note.
+	if ctx.Err() != nil {
+		return ""
+	}
 	out, err := p.signals.TakeSignals(ctx, sc.agentID, sc.projectID, sc.sessionID)
 	if err != nil {
 		slog.Warn("sandbox sync could not read parked signals; the agent will not be told this time",
