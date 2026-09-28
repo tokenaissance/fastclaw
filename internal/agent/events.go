@@ -71,7 +71,20 @@ func emitEventChecked(ctx context.Context, evt ChatEvent) (int64, error) {
 
 	if persist && stream != nil && stream.sink != nil && stream.userID != "" && stream.sessionKey != "" {
 		blob, _ := json.Marshal(evt.Data)
-		s, err := stream.sink.AppendSessionEvent(ctx, stream.userID, stream.agentID, stream.sessionKey, evt.Type, blob)
+		// The ctx that bounds the WORK must not be the ctx that kills the RECORD of it.
+		//
+		// This is not hypothetical: on 2026-09-28 two production goal turns were cut at their
+		// 300 s budget, and at that instant `error` and `done` — the two events that say the turn
+		// died — were refused by the store with "context deadline exceeded" because they were
+		// appended with the already-expired turn ctx. The session then looked like nothing had
+		// happened at all, which is exactly the failure a reader is least able to diagnose.
+		//
+		// So the append runs on a detached, short-budget copy: values (user id, chatter id) are
+		// kept, the deadline is not. content_delta is live-only and never reaches this branch, so
+		// nothing high-volume changes shape.
+		sinkCtx, cancel := recordCtx(ctx, eventPersistBudget)
+		s, err := stream.sink.AppendSessionEvent(sinkCtx, stream.userID, stream.agentID, stream.sessionKey, evt.Type, blob)
+		cancel()
 		if err != nil {
 			persistErr = err
 			slog.Warn("persist chat event failed",

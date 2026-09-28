@@ -2756,6 +2756,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
 			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg, "ending": EndingFailed}})
 			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
+			a.afterFailedTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 			return noProviderMsg
 		}
 		// After enough consecutive rounds where every tool came back
@@ -2783,6 +2784,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			slog.Error("LLM chat failed after retries", "agent", a.name, "error", err)
 			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error(), "ending": EndingFailed}})
 			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
+			a.afterFailedTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 			return "Sorry, I encountered an error processing your request."
 		}
 		a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
@@ -2795,6 +2797,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				// reader should take is "ask again", which is why §14.3 keeps the value separate.
 				emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": emptyMsg, "ending": EndingEmpty}})
 				emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingEmpty}})
+				a.afterFailedTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 				return emptyMsg
 			}
 			// Stamp this turn's produced files onto the reply that closes it:
@@ -3171,6 +3174,26 @@ func firstNonEmptyLine(s string) string {
 		return line
 	}
 	return ""
+}
+
+// afterFailedTurn runs the PostTurn hooks for a turn that ended in FAILURE, and it is not
+// decoration: the goal continuation is one of those hooks, so a goal whose turn failed used to
+// stop for good — the chain only advanced on a clean exit. Measured 2026-09-28 on production: a
+// goal turn was cut at its 300 s budget, the early return skipped PostTurn, and the goal sat
+// `active` for 86 minutes with nobody scheduled to move it until the user typed "continue"; a
+// provider 402 (insufficient balance) broke the same chain the same way an hour earlier.
+//
+// It deliberately does NOT run for a turn that was stopped or superseded: a stop is the user's
+// decision and a supersede means another holder owns the session — re-firing a continuation in
+// either case would fight the decision that just happened.
+//
+// The hooks write (token accounting, the goal store) and the failed turn's ctx is frequently
+// already past its deadline — which is exactly why the failure happened — so they run through
+// recordCtx: values kept, no inherited deadline, a short bound of their own.
+func (a *Agent) afterFailedTurn(ctx context.Context, msg bus.InboundMessage, messages []provider.Message, toolCallCount int, chatterMem *Memory) {
+	hookCtx, cancel := recordCtx(ctx, postTurnAfterFailureBudget)
+	defer cancel()
+	a.runPostTurn(hookCtx, msg, messages, toolCallCount, chatterMem)
 }
 
 // msg is the InboundMessage that drove this turn — its (channel, account,
