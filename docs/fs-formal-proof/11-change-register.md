@@ -769,7 +769,7 @@ that can hold the token.
 
 > **All nine rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
 > (`…-8b63ddf`), 81–82 with revision 95 (`…-ada56f9`), 83 with revision 96 (`…-ac662ed`), 84 with
-> revision 97 (`…-0082824`), 85–86 with revisions 99 (`…-43c1c94`) and 100 (`…-8505015`), and 87 with revision 101 (`…-96d4ee2`), all
+> revision 97 (`…-0082824`), 85–86 with revisions 99 (`…-43c1c94`) and 100 (`…-8505015`), and 87 with revision 101 (`…-0efb1c3`), all
 > `./build-image.sh dev`. The 95 rollout is also the A1 probe's third positive reading (below).
 
 > **One naming decision, recorded so it is not re-litigated (user's ruling, 2026-09-28)**: the
