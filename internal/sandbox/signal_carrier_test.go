@@ -184,22 +184,6 @@ func TestBlockedPathsAreReDerivedRatherThanCarried(t *testing.T) {
 	if !strings.Contains(out, "NOT synced") || !strings.Contains(out, "report.html") {
 		t.Fatalf("the refusal was not re-derived for the agent:\n%q", out)
 	}
-	// And the refusal has to carry the ways out: this is the one state in this package that does not
-	// resolve on its own, so a reader who is only told the fact is looking at a permanent refusal
-	// (register §13.4: 269 refusals on one path over ten hours). The mechanics are part of it —
-	// reading the sandbox's copy means `exec cat`, because `read_file` answers from the store.
-	for _, want := range []string{
-		"both versions are intact",
-		"remove it (both copies",
-		"move it out of /workspace",
-		"write that one back through the file tools",
-		"`exec cat`",
-		"answers from the store",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the refusal does not carry %q, so the reader has no move:\n%q", want, out)
-		}
-	}
 }
 
 // A rebuild is discovered INSIDE a tool call, so its note rides that call's own

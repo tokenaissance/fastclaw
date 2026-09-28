@@ -155,11 +155,6 @@ go test ./internal/agent/tools/ -run 'TestTheAgentHomeMirrorIsOwnerOnly|TestIden
 #   kubectl -n production logs <pod> | grep 'sandbox sync: BLOCKED' | 按会话/路径/大小聚合
 #   会话事件：临时 postgres pod 挂 fastagent-secrets/STORAGE_DSN，只做 SELECT
 
-# 第 87 行：被拒的路径告诉读者两条出路，skill 层先知道
-go test ./internal/sandbox/ -run TestBlockedPathsAreReDerivedRatherThanCarried -count=1
-go test ./internal/agent/ -run 'TestTheSkillCreatorCarriesTheMirroredTreeRule|TestFileDeliveryRuleHasOneOwner|TestSandboxPromptStaysUnderItsBudget' -count=1
-go test ./internal/agent/tools/ -run 'TestExecDescriptionDoesNotRestateTheDeliveryRule|TestExecDescriptionsStayInSync' -count=1
-python3 scripts/extract-prompt-inventory.py --check
 
 ```
 
@@ -640,7 +635,7 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 **本节要的那条见证就是第 80 行**：给 W1/W2 补一条丢失更新的用例——两个写者对同一 `(agent,user,MEMORY.md)`
 交错写入，**第二个必须被拒绝**（不是被合并）；反证＝去掉版本前置 ⇒ 第一份内容被静默覆盖。
 
-### 13.3 九行：把本趟留下的口子收掉（第 79–87 行）
+### 13.3 八行：把本趟留下的口子收掉（第 79–86 行）
 
 第 79 行是同一批取证里"噪音信号"的那一半（一个 prod 日志窗口里 5 条 `context canceled` 的 WARN，背后没有
 任何存储事故）。第 80 行是 §13.2 的 belt，连同**唯一能握住那个 token 的写者**一起落。
@@ -672,11 +667,10 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 
 | 86  | **agent home 的磁盘镜像与它的读一样，是 owner-only**：`systemRoot/MEMORY.md` 是每个 agent **一个**文件、没有 (agent,user) 维度，而它影子里的 store 行是 per-chatter 的。读侧自隔离修复起就有 owner 门；镜像**三处调用点都没有门**（`write_file` / `edit_file` / `apply_patch`），于是访客写的 MEMORY.md 落到**主人**的磁盘文件里——而主人下一次走磁盘兜底的读（主人自己还没有 store 行时）会答复出访客的记忆。现在 `mirrorToAgentHome` 是那个文件的唯一写者，门就是 `ownsAgentHome`（读侧用的同一个谓词，两边不可能再各说各话）。用户选的是"退休"与"迁移"之间的中间档；**退休/迁移仍然开着** | **O1**（读点名一个主人、写点了另一个）+ §13.2 结论 2 | `internal/agent/tools/registry.go`（`mirrorToAgentHome`）、`internal/agent/tools/file.go`、`internal/agent/tools/apply_patch.go`、`internal/agent/tools/system_file_home_mirror_test.go` | 先红后绿：`system_file_home_mirror_test.go`（2 条）——访客的 write 与 edit 都只落到自己的 store 行、home 一动不动；主人自己的写照旧镜像（进程内读者不受影响）；主人写 identity 文件照样镜像。**已实跑的反证**：去掉 `ownsAgentHome` 那道门 ⇒ 红，"a visitor's write landed in the agent home, where the owner's disk-fallback read would find it" | 无（进程内；它去掉的形状第 68 行在读侧已经量过） | ❌（dev ✅） |
 
-| 87  | **被拒的路径要告诉读者两条出路，而 skill 层要在日志被写出来之前就知道**（§13.4 分析的 B7② + 路线 1）：`signalsFor` 的 BLOCKED 那句保留事实、补上两个方向——是日志：删掉（**两边都删**，只删沙箱那份会让以后每次同步都报 `storeOnly`）或移出 `/workspace`；是交付物：把你认定的那一版经文件工具写回——并带上机械细节：`read_file` 答复的是 **store**，所以要读沙箱那份得 `exec cat`。`skill-creator/SKILL.md` 把纪律写在每个未来的 skill 作者都会读的地方。**两个面刻意没改**：exec 描述（schema 每次请求都发，交付规则的主人是 prompt——我第一版就放在那里，被仓里自己的守卫抓住；它的禁用词现在也包含 "mirrored" 与 "/tmp"），以及 prompt 模块（3,700 字符预算 vs 这条规则约 420：预算就是逼你做这个取舍，所以非 skill 的手打场景只剩"发生时的消息"——这句写在读代码的人会看的地方） | **O10**（欠读者的义务要落在读者看得见的面上）+ **O1**（只有事实，读者无从下手） | `internal/sandbox/lifecycle.go`（`signalsFor`）、`internal/agent/bundled_skills/skill-creator/SKILL.md`、`internal/agent/tools/exec_long_wait_test.go`（守卫）、`internal/sandbox/signal_carrier_test.go`、`internal/agent/bundled_skills_test.go` | 先红后绿：消息的六条措辞；skill 规则的四组词；`TestFileDeliveryRuleHasOneOwner` 恢复（那条注释一直在引用一个已经不存在的测试）。**已实跑的反证**：去掉动作 ⇒ "the refusal does not carry …"；去掉 skill 那段 ⇒ 报 "stops being syncable"；把规则塞回 schema ⇒ `TestExecDescriptionDoesNotRestateTheDeliveryRule` 点名 "mirrored" | 无（进程内；促成它的现场在 §13.4） | ❌（dev ✅） |
 
-> **九行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
+> **八行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
 > （`…-ada56f9`），第 83 行随 revision 96（`…-ac662ed`），第 84 行随 revision 97（`…-0082824`），
-> 第 85–86 行随 revision 99（`…-43c1c94`）与 100（`…-8505015`），第 87 行随 revision 101（`…-0efb1c3`），都是 `./build-image.sh dev`。
+> 第 85–86 行随 revision 99（`…-43c1c94`）与 100（`…-8505015`），都是 `./build-image.sh dev`。
 > 95 这次滚动也顺带给出了 A1 探针的第三次正向读数（见下）。
 
 > **一处命名裁决，记在这里免得被重新翻案（用户裁决，2026-09-28）**：超上限这一类带**两个**哨兵——
@@ -744,3 +738,23 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
    它们不是"从没发布过"，而是**长过了自己发布时的那一版**。
 4. 诚实的边界：`MEMORY.md` 那半的归因来自**模型自己的叙述**加大小形状，**不是**写入方记录——而那正是路线 3 要补的事实。
    这次重建说不出"某一次同步为什么没镜像成"。
+
+**这里试过什么、又撤回了什么（2026-09-28，用户裁决）。** 拿着上面的现场，我先落了两件——B7② 的**建议式** BLOCKED 行
+（是日志：删掉或移出；是交付物：写回一版）加上 skill 层那条规则（"运行日志放 /tmp"）——然后把两件都撤回了。
+裁决原话：**面向模型的文字只反映"当前发生了什么"，由模型自己决定怎么做**；不许对**某一类**文件硬编码一个操作。
+这不是吹毛求疵，有两个理由：
+
+* **"它是不是日志"不可判定**。那是意图的属性，不是产物的属性——同样的形状、同样的写者，一个小时的 `_p11.log`
+  是可丢的，下一个小时就是一次失败唯一的证据（S3 的 `paper-run2-lifecycles.jsonl` 正是一个"看着像日志"的留存物）。
+  判断属于知道目标的人——模型——而不属于消息里的一句话。
+* **建议的错分支是无声的**。`/tmp` 从不镜像、也不活过沙箱重建，所以"被误判为日志的留存物"会**无声消失**；
+  而 `/workspace` 那一支判错的代价至少是"读者被告知的一次拒绝"。**错分支无声的规则，比没有规则更糟。**
+
+留下的、以及这件事仍然开着的：
+
+* BLOCKED 行只留**事实**（"两份不同、谁也不许自动选边、两份都完整"）——那就是"发生了什么"，怎么做由模型决定；
+* 这个类别**不靠任何文字**解决，而靠上面的路线 3：那条持久的路径级记录把"两份不同"从永久歧义变成一次判决，
+  且不需要任何人分类；
+* 一条通用判据，它已经两次拦下我的提案（扩展名过滤，和这一次）：
+  **凡是能用可测属性（大小 / 路径 / 时间 / 计数）表达的，就不许再改写成意图分类。意图分类可以出现在解释里，
+  绝不能出现在判据里（拒绝 / 丢弃 / 降级 / 选边）。**

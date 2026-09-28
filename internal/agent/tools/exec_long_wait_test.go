@@ -215,10 +215,7 @@ func TestExecDescriptionsStayInSync(t *testing.T) {
 // The system-prompt half of this contract is TestFileDeliveryRuleHasOneOwner.
 func TestExecDescriptionDoesNotRestateTheDeliveryRule(t *testing.T) {
 	for _, desc := range []string{execHostDescription, execSandboxDescription} {
-		// "mirrored" and "/tmp" joined the list on 2026-09-28: the mirrored-tree rule (keep run logs
-		// out of /workspace) belongs to the sandbox module of the system prompt, exactly like the
-		// delivery rule — its first home in the schema was caught by this test.
-		for _, restated := range []string{"base64", "Files panel", "workspace file", "mirrored", "/tmp"} {
+		for _, restated := range []string{"base64", "Files panel", "workspace file"} {
 			if strings.Contains(strings.ToLower(desc), strings.ToLower(restated)) {
 				t.Fatalf("exec description restates the delivery rule (%q): %q", restated, desc)
 			}

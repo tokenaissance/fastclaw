@@ -169,11 +169,6 @@ go test ./internal/agent/tools/ -run 'TestTheAgentHomeMirrorIsOwnerOnly|TestIden
 #   kubectl -n production logs <pod> | grep 'sandbox sync: BLOCKED' | <aggregate by session/path/sizes>
 #   session events: a temporary postgres pod with fastagent-secrets/STORAGE_DSN, SELECT only
 
-# row 87: a refused path tells the reader the two ways out, and the skill layer is told first
-go test ./internal/sandbox/ -run TestBlockedPathsAreReDerivedRatherThanCarried -count=1
-go test ./internal/agent/ -run 'TestTheSkillCreatorCarriesTheMirroredTreeRule|TestFileDeliveryRuleHasOneOwner|TestSandboxPromptStaysUnderItsBudget' -count=1
-go test ./internal/agent/tools/ -run 'TestExecDescriptionDoesNotRestateTheDeliveryRule|TestExecDescriptionsStayInSync' -count=1
-python3 scripts/extract-prompt-inventory.py --check
 
 ```
 
@@ -736,7 +731,7 @@ witness says so.
 interleaving on one `(agent,user,MEMORY.md)`, where the second is refused rather than merged;
 falsification: drop the version precondition and the first writer's content is silently overwritten.
 
-### 13.3 Nine rows that close things this pass left open (79–87)
+### 13.3 Eight rows that close things this pass left open (79–86)
 
 Row 79 is the noisy-signal half of the same forensics (five `context canceled` WARNs in one prod log
 window, no store incident behind any of them). Row 80 is §13.2's belt, landed with the one writer
@@ -765,11 +760,10 @@ that can hold the token.
 
 | 86  | **The agent home's disk mirror is owner-only, like its read**: `systemRoot/MEMORY.md` is ONE file per agent with no (agent,user) dimension, while the store row it shadows is per-chatter. The read side has been owner-gated since the isolation fix; the mirror had no gate at any of its three call sites (`write_file` / `edit_file` / `apply_patch`), so a visitor's MEMORY.md write landed in the OWNER's file on disk — and the owner's next disk-fallback read answered with the visitor's memory. `mirrorToAgentHome` is now the one writer of that file, gated on `ownsAgentHome` (the read side's own predicate, so the two cannot disagree). The user's ruling was the middle option between retiring the home and migrating it; **retiring/migrating stays open** | **O1** (the read names one owner and the write another) + §13.2 conclusion 2 | `internal/agent/tools/registry.go` (`mirrorToAgentHome`), `internal/agent/tools/file.go`, `internal/agent/tools/apply_patch.go`, `internal/agent/tools/system_file_home_mirror_test.go` | green, red first: `system_file_home_mirror_test.go` (2) — a visitor's write AND edit reach their own store row while the home stays untouched; the owner's own write still mirrors (the in-process readers keep working); an owner's identity-file write still mirrors. **Falsification run**: drop the `ownsAgentHome` check ⇒ red, "a visitor's write landed in the agent home, where the owner's disk-fallback read would find it" | none (in-process; the shape it removes is the one row 68 already measured for reads) | ❌ (dev ✅) |
 
-| 87  | **A refused path tells the reader the two ways out, and the skill layer is told before the log is written** (B7② + route 1 of §13.4's analysis): `signalsFor`'s BLOCKED line keeps the fact and adds both directions — a log: remove it (both copies, or the next sync reports it as a path the sandbox no longer has) or move it out of /workspace; a deliverable: write the version you mean back through the file tools — plus the mechanics, because `read_file` answers from the STORE, so reading the sandbox's copy means `exec cat`. `skill-creator/SKILL.md` carries the discipline where every future skill author reads it. **Two surfaces deliberately did NOT change**: the exec description (the schema is sent on every request; the delivery rule's owner is the prompt — my first version put it there and the repo's own guard caught it, whose forbidden list now also names "mirrored" and "/tmp"), and the prompt module (3,700-char budget vs ~420 for the rule: the budget forces the trade, so the ad-hoc, non-skill case keeps only the on-event message — stated where the reader of the code will look) | **O10** (a duty owed to the reader lands on the surface that reader sees) + **O1** (the reader cannot act on the fact alone) | `internal/sandbox/lifecycle.go` (`signalsFor`), `internal/agent/bundled_skills/skill-creator/SKILL.md`, `internal/agent/tools/exec_long_wait_test.go` (the guardrail), `internal/sandbox/signal_carrier_test.go`, `internal/agent/bundled_skills_test.go` | green, red first: the message's six clauses; the skill rule's four terms; `TestFileDeliveryRuleHasOneOwner` restored (the comment had been naming a test that was gone). **Falsifications run**: strip the actions ⇒ "the refusal does not carry …"; strip the skill paragraph ⇒ "does not carry \"stops being syncable\""; re-add the rule to the schema ⇒ `TestExecDescriptionDoesNotRestateTheDeliveryRule` names "mirrored" | none (in-process; the scene that motivated it is §13.4) | ❌ (dev ✅) |
 
-> **All nine rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
+> **All eight rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
 > (`…-8b63ddf`), 81–82 with revision 95 (`…-ada56f9`), 83 with revision 96 (`…-ac662ed`), 84 with
-> revision 97 (`…-0082824`), 85–86 with revisions 99 (`…-43c1c94`) and 100 (`…-8505015`), and 87 with revision 101 (`…-0efb1c3`), all
+> revision 97 (`…-0082824`), and 85–86 with revisions 99 (`…-43c1c94`) and 100 (`…-8505015`), all
 > `./build-image.sh dev`. The 95 rollout is also the A1 probe's third positive reading (below).
 
 > **One naming decision, recorded so it is not re-litigated (user's ruling, 2026-09-28)**: the
@@ -858,3 +852,31 @@ session-event queries (a temporary probe pod, deleted afterwards):
 4. The honest limit: the attribution for `MEMORY.md` is the **agent's own account** plus the size
    shape, not an instrumented writer record — which is exactly the fact route 3 would add. Nothing
    here can say why an individual sync failed to mirror.
+
+**What was tried and withdrawn here (2026-09-28, user's ruling).** With the scene above in hand I
+landed B7② as an *advisory* BLOCKED line (a log: remove it or move it out; a deliverable: write one
+version back) plus a skill-layer rule ("run logs belong in /tmp"), and then reverted both. The
+ruling, in the user's words: model-facing text must **state what happened and let the model decide** —
+it must not hard-code an operation for a *class* of file. Two things make that right rather than
+fastidious:
+
+* **"is this a log" is not decidable.** It is a property of intent, not of the artifact — the same
+  shape and the same writer produce `_p11.log` (disposable) one hour and a failure's only evidence the
+  next (S3's `paper-run2-lifecycles.jsonl` is exactly a keeper that reads like a log). The judgment
+  belongs to whoever knows the goal — the model — not to a sentence in a message.
+* **the advice's wrong branch is silent.** `/tmp` is never mirrored and does not survive a sandbox
+  replacement, so a keeper wrongly judged a log *disappears with nothing said*; the /workspace branch's
+  wrong outcome is at least a refusal the reader is told about. A rule whose wrong branch is silent is
+  worse than no rule.
+
+What stays, and what this leaves open:
+
+* the BLOCKED line keeps the FACT only ("the two copies differ, neither side may be chosen
+  automatically, both versions are intact") — that is "what happened", and the model decides;
+* the class is not addressed by any wording. It is addressed by route 3 above: the durable per-path
+  record turns "they differ" from a permanent ambiguity into a decision, with no classification by
+  anyone;
+* the general criterion, which has now caught two of my proposals (the extension filter, and this):
+  **anything expressible as a measurable property (size, path, time, count) must not be re-expressed
+  as an intent class. Intent classes may appear in explanations; they may never appear in a
+  criterion (refuse / drop / degrade / pick a side).**

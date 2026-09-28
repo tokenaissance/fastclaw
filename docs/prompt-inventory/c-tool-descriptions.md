@@ -2,7 +2,7 @@
 
 ## apply_patch
 
-<!-- source: internal/agent/tools/apply_patch.go:445 (via applyPatchDescription) -->
+<!-- source: internal/agent/tools/apply_patch.go:444 (via applyPatchDescription) -->
 
 ````text
 Apply a multi-file patch in OpenAI Codex DSL format. Use this instead of chained edit_file/write_file calls when a change touches ≥2 files or ≥2 hunks — one tool call performs every edit atomically (parse + hunk matching happens for every file before any write; if any hunk fails to anchor, NO file is modified).
@@ -37,7 +37,7 @@ Rules:
 
 ## apply_patch
 
-<!-- source: internal/agent/tools/apply_patch.go:445 (via applyPatchDescription) -->
+<!-- source: internal/agent/tools/apply_patch.go:444 (via applyPatchDescription) -->
 
 ````text
 Apply a multi-file patch in OpenAI Codex DSL format. Use this instead of chained edit_file/write_file calls when a change touches ≥2 files or ≥2 hunks — one tool call performs every edit atomically (parse + hunk matching happens for every file before any write; if any hunk fails to anchor, NO file is modified).
@@ -106,7 +106,7 @@ Get the current user's token usage and remaining quota for billing. Use this whe
 
 ## create_cron_job
 
-<!-- source: internal/agent/tools/cron.go:32 -->
+<!-- source: internal/agent/tools/cron.go:29 -->
 
 ````text
 Create a scheduled task. Use this for any user request that names a specific time, an interval, or a recurring schedule (e.g. "5 分钟后提醒", "every Monday 9am", "each day at 8"). When the schedule fires, the agent receives `message` as a fresh inbound prompt on the same channel the request originated from. Do NOT write timed reminders into HEARTBEAT.md — that file is only for conditional self-checks reviewed at every heartbeat tick.
@@ -114,7 +114,7 @@ Create a scheduled task. Use this for any user request that names a specific tim
 
 ## list_cron_jobs
 
-<!-- source: internal/agent/tools/cron.go:64 -->
+<!-- source: internal/agent/tools/cron.go:60 -->
 
 ````text
 List all scheduled tasks for this agent.
@@ -122,7 +122,7 @@ List all scheduled tasks for this agent.
 
 ## delete_cron_job
 
-<!-- source: internal/agent/tools/cron.go:76 -->
+<!-- source: internal/agent/tools/cron.go:72 -->
 
 ````text
 Delete a scheduled task by ID.
@@ -156,7 +156,7 @@ Execute a shell command in the sandbox and return stdout/stderr.
 
 ## read_file
 
-<!-- source: internal/agent/tools/file.go:430 -->
+<!-- source: internal/agent/tools/file.go:429 -->
 
 ````text
 Read the contents of a file
@@ -164,7 +164,7 @@ Read the contents of a file
 
 ## write_file
 
-<!-- source: internal/agent/tools/file.go:74 (via writeFileDescription) -->
+<!-- source: internal/agent/tools/file.go:73 (via writeFileDescription) -->
 
 ````text
 Write content to a file (creates directories as needed). For a long document this is one call and one set of arguments, and those arguments cannot exceed your output limit — write the first section, then append the rest with edit_file.
@@ -172,7 +172,7 @@ Write content to a file (creates directories as needed). For a long document thi
 
 ## list_dir
 
-<!-- source: internal/agent/tools/file.go:435 -->
+<!-- source: internal/agent/tools/file.go:434 -->
 
 ````text
 List files and directories in a path
@@ -180,7 +180,7 @@ List files and directories in a path
 
 ## edit_file
 
-<!-- source: internal/agent/tools/file.go:114 (via editDescription) -->
+<!-- source: internal/agent/tools/file.go:113 (via editDescription) -->
 
 ````text
 Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text.
@@ -188,7 +188,7 @@ Edit a file by replacing an exact substring. Prefer this over write_file when ch
 
 ## read_file
 
-<!-- source: internal/agent/tools/file.go:1116 -->
+<!-- source: internal/agent/tools/file.go:1115 -->
 
 ````text
 Read the contents of a file
@@ -196,7 +196,7 @@ Read the contents of a file
 
 ## write_file
 
-<!-- source: internal/agent/tools/file.go:74 (via writeFileDescription) -->
+<!-- source: internal/agent/tools/file.go:73 (via writeFileDescription) -->
 
 ````text
 Write content to a file (creates directories as needed). For a long document this is one call and one set of arguments, and those arguments cannot exceed your output limit — write the first section, then append the rest with edit_file.
@@ -204,7 +204,7 @@ Write content to a file (creates directories as needed). For a long document thi
 
 ## list_dir
 
-<!-- source: internal/agent/tools/file.go:1270 -->
+<!-- source: internal/agent/tools/file.go:1269 -->
 
 ````text
 List files and directories in a path
@@ -212,7 +212,7 @@ List files and directories in a path
 
 ## edit_file
 
-<!-- source: internal/agent/tools/file.go:114 (via editDescription) -->
+<!-- source: internal/agent/tools/file.go:113 (via editDescription) -->
 
 ````text
 Edit a file by replacing an exact substring. Prefer this over write_file when changing only part of a file (especially identity files like SOUL.md / MEMORY.md): it's cheaper, can't drop unrelated content, and validates the replacement was applied. old_string must match a unique substring unless replace_all is true; new_string must differ from old_string. Read the file first if you're unsure of the exact text.

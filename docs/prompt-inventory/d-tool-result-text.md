@@ -2,7 +2,7 @@
 
 ## error suffix on every failed tool
 
-<!-- source: internal/agent/tools/registry.go:1003 -->
+<!-- source: internal/agent/tools/registry.go:960 -->
 
 ````text
 [Analyze the error above and try a different approach.]
