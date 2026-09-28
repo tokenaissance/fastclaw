@@ -733,8 +733,14 @@ func snapshotFailureProblem(ctx context.Context, err error) string {
 	const consequence = "The sandbox still holds them; the store — and anything you read with read_file — may be older."
 	switch {
 	case errors.Is(err, errSnapshotOverCap):
-		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store: /workspace is over the snapshot cap (%v). %s",
-			err, consequence)
+		// The advice belongs HERE, and only here: for this class it is true and actionable. What was
+		// wrong with the old sentence was never the instruction — it was naming this cause for every
+		// failure. (The instruction is also why "which files are disposable" cannot be decided by the
+		// runtime: it names where to put them, and the file's own producer — a skill, a script — is
+		// the one that knows whether it may go.)
+		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store: /workspace is over the snapshot cap. "+
+			"Move the large or growing files out of /workspace — run logs and scratch belong in /tmp, which is not mirrored — and the next sync goes through. %s %v",
+			consequence, err)
 	case ctx.Err() != nil:
 		return fmt.Sprintf("the sandbox's changes could NOT be synced to the workspace store: this turn's context ended before the sync could run. %s", consequence)
 	default:
