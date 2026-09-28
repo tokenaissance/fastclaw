@@ -124,6 +124,12 @@ go test ./internal/runtime/ -run TestPreviewSandboxSession -count=1             
 go test ./internal/session/ -run TestRunReceipt -count=1                          # #11
 go test ./internal/sandbox/ -run 'TestLayoutWriteScopeAndParserAgree|TestProjectWritersAndTheSyncShareOneScope|TestAProjectChatSubdirKeyIsItsOwnPath' -count=1   # #31
 go test ./internal/workspace/ -run 'TestScopeSegments|TestWriteScope|TestAWriterScope' -count=1  # #31
+
+# 2026-09-28 这一趟收尾的两行（§13.3）
+go test ./internal/setup/ -run 'TestASessionEventsReadIsStillAttempted|TestACallersOwnCancellation|TestAStoresOwnDeadline|TestACancellationNobodyAskedFor|TestAHealthySessionEventsRead|TestBothSessionEventsReads' -count=1  # #79
+go test ./internal/store/ -run AgentFileIfVersion -count=1  # #80（sqlite；带 DSN 才有 Postgres 那条腿）
+FASTAGENT_TEST_PG_DSN='postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable' go test ./internal/store/ -run AgentFileIfVersion -count=1  # #80 在竞态为真的方言上（随便一个一次性集群即可）
+go test ./internal/agent/ -run 'TestTheDistiller' -count=1  # #80（消费者：拒绝 / 无人写时仍然落 / USER.md）
 ```
 
 ## 7. 没有真机 e2e 的条目，以及为什么
@@ -553,9 +559,14 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 
 | #   | 变更点（一句话）                                                                                                                                                     | 形式义务                                                                     | 代码锚                                                                                                                                                            | UT / e2e                                                                                                                                                                                                                       | live e2e                                                                                                      | 部署 |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ---- |
-| 76  | **终局事件不能在"工作已死"的 ctx 上写**：`emitEventChecked` 的落库改用 `recordCtx`（保留值、断开父级取消/死线、自带 3s）。线上证据：300s 预算掐死回合时，`error`/`done` 被 `context deadline exceeded` 拒收，会话看起来"什么都没发生" | **O1**（不许让读者以为没发生过）+ §10.11 的"记录必须落地"                     | `internal/agent/events.go`（`recordCtx(ctx, eventPersistBudget)`）、`internal/agent/ctxkind.go`（命名与两个预算）                                                  | green：`TestATerminalEventSurvivesTheTurnContext`（假 sink 看到 ctx 仍存活）、`TestATerminalEventReachesTheRealStoreAfterTheTurnDies`（**真 sqlite**：已取消的回合仍写进 `session_events`）、`TestRecordCtxKeepsValuesAndDropsTheParentsDeath`；**反证跑过**：改回用父 ctx ⇒ 前两条红 | 无（等发布后由发布后的行为见证）                                                                              | ❌（工作区） |
-| 77  | **goal 复用 cron 的预算设置项**：`taskTimeoutFor` 对 `SourceGoalContext` 与 `SourceCron` 一视同仁（`TaskQueueCfg.CronTimeoutSec`）。线上证据：goal 回合 `duration_ms=300002/300006/300418/301184`，而 cron 本来就能特批 | **P5 / F2**（同一个"长活"概念不该有两个口径）                                 | `internal/gateway/gateway.go`（`taskTimeoutFor` 的 switch）                                                                                                        | green：`TestTaskTimeoutForSourcePolicy`（goal ⇒ 配置值；未配置 ⇒ 队列默认）；**反证跑过**：恢复"只特批 cron" ⇒ goal 那条读到 0                                                                                                  | 无（**prod 还需要把 `cronTimeoutSec` 配成一个非零值**，否则仍是 300s）                                        | ❌（工作区） |
-| 78  | **失败收尾也要跑 PostTurn 钩子**（`Agent.afterFailedTurn`，内部 `recordCtx` 5s）：goal 的续跑就是 PostTurn 钩子，跑干净的收尾才触发它——所以一次 provider 错误就能把链断掉，goal 留在 `active` 无人推动。**被停/被顶掉不触发**（那两个决定刚发生过，不该被推翻） | **O9′**（投递点必须存在）+ 线上取证结论                                       | `internal/agent/loop.go`（三个错误返回点 + `afterFailedTurn`）                                                                                                     | green：`TestAFailedTurnStillFiresTheGoalContinuation`（provider 缺失 / provider 以 `context.DeadlineExceeded` 失败 ⇒ 总线仍收到 `goal_context`）；**反证跑过**：去掉三处调用 ⇒ 两条子用例都报"no continuation"（正是线上症状） | 无（等发布）                                                                                                  | ❌（工作区） |
+| 76  | **终局事件不能在"工作已死"的 ctx 上写**：`emitEventChecked` 的落库改用 `recordCtx`（保留值、断开父级取消/死线、自带 3s）。线上证据：300s 预算掐死回合时，`error`/`done` 被 `context deadline exceeded` 拒收，会话看起来"什么都没发生" | **O1**（不许让读者以为没发生过）+ §10.11 的"记录必须落地"                     | `internal/agent/events.go`（`recordCtx(ctx, eventPersistBudget)`）、`internal/agent/ctxkind.go`（命名与两个预算）                                                  | green：`TestATerminalEventSurvivesTheTurnContext`（假 sink 看到 ctx 仍存活）、`TestATerminalEventReachesTheRealStoreAfterTheTurnDies`（**真 sqlite**：已取消的回合仍写进 `session_events`）、`TestRecordCtxKeepsValuesAndDropsTheParentsDeath`；**反证跑过**：改回用父 ctx ⇒ 前两条红 | 无（等发布后由发布后的行为见证）                                                                              | ❌（dev ✅） |
+| 77  | **goal 复用 cron 的预算设置项**：`taskTimeoutFor` 对 `SourceGoalContext` 与 `SourceCron` 一视同仁（`TaskQueueCfg.CronTimeoutSec`）。线上证据：goal 回合 `duration_ms=300002/300006/300418/301184`，而 cron 本来就能特批 | **P5 / F2**（同一个"长活"概念不该有两个口径）                                 | `internal/gateway/gateway.go`（`taskTimeoutFor` 的 switch）                                                                                                        | green：`TestTaskTimeoutForSourcePolicy`（goal ⇒ 配置值；未配置 ⇒ 队列默认）；**反证跑过**：恢复"只特批 cron" ⇒ goal 那条读到 0                                                                                                  | dev：`cronTimeoutSec` = 3600，`POST /api/config` 后再用 `GET /api/config` 读回确认（**prod 仍未配置**，那里仍是 300s 默认）                                        | ❌（dev ✅） |
+| 78  | **失败收尾也要跑 PostTurn 钩子**（`Agent.afterFailedTurn`，内部 `recordCtx` 5s）：goal 的续跑就是 PostTurn 钩子，跑干净的收尾才触发它——所以一次 provider 错误就能把链断掉，goal 留在 `active` 无人推动。**被停/被顶掉不触发**（那两个决定刚发生过，不该被推翻） | **O9′**（投递点必须存在）+ 线上取证结论                                       | `internal/agent/loop.go`（三个错误返回点 + `afterFailedTurn`）                                                                                                     | green：`TestAFailedTurnStillFiresTheGoalContinuation`（provider 缺失 / provider 以 `context.DeadlineExceeded` 失败 ⇒ 总线仍收到 `goal_context`）；**反证跑过**：去掉三处调用 ⇒ 两条子用例都报"no continuation"（正是线上症状） | 无（等发布）                                                                                                  | ❌（dev ✅） |
+
+> **对上三格的一处更正（2026-09-28 当天稍晚）**：写这张表时它们记的是"❌（工作区）"。`development` 的
+> gateway 跑的是 `…/fastagent:20260928105107-fastagent-766c397`（deployment revision 119），也就是含
+> `fb2c574`/`77ae694`/`56aa813` 的那棵树——所以第 76–78 行**已在 dev**。❌ 保留它唯一的意思（不在 prod）；
+> 不改的话，就是这本改动册专门要抓的那种"文档在撒谎"。
 
 > **一项"建了又撤回"的改动，写在这里以免下一个人重建它**：**goal 看门狗**（active + 会话空闲 N 分钟 ⇒ 补发 continuation）
 > 曾落地（`9d7ead1`：`ListStaleActiveGoals` + `Manager.SweepStalledGoals` + 挂在 evictor ticker），
@@ -576,7 +587,7 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 | 写者 | 键（作用域） | 前置条件 | 事实的读者 | 见证 / 反证 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | **W1 文件工具**（`read_file`/`write_file`/`edit_file`/`apply_patch` 经 `systemFileStore`） | `agent_files` **(agent,user)** | **无**（读-改-写） | 模型 prompt、`read_file` | **无** | 开放：两次并发编辑可丢一次 |
-| **W2 记忆蒸馏**（PostTurn：`SaveMemoryWithScan`） | `agent_files` **(agent,user)** | **无**（读 `currentMemory` → 追加 → 整段写回） | 同上 | `memory_e2e_test.go`（覆盖**不覆盖**真实用户的行） | 开放：与 W1 交错即丢更新——形状正是"蒸馏把 agent 刚写的事实盖回去" |
+| **W2 记忆蒸馏**（PostTurn：`SaveMemoryWithScanIfUnchanged` / `SaveUserFileIfUnchanged`） | `agent_files` **(agent,user)** | **行内容**——`SaveAgentFileIfVersion`，拒绝 + 上报（第 80 行） | 同上 | `internal/agent/memory_lost_update_test.go`（3 条：拒绝 / 无人写时仍然落 / USER.md 那半）+ `memory_e2e_test.go`（它**仍然不覆盖**真实用户的行） | **已落（第 80 行）**：模型回合中途的 `write_file` 能活过蒸馏。反证：改回无条件写 ⇒ 红（"the model's write did not survive the distiller"） |
 | **W3 沙箱同步回写** | `workspace` (agent,project,session) | `BLOCKED`（拒绝 + 上报） | 无（不喂模型） | `lifecycle_sync_contract_test.go`（含本次新增用例与其反证） | **已删（`77ae694`）**：identity 文件不再被收集 |
 | **W4 面板** `PUT /agents/{id}/system-files/{name}` | `agent_files` **(agent,user)**（带 owner 回退的读取路径） | **无** | 模型 | **无** | 开放：面板写与蒸馏写互不知情 |
 | **W5 CLI / timezone 工具** | `agent_files` / workspace | **无** | 模型 | **无** | 开放（低频，风险低） |
@@ -586,9 +597,30 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 
 1. **"谁拥有"必须先于"怎么合并"**：W3 之所以能删，是因为 identity 文件的写者唯一（商店）。剩下的 W1/W2/W4/W5 之间
    没有这个唯一性，所以它们要的不是更多守卫，而是 **`SaveAgentFile` 的版本前置**（A3 的 belt）：`PutIfVersion`，
-   冲突时**拒绝 + 上报**（同 W3 的 `BLOCKED` 语义，一套规矩）。
+   冲突时**拒绝 + 上报**（同 W3 的 `BLOCKED` 语义，一套规矩）。**这套规矩已落（第 80 行）**，W2——唯一一个
+   "读、决定、整段写回"都发生在 pod 内部的写者——是它的消费者。W1（文件工具）、W4（面板）、W5（CLI）仍列开放，
+   原因不是工作量：**前置条件要求写者手里握着它读到的那份事实**，而这三个把决定交给了别人——模型的内容来自
+   它更早一次 `read_file` 调用（另一个工具调用，没有 token 跨过来），浏览器是先 GET 后 PUT。要给它们前置条件，
+   就得先把版本 token 放上它们的面（工具结果 / HTTP 载荷）再带回来。在那之前它们的写是**替换**，而替换正是它们
+   的本意：`write_file` 说的是"MEMORY.md 现在是这个"。所以今天还可能丢一次真实更新的组合是**两个替换相撞**，
+   不是"替换 vs 蒸馏"。
 2. **读取兜底里仍有一个无作用域的家**（`systemRoot/MEMORY.md`）：它不属于 (agent,user)，只能靠"owner 才准读"这一条
    补丁把访客挡在外面——真正的修法是让它退休（或明确迁移），否则"同一事实两个表达"会以第五种形式复现。
 
-**下一步的见证（未落，故不占行号）**：给 W1/W2 补一条丢失更新的用例——两个写者对同一 `(agent,user,MEMORY.md)`
-交错写入，**第二个必须被拒绝或重试**；反证＝去掉版本前置 ⇒ 第一份内容被静默覆盖。
+**本节要的那条见证就是第 80 行**：给 W1/W2 补一条丢失更新的用例——两个写者对同一 `(agent,user,MEMORY.md)`
+交错写入，**第二个必须被拒绝**（不是被合并）；反证＝去掉版本前置 ⇒ 第一份内容被静默覆盖。
+
+### 13.3 两行：把本趟留下的口子收掉（第 79–80 行）
+
+第 79 行是同一批取证里"噪音信号"的那一半（一个 prod 日志窗口里 5 条 `context canceled` 的 WARN，背后没有
+任何存储事故）。第 80 行是 §13.2 的 belt，连同**唯一能握住那个 token 的写者**一起落。
+
+| #   | 改动（一句话）                                                                                                                                                                                                                                                                                                                                                                        | 形式化义务                                                                     | 代码锚点                                                                                                                                                                                    | UT / e2e                                                                                                                                                                                                                                                                                                                                                                                                                                    | 真机 e2e                                                                                    | 部署 |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ---- |
+| 79  | **读者自己放弃的读不是存储故障**：`logSessionEventsReadFailure` 把 replay 与 tail 收到同一条规矩下——**只有**当调用方 ctx 已结束**且**错误正是那次取消的痕迹时降到 Debug，否则 Warn。prod 2026-09-28：5 条 `session_events tail failed` 全是 `context canceled`（每个关掉的标签页 / 跑完的 `codex exec` 一条），这是 500ms ticker 撞上请求 ctx 死亡的样子，不是存储坏了的样子 | **O1** 用在健康信号上（一行日志必须携带它点名的那件事的事实）                    | `internal/setup/chat_event_tail.go`（`logSessionEventsReadFailure`、`replaySessionEvents`、`tailSessionEvents`）、`internal/setup/handlers.go`（replay 调用点）                              | 先红后绿：`internal/setup/chat_event_tail_log_test.go`（5 条）——两个调用点各证"无 WARN + 有 Debug 痕迹"，另两条**把抑制范围钉住的反证**（ctx 已结束但错是存储自己的 `DeadlineExceeded` ⇒ Warn；ctx 活着却凭空来一个 `context.Canceled` ⇒ Warn）。**已实跑的反证**：去掉守卫 ⇒ 无 WARN 那条红；放宽成只看 `ctx.Err() != nil` ⇒ 存储自己的死线变哑（红）；收窄成只看 `errors.Is` ⇒ 无人请求的取消变哑（红） | 无（一条日志规矩；它的 prod 依据逐字写在代码注释里）                                      | ❌（工作区） |
+| 80  | **identity 文件拿到它们从来没有的前置条件**：`SaveAgentFileIfVersion`（store）在**写语句内部**比较行内容，不符即 `ErrAgentFileConflict` 拒绝；create-only 是**单独的标志**，因为"行是空的"与"行还不存在"是两个前置条件。第一个消费者是 W2 蒸馏：`SaveMemoryWithScanIfUnchanged` / `SaveUserFileIfUnchanged` 改为**拒绝并上报**，不再把它在模型自己 `write_file` 落地之前读到的副本盖回去。adapter 负责翻译哨兵错误，所以 agent 层永远不 import `store` | **L4(a)/L7**（前置条件由资源在同一条语句里评估）+ G24 / §13.2 | `internal/store/store.go`（`AgentFileVersion`、`AgentFileVersionAbsent`、`ErrAgentFileConflict`）、`internal/store/database.go`（`SaveAgentFileIfVersion`，两种方言）、`internal/agent/memory.go`、`internal/agent/memory_store_adapter.go` | 先红后绿：`internal/store/agent_file_version_test.go`（3 条，sqlite **加** 设了 `FASTAGENT_TEST_PG_DSN` 时的 Postgres——两种方言用不同 SQL 表达同一前置条件，竞态那条只有在 Postgres 上才是真的），`internal/agent/memory_lost_update_test.go`（3 条：拒绝 / **无人写时仍然落** / USER.md 那半），`internal/agent/memory_test.go`（新方法在空 userID 上照样 fail closed）。**已实跑的反证**：去掉 `WHERE content = ?` ⇒ 输家写进去，sqlite 红 2 条、Postgres 红 3 条；蒸馏改回无条件写 ⇒ 红 2 条 | 本机一次性 Postgres 14 集群（`FASTAGENT_TEST_PG_DSN`）——两种方言、连跑两遍，证明这条见证不依赖执行顺序 | ❌（工作区） |
+
+> **第 80 行不主张的事**：上面没有任何东西证明**面板**或**文件工具**是安全的。它们是手里没有 token 的替换写者
+> （见 §13.2 结论 1），所以这一行诚实地关掉的那一类是"读-改-写的写者抹掉一次它没看见的写"。内容版本固有的
+> **ABA 极限**——被别人写回成调用方读到的那串字节，与从未动过无法区分——写在 `AgentFileVersion` 的注释里**声明**
+> 而非防御，因为那种情形收敛到一次空写，而不是丢更新。
