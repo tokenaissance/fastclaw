@@ -242,6 +242,10 @@ func (g *turnLeaseGuard) renewLoop() {
 					g.emit(ChatEvent{Type: lostNoticeEvent, Data: map[string]any{
 						"message": turnSupersededNotice,
 						"holder":  busyHolderOnLoss(err),
+						// Same ending as a user's stop — the turn did not finish — with the
+						// diagnosis kept apart: `reason` says a peer took the session.
+						"ending": EndingStopped,
+						"reason": "superseded",
 					}})
 				}
 				return

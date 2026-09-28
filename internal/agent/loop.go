@@ -2244,8 +2244,8 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 
 	if a.provider == nil {
 		noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
-		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
-		emitEvent(ctx, ChatEvent{Type: "done"})
+		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg, "ending": EndingFailed}})
+		emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
 		return noProviderMsg
 	}
 
@@ -2271,8 +2271,8 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	resp, err := a.streamChatToResponse(ctx, messages, nil)
 	if err != nil {
 		slog.Error("plan-mode chat failed", "agent", a.name, "error", err)
-		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error()}})
-		emitEvent(ctx, ChatEvent{Type: "done"})
+		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error(), "ending": EndingFailed}})
+		emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
 		return "Sorry, I couldn't draft the plan — the LLM call failed."
 	}
 	a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
@@ -2290,7 +2290,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 		"content":  resp.Content,
 		"metadata": planMeta,
 	}})
-	emitEvent(ctx, ChatEvent{Type: "done"})
+	emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingReplied}})
 	return resp.Content
 }
 
@@ -2391,7 +2391,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if result.continuationQueued {
 			emitEvent(ctx, ChatEvent{Type: "turn_pending"})
 		} else {
-			emitEvent(ctx, ChatEvent{Type: "done"})
+			// A handled slash command either answered (text) or did nothing to say — the two
+			// endings the read can tell apart, and it must not guess which.
+			ending := EndingEmpty
+			if result.reply != "" {
+				ending = EndingReplied
+			}
+			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": ending}})
 		}
 		return result.reply
 	}
@@ -2401,7 +2407,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// the main ReAct loop so no LLM tokens are burned.
 	if rejection := a.checkQuota(ctx); rejection != "" {
 		emitEvent(ctx, ChatEvent{Type: "content", Data: map[string]any{"content": rejection}})
-		emitEvent(ctx, ChatEvent{Type: "done"})
+		emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingReplied}})
 		return rejection
 	}
 
@@ -2706,7 +2712,13 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		// mode the state-observability principle exists to prevent.
 		if lease.Cancelled(ctx) {
 			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
-			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{"message": turnCancelledNotice}})
+			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{
+				"message": turnCancelledNotice,
+				// The structured half: a task read reports `stopped` without reading the sentence
+				// (internal/agent/endings.go). `reason` keeps the diagnosis the prose carries.
+				"ending": EndingStopped,
+				"reason": "cancelled",
+			}})
 			stopReason = "cancelled"
 			break
 		}
@@ -2729,8 +2741,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if a.provider == nil {
 			slog.Error("agent has no provider configured", "agent", a.name, "model", a.model)
 			noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
-			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
-			emitEvent(ctx, ChatEvent{Type: "done"})
+			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg, "ending": EndingFailed}})
+			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
 			return noProviderMsg
 		}
 		// After enough consecutive rounds where every tool came back
@@ -2756,8 +2768,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 		if err != nil {
 			slog.Error("LLM chat failed after retries", "agent", a.name, "error", err)
-			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error()}})
-			emitEvent(ctx, ChatEvent{Type: "done"})
+			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": err.Error(), "ending": EndingFailed}})
+			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingFailed}})
 			return "Sorry, I encountered an error processing your request."
 		}
 		a.meterTokens(ctx, sess.Key(), resp.Usage, 0)
@@ -2766,8 +2778,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if !resp.HasToolCalls() {
 			if strings.TrimSpace(resp.Content) == "" {
 				emptyMsg := "model returned an empty response"
-				emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": emptyMsg}})
-				emitEvent(ctx, ChatEvent{Type: "done"})
+				// Not `failed`: nothing broke, the model answered with nothing. The action a
+				// reader should take is "ask again", which is why §14.3 keeps the value separate.
+				emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": emptyMsg, "ending": EndingEmpty}})
+				emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingEmpty}})
 				return emptyMsg
 			}
 			// Stamp this turn's produced files onto the reply that closes it:
@@ -2797,7 +2811,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 				messages = a.appendSteer(ctx, sess, messages, steer)
 				continue
 			}
-			emitEvent(ctx, ChatEvent{Type: "done"})
+			// The turn is over and it answered: the content event was emitted just above (this
+			// branch is only reached with non-empty content — the empty case returned earlier).
+			emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingReplied}})
 			a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 			return joinReplyParts(replyParts)
 		}
@@ -3077,7 +3093,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if finalContent != "" {
 		replyParts = append(replyParts, finalContent)
 	}
-	emitEvent(ctx, ChatEvent{Type: "done"})
+	emitEvent(ctx, ChatEvent{Type: "done", Data: map[string]any{"ending": EndingReplied}})
 	a.runPostTurn(ctx, msg, messages, totalToolCalls, chatterMem)
 	return joinReplyParts(replyParts)
 }
@@ -3539,7 +3555,13 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		// mode the state-observability principle exists to prevent.
 		if lease.Cancelled(ctx) {
 			slog.Info("turn: cancelled by request", "agent", a.name, "chat_id", msg.ChatID, "iteration", i+1)
-			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{"message": turnCancelledNotice}})
+			emitEvent(ctx, ChatEvent{Type: lostNoticeEvent, Data: map[string]any{
+				"message": turnCancelledNotice,
+				// Same structured ending as the non-streaming loop's stop (endings.go): a task read
+				// reports `stopped` from the field, never from the sentence.
+				"ending": EndingStopped,
+				"reason": "cancelled",
+			}})
 			stopReason = "cancelled"
 			break
 		}

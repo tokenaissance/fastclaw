@@ -3594,6 +3594,43 @@ func (d *DBStore) ListSessionEventsSince(ctx context.Context, userID, agentID, s
 	return out, rows.Err()
 }
 
+// LatestSessionEnding answers "how did this session's last turn end", from the structured
+// `ending` field the terminal events carry (internal/agent/endings.go). Empty string = no turn
+// has ended with a stamped ending; the caller decides what that means, and MCP's read treats it
+// as "no more than the archive can say".
+//
+// It scans the newest events rather than extracting JSON in SQL: the dialect split (`->>`
+// vs json_extract) would buy nothing here, and the bound is honest — an ending is the LAST thing
+// a turn emits, so it is never buried deep in a session's event log.
+func (d *DBStore) LatestSessionEnding(ctx context.Context, userID, agentID, sessionKey string) (string, error) {
+	rows, err := d.handle().QueryContext(ctx,
+		fmt.Sprintf(`SELECT data FROM session_events
+			WHERE user_id = %s AND agent_id = %s AND session_key = %s
+			ORDER BY seq DESC LIMIT 200`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, sessionKey)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return "", err
+		}
+		var payload struct {
+			Ending string `json:"ending"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			continue // an event whose data is not an object carries no ending, and that is fine
+		}
+		if payload.Ending != "" {
+			return payload.Ending, nil
+		}
+	}
+	return "", rows.Err()
+}
+
 // LatestSessionEventSeq returns the highest seq for the session, or -1 if
 // none. Surfaced to clients via the chat history response so they
 // know where to subscribe from on a fresh page load.

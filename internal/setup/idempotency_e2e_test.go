@@ -11,6 +11,38 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 )
 
+// A finished turn stamps its ending, and the history read hands it over: the producer
+// (internal/agent/endings.go) and the reader meet here. Falsification: drop the `ending` from
+// that `done` emit and both halves of this test redden — the stream stops saying it and the
+// history stops carrying it.
+func TestAFinishedTurnStampsItsEndingE2E(t *testing.T) {
+	// A store-backed pod, because the ending is read from `session_events`: the plain chat harness
+	// has no dataStore, so nothing is persisted and there would be nothing to read.
+	s, _, _, _, _ := newReplicaPairWithLease(t, &e2eProvider{started: make(chan struct{}, 4), reply: "done"}, 1)
+	rec := newSSERecorder()
+	waitForHandler(t, postChatStream(t, s, rec, chatRequest{
+		AgentID: "agt_e2e", SessionID: "chat-ending", Message: "go",
+	}, "client-a"), "the POST")
+	if !rec.seen(`"ending":"replied"`) {
+		t.Fatalf("the closing event carried no ending: %q", rec.snapshot())
+	}
+
+	histRec := httptest.NewRecorder()
+	histReq := httptest.NewRequest(http.MethodGet,
+		"/api/chat/history?agentId=agt_e2e&sessionId=chat-ending", nil)
+	histReq = histReq.WithContext(auth.WithIdentity(histReq.Context(),
+		auth.Identity{UserID: "u_1", Role: "user", AuthMethod: "session"}))
+	s.handleChatHistory(histRec, histReq)
+	var body map[string]any
+	if err := json.Unmarshal(histRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if body["lastEnding"] != "replied" {
+		t.Fatalf("history lastEnding = %v; want %q (the reader must see what the producer stamped)",
+			body["lastEnding"], "replied")
+	}
+}
+
 // The de-duplication contract of docs/fastagent/design/14-turn-identity.md §3.1, exercised the
 // way a client meets it: a POST to /api/chat/stream. The unit under test is the acceptance
 // critical section, so every case asks the same question from a different side — did the model

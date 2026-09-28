@@ -402,6 +402,14 @@ in `queued_chat_e2e_test.go`. Deliberately not done: identity on the event envel
 per session, so "the holder ended" answers every other rule, and a wire field with no second reader is
 the kind of thing this roster deletes.
 
+**The stop notice carries a structured ending (2026-09-28).** Both stop paths — the user's request
+read at the loop's iteration boundary, and a peer taking the session over (the renewer's loss notice)
+— now put `ending: "stopped"` beside the prose, plus `reason: "cancelled" | "superseded"` for the
+diagnosis (`internal/agent/endings.go`). The same field, with `"replied"` / `"empty"` / `"failed"`,
+is stamped on the events that close a turn, which is what lets a reader answer "how did the last turn
+end" without recognizing a sentence — and what made `read_task`'s `outcome` able to reach its fourth
+value (docs/mcp-task-submission.md §14.3). The prose stays for people; the field is what code reads.
+
 **What the receipt does NOT fix, measured while tuning the live spec (2026-09-26): a reload.** The
 reloaded tab still renders the block (from the replayed `queued` row) but its Cancel sends nothing —
 the replayed payload predates the field — and even a direct `POST /api/chat/cancel` with the right id
