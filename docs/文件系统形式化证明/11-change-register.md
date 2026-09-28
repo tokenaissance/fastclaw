@@ -142,6 +142,9 @@ go test ./internal/sandbox/ -run 'TestALongOperationIsNotStartedOnAnInstanceTheS
 # 第 83 行：读-改-写的工具交出它刚读到的那一份
 go test ./internal/agent/tools/ -run 'TestEditFileRefusesAnIdentityFileThatMovedUnderIt|TestEditFileStillLandsWhenNobodyElseWrote|TestApplyPatchRefusesAnIdentityFileThatMovedUnderIt|TestWriteFileStillReplacesAnIdentityFile|TestTheConflictIsIdentifiedByValue' -count=1
 go test ./internal/store/ -run TestSaveAgentFileIfVersionTreatsAMissingRowAsACreate -count=1  # 工具期望依赖的 create-vs-conflict 语义
+
+# 第 84 行：同步失败消息只说它知道的原因
+go test ./internal/sandbox/ -run 'TestTheSyncFailureMessageNamesOnlyTheCauseItKnows|TestTheOverCapClassSurvivesTheExecutorBoundary|TestPayloadStreamStopsReadingAtTheCap|TestExecObservesSyncFailure' -count=1
 ```
 
 ## 7. 没有真机 e2e 的条目，以及为什么
@@ -621,7 +624,7 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 **本节要的那条见证就是第 80 行**：给 W1/W2 补一条丢失更新的用例——两个写者对同一 `(agent,user,MEMORY.md)`
 交错写入，**第二个必须被拒绝**（不是被合并）；反证＝去掉版本前置 ⇒ 第一份内容被静默覆盖。
 
-### 13.3 五行：把本趟留下的口子收掉（第 79–83 行）
+### 13.3 六行：把本趟留下的口子收掉（第 79–84 行）
 
 第 79 行是同一批取证里"噪音信号"的那一半（一个 prod 日志窗口里 5 条 `context canceled` 的 WARN，背后没有
 任何存储事故）。第 80 行是 §13.2 的 belt，连同**唯一能握住那个 token 的写者**一起落。
@@ -647,8 +650,11 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 
 | 83  | **读-改-写的工具要交出它刚读到的那一份**（§13.2 写者审计的 ③a）：`edit_file` / `apply_patch` 的 identity 文件分支改走 `SaveWorkspaceFileIfUnchanged`，把它刚读到的字节当 `expected`，冲突时回"another writer changed … nothing was overwritten"——与它们 workspace 分支自 `putGuarded` 起就有的守卫同一套、同一句措辞。`write_file` **有意**保持覆盖（"这个文件现在是这个"就是它的语义）。端口只有一个方法却有两种词汇：工具查 `store.ErrAgentFileConflict`，蒸馏查 `agent.ErrMemoryConflict`，而两个包互相看不到对方的名字（tools ← agent），所以 adapter 返回多 `%w` 的错误，一次写入同时回答两个 `errors.Is` | **F1**（前置条件）+ **O1**（对着一个已经被换掉的版本回 "Edited …" 是假 σ，不是"少一层保险"）+ §13.2 结论 1 | `internal/agent/tools/registry.go`（端口）、`internal/agent/tools/file.go`（`edit_file`）、`internal/agent/tools/apply_patch.go`（两个调用点；宿主侧不再丢弃 pre-image）、`internal/agent/memory_store_adapter.go`（多 `%w`）、`internal/store/agent_file_version_test.go`（"缺行=create"那条语义钉） | 先红后绿：`internal/agent/tools/system_file_lost_update_test.go`（5 条）——夹具让竞争对手**落在读与写之间**：两个工具都拒绝、留下的仍是竞争对手那份；单独一次编辑照常落；`write_file` 仍是替换（边界钉住，防止守卫漏进去）；拒绝是按值识别的，不是按消息形状。**已实跑的反证**：任一把调用点退回无条件写 ⇒ 那条立刻红，报 "reported success over somebody else's version"（原文：`Edited MEMORY.md (1 replacement(s))` / `U MEMORY.md (1 hunk(s))`） | 无（进程内；store 侧的 create-vs-conflict 语义在 store 包里钉着，sqlite + Postgres 两条腿） | ❌（dev ✅） |
 
-> **五行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
-> （`…-ada56f9`），第 83 行随 revision 96（`…-ac662ed`），都是 `./build-image.sh dev`。95 这次滚动也顺带给出了 A1 探针的第三次正向读数（见下）。
+| 84  | **同步失败的消息只说它知道的那个原因**：post-exec reconcile 跑不成时给 agent 的那句话原本是常量——"Typical cause: /workspace grew past the snapshot cap (32 MiB) … Move those to /tmp"——写于 2026-09-18，来源是那一周的事故（09-14 的超上限 OOM，`5f38348`）；而它所在的分支接住的是 `SnapshotWorkspace` 的**每一次**失败（那个 ctx 就是工具调用自己的，`527b8fb`）。线上测出来的正好相反：09-26…09-28 窗口里上限 **0/2**、"回合的 ctx 结束" **2/2**（`context canceled`；`deadline_exceeded`，也就是 300s 预算、A1 那个故事）。于是模型被告知把文件挪去一个**不镜像**的地方——照着做就丢交付物——而且执行器那句又准又具体的话（带 `Largest entries`）被它盖住。现在这句话是类的函数：超上限（关于**沙箱**的事实，两者同时成立时它优先，执行器的原文一并带上）／ctx 已结束（关于**这次调用**的事实，不猜是三种里的哪一种——第 79/81 行的规矩）／其他（原样附错误，不编原因）；三种都不再教模型怎么收拾 `/workspace`（那是写文件的那一方的事）。要让第一类可判别，类就得活过边界：`SnapshotWorkspace` 现在把它的拒绝包进 `errSnapshotOverCap`——文案不是分类器 | **O1**（一条消息必须携带它点名那件事的事实；而一条会让读者付代价的指令是最坏的那种假 σ）+ §10.11 的"消费者必须能看出承诺被削弱了" | `internal/sandbox/lifecycle.go`（`snapshotFailureProblem`）、`internal/sandbox/e2b_executor.go`（`errSnapshotOverCap`、拒绝时的 `%w`）、`internal/sandbox/snapshot_failure_message_test.go`、`internal/sandbox/e2b_exec_stream_test.go` | 先红后绿：`internal/sandbox/snapshot_failure_message_test.go`——每一类断言自己的措辞**并且**断言其他类的措辞不在（ctx 那条不许出现 "snapshot cap"、"/tmp"、"32 MiB"）；`TestPayloadStreamStopsReadingAtTheCap` 另外断言超上限那条错误带着它的哨兵（边界那一环）。**已实跑的反证**：把常量放回去 ⇒ ctx 那条同时报三条——`lost "turn's context ended"`、`claims a cause this failure does not have ("snapshot cap")`、`… ("/tmp")` | 无（进程内；逼出这条的线上原文引在代码与本册里） | ❌（dev ✅） |
+
+> **六行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
+> （`…-ada56f9`），第 83 行随 revision 96（`…-ac662ed`），第 84 行随 revision 97（`…-0082824`），都是 `./build-image.sh dev`。
+> 95 这次滚动也顺带给出了 A1 探针的第三次正向读数（见下）。
 
 > **A1 的真机验证，以及它顺带挖出的一个事实。** 第 77 行那句主张（"goal 的续跑按 `cronTimeoutSec`
 > 计预算，而不是 300s 默认"）现在有了真机见证：cloud 的 `scripts/mcp-goal-budget-live-check.sh` 用一个真客户端

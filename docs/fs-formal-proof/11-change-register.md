@@ -156,6 +156,9 @@ go test ./internal/sandbox/ -run 'TestALongOperationIsNotStartedOnAnInstanceTheS
 # row 83: the read-modify-write tools present the copy they read
 go test ./internal/agent/tools/ -run 'TestEditFileRefusesAnIdentityFileThatMovedUnderIt|TestEditFileStillLandsWhenNobodyElseWrote|TestApplyPatchRefusesAnIdentityFileThatMovedUnderIt|TestWriteFileStillReplacesAnIdentityFile|TestTheConflictIsIdentifiedByValue' -count=1
 go test ./internal/store/ -run TestSaveAgentFileIfVersionTreatsAMissingRowAsACreate -count=1  # the create-vs-conflict semantics the tools' expectations rely on
+
+# row 84: the sync-failure message names only the cause it knows
+go test ./internal/sandbox/ -run 'TestTheSyncFailureMessageNamesOnlyTheCauseItKnows|TestTheOverCapClassSurvivesTheExecutorBoundary|TestPayloadStreamStopsReadingAtTheCap|TestExecObservesSyncFailure' -count=1
 ```
 
 ## 7. Rows with no live e2e, and why
@@ -717,7 +720,7 @@ witness says so.
 interleaving on one `(agent,user,MEMORY.md)`, where the second is refused rather than merged;
 falsification: drop the version precondition and the first writer's content is silently overwritten.
 
-### 13.3 Five rows that close things this pass left open (79–83)
+### 13.3 Six rows that close things this pass left open (79–84)
 
 Row 79 is the noisy-signal half of the same forensics (five `context canceled` WARNs in one prod log
 window, no store incident behind any of them). Row 80 is §13.2's belt, landed with the one writer
@@ -740,10 +743,12 @@ that can hold the token.
 
 | 83  | **The read-modify-write tools present the copy they read** (③a of §13.2's writer audit): the identity-file branch of `edit_file` / `apply_patch` now goes through `SaveWorkspaceFileIfUnchanged` with the bytes it just read, refusing with "another writer changed … nothing was overwritten" — the same guard their workspace branch has had since `putGuarded`, and the same voice. `write_file` deliberately keeps overwriting ("this file is now this" is its semantics). The port method is one method with two vocabularies: tools check `store.ErrAgentFileConflict`, the distiller checks `agent.ErrMemoryConflict`, and the packages cannot see each other's names (tools ← agent), so the adapter returns a multi-`%w` error that answers both `errors.Is` questions | **F1** (preconditions) + **O1** (a "Edited …" over a version that is gone is a false σ, not a missing nicety) + §13.2 conclusion 1 | `internal/agent/tools/registry.go` (the port), `internal/agent/tools/file.go` (`edit_file`), `internal/agent/tools/apply_patch.go` (both call sites; the host closure stopped discarding the pre-image), `internal/agent/memory_store_adapter.go` (the multi-`%w`), `internal/store/agent_file_version_test.go` (the missing-row-is-a-create pin) | green, red first: `internal/agent/tools/system_file_lost_update_test.go` (5) — a store double lets a competitor land BETWEEN the read and the write: both tools refuse and the competitor's bytes remain; a lone edit still lands; `write_file` still replaces (the boundary, pinned so the guard cannot leak into it); the refusal is identified by value, not by message shape. **Falsifications run**: revert either call site to the unconditional write ⇒ that case reddens with "reported success over somebody else's version" (verbatim: `Edited MEMORY.md (1 replacement(s))` / `U MEMORY.md (1 hunk(s))`) | none (in-process; the store's own create-vs-conflict semantics are pinned in the store package, sqlite + Postgres) | ❌ (dev ✅) |
 
-> **All five rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
-> (`…-8b63ddf`), 81–82 with revision 95 (`…-ada56f9`), and 83 with revision 96
-> (`…-ac662ed`), all `./build-image.sh dev`. The 95 rollout is also the A1 probe's third positive
-> reading (below).
+| 84  | **The sync's failure message names only the cause it knows**: the sentence the agent gets when the post-exec reconcile could not run was a constant — "Typical cause: /workspace grew past the snapshot cap (32 MiB) … Move those to /tmp" — written 2026-09-18 out of that week's incident (the 09-14 over-cap OOM, `5f38348`), while the branch it lives in catches EVERY failure of `SnapshotWorkspace` (whose ctx is the tool call's own, `527b8fb`). In the production window measured 2026-09-28 the cap was **0 of 2** and "the turn's ctx ended" was **2 of 2**, so the agent was told to move files to a place that is not mirrored — advice that loses the deliverable — and the executor's own precise text (with `Largest entries`) was buried under it. It is now a function of the class: over-cap (a fact about the SANDBOX, so it wins when both hold, and the executor's text rides along) / ctx ended (a fact about this call, without guessing which of the three ways — rows 79/81's rule) / anything else (reported as itself, no cause invented); and none of them instructs the model how to tidy `/workspace` (that belongs to whatever wrote the file). For the first class to be recognisable the class has to survive the boundary, so `SnapshotWorkspace` now wraps its refusal in `errSnapshotOverCap` — prose is not a classifier | **O1** (a message must carry a fact about the thing it names, and an instruction that costs the reader something is the worst kind of false σ) + §10.11's "a consumer must be able to tell the promise is reduced" | `internal/sandbox/lifecycle.go` (`snapshotFailureProblem`), `internal/sandbox/e2b_executor.go` (`errSnapshotOverCap`, `%w` on the refusal), `internal/sandbox/snapshot_failure_message_test.go`, `internal/sandbox/e2b_exec_stream_test.go` | green, red first: `internal/sandbox/snapshot_failure_message_test.go` — each class asserts its own words AND the absence of the others' (the ctx case must not contain "snapshot cap", "/tmp" or "32 MiB"); `TestPayloadStreamStopsReadingAtTheCap` now also asserts the over-cap error carries its sentinel (the boundary link). **Falsification run**: put the constant back ⇒ the ctx case reddens with all three complaints — `lost "turn's context ended"`, `claims a cause this failure does not have ("snapshot cap")`, `… ("/tmp")` | none (in-process; the prod lines that forced it are quoted in the code and above) | ❌ (dev ✅) |
+
+> **All six rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
+> (`…-8b63ddf`), 81–82 with revision 95 (`…-ada56f9`), 83 with revision 96 (`…-ac662ed`), and 84
+> with revision 97 (`…-0082824`), all `./build-image.sh dev`. The 95 rollout is also the A1 probe's
+> third positive reading (below).
 
 > **The A1 live check, and a finding it turned up.** Row 77's claim ("a goal continuation is
 > budgeted by `cronTimeoutSec`, not the 300 s default") now has a live witness: cloud
