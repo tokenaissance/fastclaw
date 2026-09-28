@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/provider"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 )
@@ -25,6 +26,24 @@ type slashResult struct {
 	handled            bool
 	reply              string
 	continuationQueued bool
+}
+
+// archiveSlashInput records the user's own line for the slashes that belong to the conversation
+// (today: the `/goal` family — see the call site).
+//
+// Deliberately NOT applied to every slash. `/status`, `/help`, `/whoami` and their kin are
+// utilities whose answer is the reply itself; archiving them would put a line in the transcript
+// for every glance at the machine's state, and the transcript is what the model reads. The goal
+// family is different: `/goal …` sets the objective the following turns pursue, so the line IS
+// part of the conversation's content.
+func (a *Agent) archiveSlashInput(msg bus.InboundMessage) {
+	sess := a.sessions.Get(msg.Channel, msg.AccountID, msg.ChatID, msg.ProjectID)
+	if sess == nil {
+		// No session yet (a slash that would have created one is not this path) — nothing to
+		// archive, and inventing a session here would create one for a command that did not need it.
+		return
+	}
+	sess.Append(provider.Message{Role: "user", Content: msg.Text})
 }
 
 // handleSlashCommand checks if the message is a slash command and handles it.
@@ -119,7 +138,19 @@ func (a *Agent) handleSlashCommand(msg bus.InboundMessage) slashResult {
 		return a.slashModel(msg, args[0])
 
 	case "/goal":
-		return a.slashGoal(msg, args)
+		result := a.slashGoal(msg, args)
+		if result.handled {
+			// The user's own line, archived as a REAL user message (origin empty — the default).
+			//
+			// Why it needs saying: the slash short-circuit returns before the normal turn path,
+			// which is the only thing that archives the inbound. So a user who typed `/goal …` saw
+			// their line only for as long as the web's optimistic bubble lived: a reload dropped it
+			// (history had no such row), and MCP's `read_task(full:true)` never saw it at all — a
+			// transcript whose goal work had no goal. Archiving it here makes the user's own words
+			// visible to every reader of the transcript.
+			a.archiveSlashInput(msg)
+		}
+		return result
 
 	case "/plan":
 		return a.slashPlan(msg, args)
