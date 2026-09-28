@@ -151,6 +151,10 @@ go test ./internal/sandbox/ -run 'TestThePostExecSyncOutlivesTheTurnThatProduced
 # 第 86 行：agent home 的磁盘镜像 owner-only
 go test ./internal/agent/tools/ -run 'TestTheAgentHomeMirrorIsOwnerOnly|TestIdentityFileMirrorsStillWorkForTheOwner' -count=1
 
+# BLOCKED 现场（§13.4）：prod 日志聚合 + 只读会话事件查询
+#   kubectl -n production logs <pod> | grep 'sandbox sync: BLOCKED' | 按会话/路径/大小聚合
+#   会话事件：临时 postgres pod 挂 fastagent-secrets/STORAGE_DSN，只做 SELECT
+
 ```
 
 ## 7. 没有真机 e2e 的条目，以及为什么
@@ -630,7 +634,7 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 **本节要的那条见证就是第 80 行**：给 W1/W2 补一条丢失更新的用例——两个写者对同一 `(agent,user,MEMORY.md)`
 交错写入，**第二个必须被拒绝**（不是被合并）；反证＝去掉版本前置 ⇒ 第一份内容被静默覆盖。
 
-### 13.3 七行：把本趟留下的口子收掉（第 79–85 行）
+### 13.3 八行：把本趟留下的口子收掉（第 79–86 行）
 
 第 79 行是同一批取证里"噪音信号"的那一半（一个 prod 日志窗口里 5 条 `context canceled` 的 WARN，背后没有
 任何存储事故）。第 80 行是 §13.2 的 belt，连同**唯一能握住那个 token 的写者**一起落。
@@ -662,8 +666,9 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 
 | 86  | **agent home 的磁盘镜像与它的读一样，是 owner-only**：`systemRoot/MEMORY.md` 是每个 agent **一个**文件、没有 (agent,user) 维度，而它影子里的 store 行是 per-chatter 的。读侧自隔离修复起就有 owner 门；镜像**三处调用点都没有门**（`write_file` / `edit_file` / `apply_patch`），于是访客写的 MEMORY.md 落到**主人**的磁盘文件里——而主人下一次走磁盘兜底的读（主人自己还没有 store 行时）会答复出访客的记忆。现在 `mirrorToAgentHome` 是那个文件的唯一写者，门就是 `ownsAgentHome`（读侧用的同一个谓词，两边不可能再各说各话）。用户选的是"退休"与"迁移"之间的中间档；**退休/迁移仍然开着** | **O1**（读点名一个主人、写点了另一个）+ §13.2 结论 2 | `internal/agent/tools/registry.go`（`mirrorToAgentHome`）、`internal/agent/tools/file.go`、`internal/agent/tools/apply_patch.go`、`internal/agent/tools/system_file_home_mirror_test.go` | 先红后绿：`system_file_home_mirror_test.go`（2 条）——访客的 write 与 edit 都只落到自己的 store 行、home 一动不动；主人自己的写照旧镜像（进程内读者不受影响）；主人写 identity 文件照样镜像。**已实跑的反证**：去掉 `ownsAgentHome` 那道门 ⇒ 红，"a visitor's write landed in the agent home, where the owner's disk-fallback read would find it" | 无（进程内；它去掉的形状第 68 行在读侧已经量过） | ❌（dev ✅） |
 
-> **七行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
-> （`…-ada56f9`），第 83 行随 revision 96（`…-ac662ed`），第 84 行随 revision 97（`…-0082824`），都是 `./build-image.sh dev`。
+> **八行都在 dev**（2026-09-28）：第 79–80 行随 revision 94（`…-8b63ddf`）发布，第 81–82 行随 revision 95
+> （`…-ada56f9`），第 83 行随 revision 96（`…-ac662ed`），第 84 行随 revision 97（`…-0082824`），
+> 第 85–86 行随 revision 99（`…-43c1c94`）与 100（`…-8505015`），都是 `./build-image.sh dev`。
 > 95 这次滚动也顺带给出了 A1 探针的第三次正向读数（见下）。
 
 > **一处命名裁决，记在这里免得被重新翻案（用户裁决，2026-09-28）**：超上限这一类带**两个**哨兵——
@@ -688,3 +693,46 @@ agent/tools 42.9s 全绿。**当时的**线上是 `16a7532`。（2026-09-19 实�
 > 它对**为什么**读错了一无所知。**这里没有修它**：诚实的形状有三种——在同一条失效通道上广播（并点名命名空间）、
 > 周期性重读、或者把边界写进保存的回复里（声明的降级，08 §10.11）。记在这里，免得下一个运营从一个"每 pod 生效"
 > 的效果里读出"全集群生效"的承诺。
+
+### 13.4 BLOCKED 事故现场重建（取证，2026-09-26/27）
+
+**测到什么** —— 两台 prod pod 保留下来的日志（已轮转，约 2 天窗口）+ **只读**的会话事件查询（临时探针 pod，事后已删）：
+
+* `sandbox sync: BLOCKED` 共 **446 行**：09-26 有 422、09-27 有 20、09-28 有 4。按会话：长 goal 会话
+  `EYuYMjwEW7Se8MtYJBqdte`（S2）422 行、`YhHDu15XElTDGxW1tz6Vj3`（S3）20 行、`PAdDjGNT5Xy2bv12nSmxIp`（S1）4 行。
+* 按路径：`MEMORY.md` **269**；日志家族（`_p9/_p11/_p12/_p14/_r1/_r2/_w1/_w2/_w3/_x1/_sweep.log`）**142**；
+  S3 的交付物 `refresh_paper_review.py`、`paper-run2-lifecycles.jsonl`、`paper-review.html`、
+  `paper-equity-curve.png`（各 4），以及 S1 的 `cognitive-machine-full-decomp.html`（4）。
+
+**两条现行**（时间为 UTC，模型自己的原话逐字引用）：
+
+| 时间 | 会话里发生了什么 |
+| --- | --- |
+| 09-26 14:45:48 | `write_file /workspace/_p11.py` —— 模型把一个爬虫**写进会被镜像的树里**并运行它，输出重定向进 `_p11.log` |
+| 14:45:58 | **同步还成功了一次**：工具结果里带着 `[workspace] the sandbox changed _p11.log — synced to the workspace store` ⇒ store 拿到一份 **1,459 字节**的早期副本 |
+| **14:46:01** | **该路径第一次 BLOCKED**（`store=1459 snap=2155`）——接下来 2.5 分钟里被拒 **27 次**，因为脚本还在追加 |
+| 14:52:33 | `MEMORY.md` 开始：store 那份**冻结在 205,571 字节**，沙箱那份取过约 20 个不同大小（211,208 … 345,159），一直报到次日 09-27 01:12 —— **269 行** |
+| 14:52:41 | 模型在回复里自己写下："`MEMORY.md` 报了一次 `NOT synced` —— apply_patch 写的是身份库，沙箱里那份是旧镜像" |
+| 09-27 01:00–01:12 | S3 的交付物，而且这里**store 才是更新的那一边**（`store=29992 > snap=27587`；`262490 > 258501`；`174065 > 172305`）。模型在 01:01:20 写："新容器层的 `/workspace` 是旧快照 … 是没有兼容层的旧版（`KeyError: 'current_pnl'`）" |
+
+**三种形状、两个方向** —— 第二个才是贵的那个：
+
+| 形状 | 动的是哪份 | 代价 |
+| --- | --- | --- |
+| 沙箱更新（日志家族） | 沙箱那份持续变大 | store 永远追不上；每次同步再拒一次 |
+| 沙箱更新（`MEMORY.md`） | 沙箱那份被反复改写，store 那份冻结 | 同上，外加**一个 key 两个写者**（身份库 vs 沙箱里那份已投递副本） |
+| **store 更新**（paper 家族、S1 的 HTML） | store 那份更新/更大 | **沙箱永远拿不到** —— 模型一直对着过期文件干活，`KeyError: 'current_pnl'` 就是这么来的 |
+
+**这次现场定了什么：**
+
+1. §13.2 的路线 3（一份持久的"路径级：store 写过但从未镜像"的记录）现在**两个分支各有生产判例**：
+   有未镜像的 host 写 ⇒ 取 store 那份；没有 ⇒ 取沙箱那份。两条路径、两个大小，各一个用例——
+   比 142 条同族日志更有说服力。
+2. B7② 那句消息是承重的，不是装饰：模型**两次都看见了**拒绝、还正确推理了其中一次，但**没有任何机械动作**
+   ——于是 `MEMORY.md` 被拒了 10 个小时以上。消息必须给**两个方向**的动作，还要写清机械细节：
+   读沙箱那份要 `exec cat`（`read_file` 答复的是 store）。
+3. 为什么它们是 BLOCKED 而不是"new path from the sandbox"：`_p11.log` **小时候成功同步过一次**（1,459 字节）。
+   store 里那些几百字节到 2KB 的日志副本，正是"第一次同步"与"长过等式"之间那个窗口的痕迹——
+   它们不是"从没发布过"，而是**长过了自己发布时的那一版**。
+4. 诚实的边界：`MEMORY.md` 那半的归因来自**模型自己的叙述**加大小形状，**不是**写入方记录——而那正是路线 3 要补的事实。
+   这次重建说不出"某一次同步为什么没镜像成"。

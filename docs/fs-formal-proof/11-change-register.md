@@ -165,6 +165,10 @@ go test ./internal/sandbox/ -run 'TestThePostExecSyncOutlivesTheTurnThatProduced
 # row 86: the agent home's disk mirror is owner-only
 go test ./internal/agent/tools/ -run 'TestTheAgentHomeMirrorIsOwnerOnly|TestIdentityFileMirrorsStillWorkForTheOwner' -count=1
 
+# the BLOCKED scene (§13.4): prod log aggregation + read-only session-event reads
+#   kubectl -n production logs <pod> | grep 'sandbox sync: BLOCKED' | <aggregate by session/path/sizes>
+#   session events: a temporary postgres pod with fastagent-secrets/STORAGE_DSN, SELECT only
+
 ```
 
 ## 7. Rows with no live e2e, and why
@@ -726,7 +730,7 @@ witness says so.
 interleaving on one `(agent,user,MEMORY.md)`, where the second is refused rather than merged;
 falsification: drop the version precondition and the first writer's content is silently overwritten.
 
-### 13.3 Seven rows that close things this pass left open (79–85)
+### 13.3 Eight rows that close things this pass left open (79–86)
 
 Row 79 is the noisy-signal half of the same forensics (five `context canceled` WARNs in one prod log
 window, no store incident behind any of them). Row 80 is §13.2's belt, landed with the one writer
@@ -755,10 +759,10 @@ that can hold the token.
 
 | 86  | **The agent home's disk mirror is owner-only, like its read**: `systemRoot/MEMORY.md` is ONE file per agent with no (agent,user) dimension, while the store row it shadows is per-chatter. The read side has been owner-gated since the isolation fix; the mirror had no gate at any of its three call sites (`write_file` / `edit_file` / `apply_patch`), so a visitor's MEMORY.md write landed in the OWNER's file on disk — and the owner's next disk-fallback read answered with the visitor's memory. `mirrorToAgentHome` is now the one writer of that file, gated on `ownsAgentHome` (the read side's own predicate, so the two cannot disagree). The user's ruling was the middle option between retiring the home and migrating it; **retiring/migrating stays open** | **O1** (the read names one owner and the write another) + §13.2 conclusion 2 | `internal/agent/tools/registry.go` (`mirrorToAgentHome`), `internal/agent/tools/file.go`, `internal/agent/tools/apply_patch.go`, `internal/agent/tools/system_file_home_mirror_test.go` | green, red first: `system_file_home_mirror_test.go` (2) — a visitor's write AND edit reach their own store row while the home stays untouched; the owner's own write still mirrors (the in-process readers keep working); an owner's identity-file write still mirrors. **Falsification run**: drop the `ownsAgentHome` check ⇒ red, "a visitor's write landed in the agent home, where the owner's disk-fallback read would find it" | none (in-process; the shape it removes is the one row 68 already measured for reads) | ❌ (dev ✅) |
 
-> **All seven rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
-> (`…-8b63ddf`), 81–82 with revision 95 (`…-ada56f9`), 83 with revision 96 (`…-ac662ed`), and 84
-> with revision 97 (`…-0082824`), all `./build-image.sh dev`. The 95 rollout is also the A1 probe's
-> third positive reading (below).
+> **All eight rows are on dev** (2026-09-28): rows 79–80 shipped with revision 94
+> (`…-8b63ddf`), 81–82 with revision 95 (`…-ada56f9`), 83 with revision 96 (`…-ac662ed`), 84 with
+> revision 97 (`…-0082824`), and 85–86 with revision 99 (`…-43c1c94`) and 100 (`…-8505015`), all
+> `./build-image.sh dev`. The 95 rollout is also the A1 probe's third positive reading (below).
 
 > **One naming decision, recorded so it is not re-litigated (user's ruling, 2026-09-28)**: the
 > over-cap class carries TWO sentinels — `errPayloadOverCap` (the sink's, in `output_clip.go`) and
@@ -796,3 +800,53 @@ that can hold the token.
 > ABA limit of a content version — a row rewritten back to the bytes the caller read is
 > indistinguishable from one that never moved — is declared in `AgentFileVersion`'s comment rather
 > than defended against, because that case resolves to a no-op, not to a lost update.
+
+### 13.4 The BLOCKED scene, reconstructed (forensics, 2026-09-26/27)
+
+**What was measured** — the production pods' retained logs (rotated, ≈2 days) plus read-only
+session-event queries (a temporary probe pod, deleted afterwards):
+
+* **446** `sandbox sync: BLOCKED` lines: 422 on 09-26, 20 on 09-27, 4 on 09-28. By session: 422 in the
+  long goal run `EYuYMjwEW7Se8MtYJBqdte` (S2), 20 in `YhHDu15XElTDGxW1tz6Vj3` (S3), 4 in
+  `PAdDjGNT5Xy2bv12nSmxIp` (S1).
+* By path: `MEMORY.md` **269**; a log family (`_p9/_p11/_p12/_p14/_r1/_r2/_w1/_w2/_w3/_x1/_sweep.log`)
+  **142**; and S3's deliverables `refresh_paper_review.py`, `paper-run2-lifecycles.jsonl`,
+  `paper-review.html`, `paper-equity-curve.png` (4 each) plus S1's
+  `cognitive-machine-full-decomp.html` (4).
+
+**The two smoking guns** (UTC; the agent's own words quoted verbatim):
+
+| time | what the session shows |
+| --- | --- |
+| 09-26 14:45:48 | `write_file /workspace/_p11.py` — the model writes a scraper **into the mirrored tree** and runs it, redirecting its output into `_p11.log` |
+| 14:45:58 | **the sync still succeeds**: the tool result carries `[workspace] the sandbox changed _p11.log — synced to the workspace store` ⇒ the store now holds a **1,459-byte** early copy |
+| **14:46:01** | **first BLOCKED for that path** (`store=1459 snap=2155`) — 27 times in the next 2.5 minutes, because the job keeps appending |
+| 14:52:33 | `MEMORY.md` starts: the store's copy **frozen at 205,571 bytes** while the sandbox's takes ~20 distinct sizes (211,208 … 345,159), reported continuously until 09-27 01:12 — **269 lines** |
+| 14:52:41 | the agent's own note in its reply: "`MEMORY.md` 报了一次 `NOT synced` —— apply_patch 写的是身份库，沙箱里那份是旧镜像" |
+| 09-27 01:00–01:12 | S3's deliverables, and here the **store is the newer side** (`store=29992 > snap=27587`; `262490 > 258501`; `174065 > 172305`). The agent at 01:01:20: "新容器层的 `/workspace` 是旧快照 … 是没有兼容层的旧版（`KeyError: 'current_pnl'`）" |
+
+**Three shapes, two directions** — and the second is the expensive one:
+
+| shape | which copy moved | what it costs |
+| --- | --- | --- |
+| sandbox-newer (the log family) | the sandbox's keeps growing | the store never catches up; one refusal per sync, forever |
+| sandbox-newer (`MEMORY.md`) | the sandbox's is rewritten repeatedly while the store's is frozen | the same, plus **two writers on one key** (the identity store vs the sandbox's delivered copy) |
+| **store-newer** (the paper family, S1's HTML) | the store's is newer/bigger | **the sandbox never receives it** — the agent keeps working against a stale file, which is what produced `KeyError: 'current_pnl'` |
+
+**What the scene settles:**
+
+1. §13.2's route 3 (a durable per-path record of "a store write that was never mirrored") now has
+   **both of its branches witnessed in production**: an unmirrored host write ⇒ take the store's copy;
+   no such write ⇒ take the sandbox's. Two paths, two sizes, one case per branch — better evidence than
+   142 members of a single family.
+2. B7②'s message is load-bearing, not decoration: the agent *saw* both refusals, reasoned correctly
+   about one, and had no mechanical action — so `MEMORY.md` stayed refused for 10+ hours. The message
+   needs **both** directions of advice, plus the mechanical detail that reading the sandbox's copy
+   means `exec cat` (a `read_file` answers from the store).
+3. Why these paths are BLOCKED rather than "a new path from the sandbox": `_p11.log` **was synced once
+   while small** (1,459 B). The store's small log copies are the trace of the window between "first
+   sync" and "grew past equality" — these are not files the sandbox never published, they are files
+   that outgrew their own publication.
+4. The honest limit: the attribution for `MEMORY.md` is the **agent's own account** plus the size
+   shape, not an instrumented writer record — which is exactly the fact route 3 would add. Nothing
+   here can say why an individual sync failed to mirror.
