@@ -409,10 +409,6 @@ type Store interface {
 	// ignored.
 	UpdateGoal(ctx context.Context, g *GoalRecord) error
 	DeleteGoal(ctx context.Context, goalID string) error
-	// ListStaleActiveGoals backs the goal watchdog: the active goals untouched since `before`.
-	// `updated_at` is the progress clock (the token-accounting hook stamps it on every model
-	// call), so a stale row really does mean "nothing is moving this goal".
-	ListStaleActiveGoals(ctx context.Context, before time.Time) ([]*GoalRecord, error)
 
 	Close() error
 }
