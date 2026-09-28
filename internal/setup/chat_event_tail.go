@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -60,9 +61,58 @@ func (s *Server) tailSessionEvents(ctx context.Context, uid, agentID, sessionID 
 	}
 	rows, err := s.dataStore.ListSessionEventsSince(ctx, uid, agentID, sessionID, sinceSeq)
 	if err != nil {
-		slog.Warn("session_events tail failed",
-			"agent", agentID, "session", sessionID, "since", sinceSeq, "error", err)
+		logSessionEventsReadFailure(ctx, "session_events tail failed", agentID, sessionID, sinceSeq, err)
 		return nil
 	}
 	return rows
+}
+
+// replaySessionEvents reads the events a subscription missed before it connected.
+//
+// It is the same read as the tail against the same log, so it takes the same
+// failure rule (`logSessionEventsReadFailure`); it is a separate function only so
+// that each call site can be witnessed on its own.
+func (s *Server) replaySessionEvents(ctx context.Context, uid, agentID, sessionID string, sinceSeq int64) []store.SessionEventRecord {
+	if s.dataStore == nil {
+		return nil
+	}
+	rows, err := s.dataStore.ListSessionEventsSince(ctx, uid, agentID, sessionID, sinceSeq)
+	if err != nil {
+		logSessionEventsReadFailure(ctx, "session_events replay failed", agentID, sessionID, sinceSeq, err)
+		return nil
+	}
+	return rows
+}
+
+// logSessionEventsReadFailure reports a failed session-events read — replay and
+// tail both come through here, because the rule is about the read, not the caller.
+//
+// The line is a health signal about the **store**, so it must not fire when the
+// read was abandoned by its own caller. An SSE subscription's ctx is the request
+// ctx: every closed tab, every navigating page, and every finished `codex exec`
+// cancels it, and a ticker that fires inside that same instant gets
+// `context.Canceled` back from a store that is perfectly healthy. Measured on
+// prod 2026-09-28: all five `session_events tail failed` lines were
+// `context canceled`, with no store incident behind any of them.
+//
+// Suppression is deliberately narrow — the caller's ctx must be done **and** the
+// error must be that cancellation's own trace (`errors.Is(err, context.Canceled)`).
+// Both halves are load-bearing:
+//
+//   - ctx done, error something else (a deadline the store hit on its own, a
+//     dropped connection): that error is a fact about the store and is Warned.
+//   - ctx alive, error `context.Canceled`: the caller did not cancel, so the
+//     store did — that is also a fact about the store and is Warned.
+//
+// Narrowing it this way is what keeps the liveness of the line cheap to check:
+// a suppressed line is one we can say nothing about, and a line we emit is one
+// we can. (Counterfactual: drop either half and pass `context.DeadlineExceeded`
+// under a canceled ctx — the store's own fault goes silent.)
+func logSessionEventsReadFailure(ctx context.Context, what, agentID, sessionID string, sinceSeq int64, err error) {
+	attrs := []any{"agent", agentID, "session", sessionID, "since", sinceSeq, "error", err}
+	if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		slog.Debug(what+": the reader went away first", attrs...)
+		return
+	}
+	slog.Warn(what, attrs...)
 }

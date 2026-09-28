@@ -1685,15 +1685,9 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 	events := newChatEventWriter(w, flusher, sinceSeq)
 
 	// Replay missed events from the persistent log.
-	if s.dataStore != nil {
-		rows, err := s.dataStore.ListSessionEventsSince(r.Context(), uid, agentID, sessionID, events.cursor())
-		if err != nil {
-			slog.Warn("session_events replay failed", "agent", agentID, "session", sessionID, "since", events.cursor(), "error", err)
-		}
-		// Same rule as the tail below, because it is the same log: a live-only type is not
-		// fanned out from here either (`emitPersisted` carries the reason).
-		events.emitPersisted(rows)
-	}
+	// Same rule as the tail below, because it is the same log: a live-only type is not
+	// fanned out from here either (`emitPersisted` carries the reason).
+	events.emitPersisted(s.replaySessionEvents(r.Context(), uid, agentID, sessionID, events.cursor()))
 
 	// Legacy webChan path: cron-fired bus.Outbound messages. Kept until
 	// the cron path is refactored to emit through the chat-event hub
